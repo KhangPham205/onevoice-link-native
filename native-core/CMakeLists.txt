@@ -31,7 +31,11 @@ endif()
 # inference path must keep numerically well-defined reductions/accumulations.
 set(CMAKE_CXX_FLAGS_RELEASE  "-O3 -flto -DNDEBUG")
 set(CMAKE_C_FLAGS_RELEASE    "-O3 -flto -DNDEBUG")
-set(CMAKE_SHARED_LINKER_FLAGS "-flto -Wl,-O1 -Wl,--gc-sections")
+# -Wl,-z,max-page-size=16384 : Android 15+ (API 35) requires 16 KB ELF segment
+# alignment for native libs to load on 16 KB-page devices. Oboe sets this on
+# itself (PRIVATE), so it does NOT propagate to libonevoice_core.so — apply it
+# here explicitly. (Only affects shared libs; Oboe is static, so it's untouched.)
+set(CMAKE_SHARED_LINKER_FLAGS "-flto -Wl,-O1 -Wl,--gc-sections -Wl,-z,max-page-size=16384")
 
 # Hide symbols by default; only JNI extern "C" entry points are exported.
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
