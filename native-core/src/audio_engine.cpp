@@ -29,17 +29,19 @@ int AudioEngine::init() {
     using namespace oboe;
 
     // ---- Input (capture) stream ------------------------------------------
+    // Oboe's fluent setters return AudioStreamBuilder* (not a reference), so the
+    // chain uses `.` on the temporary and `->` on every subsequent call.
     auto inResult = AudioStreamBuilder()
                         .setDirection(Direction::Input)
-                        .setPerformanceMode(PerformanceMode::LowLatency)
-                        .setSharingMode(SharingMode::Exclusive)
-                        .setFormat(AudioFormat::I16)
-                        .setChannelCount(kChannelCount)
-                        .setSampleRate(kSampleRate)
-                        .setFramesPerCallback(kFramesPerCallback)
-                        .setDataCallback(this)
-                        .setErrorCallback(this)
-                        .openStream(inputStream_);
+                        ->setPerformanceMode(PerformanceMode::LowLatency)
+                        ->setSharingMode(SharingMode::Exclusive)
+                        ->setFormat(AudioFormat::I16)
+                        ->setChannelCount(kChannelCount)
+                        ->setSampleRate(kSampleRate)
+                        ->setFramesPerCallback(kFramesPerCallback)
+                        ->setDataCallback(this)
+                        ->setErrorCallback(this)
+                        ->openStream(inputStream_);
     if (inResult != Result::OK) {
         LOGE("Input stream open failed: %s", convertToText(inResult));
         return -1;
@@ -51,17 +53,17 @@ int AudioEngine::init() {
     // essential at a 95 dB industrial site.
     auto outResult = AudioStreamBuilder()
                          .setDirection(Direction::Output)
-                         .setPerformanceMode(PerformanceMode::LowLatency)
-                         .setSharingMode(SharingMode::Exclusive)
-                         .setFormat(AudioFormat::I16)
-                         .setChannelCount(kChannelCount)
-                         .setSampleRate(kSampleRate)
-                         .setFramesPerCallback(kFramesPerCallback)
-                         .setUsage(Usage::VoiceCommunication)
-                         .setContentType(ContentType::Speech)
-                         .setDataCallback(this)
-                         .setErrorCallback(this)
-                         .openStream(outputStream_);
+                         ->setPerformanceMode(PerformanceMode::LowLatency)
+                         ->setSharingMode(SharingMode::Exclusive)
+                         ->setFormat(AudioFormat::I16)
+                         ->setChannelCount(kChannelCount)
+                         ->setSampleRate(kSampleRate)
+                         ->setFramesPerCallback(kFramesPerCallback)
+                         ->setUsage(Usage::VoiceCommunication)
+                         ->setContentType(ContentType::Speech)
+                         ->setDataCallback(this)
+                         ->setErrorCallback(this)
+                         ->openStream(outputStream_);
     if (outResult != Result::OK) {
         LOGE("Output stream open failed: %s", convertToText(outResult));
         return -1;

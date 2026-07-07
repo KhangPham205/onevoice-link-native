@@ -129,7 +129,7 @@ bool QnnInference::loadBackend_() {
     }
     state_->api = &state_->interface;
 
-    if (QNN_SUCCESS != state_->api->backendCreate(
+    if (QNN_SUCCESS != state_->api->QNN_INTERFACE_VER_NAME.backendCreate(
             /*logHandle=*/nullptr,
             /*backendConfig=*/nullptr,
             &state_->backend)) {
@@ -151,7 +151,7 @@ bool QnnInference::loadBackend_() {
 // ---------------------------------------------------------------------------
 bool QnnInference::createContextFromBinary_() {
 #if ONEVOICE_HAS_QNN
-    if (QNN_SUCCESS != state_->api->deviceCreate(
+    if (QNN_SUCCESS != state_->api->QNN_INTERFACE_VER_NAME.deviceCreate(
             state_->backend, /*deviceConfig=*/nullptr, &state_->device)) {
         LOGE("deviceCreate failed");
         return false;
@@ -163,7 +163,7 @@ bool QnnInference::createContextFromBinary_() {
         return false;
     }
 
-    if (QNN_SUCCESS != state_->api->contextCreateFromBinary(
+    if (QNN_SUCCESS != state_->api->QNN_INTERFACE_VER_NAME.contextCreateFromBinary(
             state_->device,
             /*deviceConfig=*/nullptr,
             /*contextConfig=*/nullptr,
@@ -186,7 +186,7 @@ bool QnnInference::createContextFromBinary_() {
 // ---------------------------------------------------------------------------
 bool QnnInference::retrieveGraph_() {
 #if ONEVOICE_HAS_QNN
-    if (QNN_SUCCESS != state_->api->graphRetrieve(
+    if (QNN_SUCCESS != state_->api->QNN_INTERFACE_VER_NAME.graphRetrieve(
             state_->context, cfg_.graphName.c_str(), &state_->graph)) {
         LOGE("graphRetrieve(\"%s\") failed", cfg_.graphName.c_str());
         return false;
@@ -304,14 +304,14 @@ void QnnInference::shutdown() {
 
 #if ONEVOICE_HAS_QNN
     if (state_ && state_->api) {
-        if (state_->inputMem)   state_->api->memDeRegister(&state_->inputMem, 1);
-        if (state_->outputMem)  state_->api->memDeRegister(&state_->outputMem, 1);
-        if (state_->graph)      state_->api->graphFree(state_->graph);
-        if (state_->context)    state_->api->contextFree(state_->context,
-                                                        /*deviceConfig=*/nullptr);
-        if (state_->device)     state_->api->deviceFree(state_->device,
-                                                        /*deviceConfig=*/nullptr);
-        if (state_->backend)    state_->api->backendFree(state_->backend);
+        const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
+        if (state_->inputMem)   qnn.memDeRegister(&state_->inputMem, 1);
+        if (state_->outputMem)  qnn.memDeRegister(&state_->outputMem, 1);
+        // No graphFree in the QNN API: a graph is owned by its context and is
+        // released by contextFree below.
+        if (state_->context)    qnn.contextFree(state_->context, /*profile=*/nullptr);
+        if (state_->device)     qnn.deviceFree(state_->device);
+        if (state_->backend)    qnn.backendFree(state_->backend);
     }
 #endif
     if (state_ && state_->backendLib) dlclose(state_->backendLib);

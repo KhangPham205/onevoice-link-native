@@ -71,8 +71,10 @@ private:
     // Large enough to absorb a transient AI stall without dropping speech.
     static constexpr std::size_t kRingCapacity = 1u << 15;
 
-    oboe::ManagedStream inputStream_;
-    oboe::ManagedStream outputStream_;
+    // shared_ptr (not oboe::ManagedStream, which is a unique_ptr): this is the
+    // type AudioStreamBuilder::openStream(std::shared_ptr<AudioStream>&) fills.
+    std::shared_ptr<oboe::AudioStream> inputStream_;
+    std::shared_ptr<oboe::AudioStream> outputStream_;
 
     SpscRingBuffer<int16_t> inputBuffer_{kRingCapacity};
     SpscRingBuffer<int16_t> outputBuffer_{kRingCapacity};
