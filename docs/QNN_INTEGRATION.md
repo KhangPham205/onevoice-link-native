@@ -89,7 +89,7 @@ System.loadLibrary("onevoice_core")     → loads cleanly (no QNN in NEEDED)
 | `graphExecute` + PCM↔INT8 (de)quant | 🚧 placeholder — silence stub |
 | Serialized context binary (`.bin`) | ⛔ not yet supplied; `initEngine` fails at `contextCreateFromBinary` until it is |
 
-**To finish the inference path:** supply a QNN context `.bin` compiled for the target HTP, fill in `mapTensors_` with the model's tensor names/shapes and quant params, implement the (de)quantization in `execute()`, and (optionally) wire `registerZeroCopyMem_` for DMA inputs.
+**To finish the inference path:** supply a QNN context `.bin` compiled for the target HTP, fill in `mapTensors_` with the model's tensor names/shapes and quant params, implement the (de)quantization in `execute()`, and (optionally) wire `registerZeroCopyMem_` for DMA inputs. The exact information the model team must hand over is specified in [MODEL_HANDOFF.md](MODEL_HANDOFF.md).
 
 ## Bring-up correctness fixes
 

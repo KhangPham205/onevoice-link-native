@@ -4,23 +4,33 @@ OneVoice Link is built around one hard rule: **the realtime audio→AI→audio p
 
 ## Component map
 
-```
-                       Kotlin / Compose (UI + lifecycle only)
-                       ────────────────────────────────────────
-  MainActivity ─────▶ OneVoiceNative ──(JNI: init/start/stop/destroy)──┐
-                                                                        │
-  ══════════════════════════════ JNI boundary ═════════════════════════╪══════════
-                                                                        │
-                       C++ realtime core  (libonevoice_core.so)         ▼
-  ┌──────────────┐   ┌─────────────────┐   ┌───────────────┐   ┌────────────────────┐
-  │ Oboe capture │──▶│  input SPSC ring │──▶│   AI worker   │──▶│  QNN / Hexagon HTP │
-  │  (RT thread) │   │  (lock-free)     │   │ (native thread)│   │  graphExecute()    │
-  └──────────────┘   └─────────────────┘   └───────┬───────┘   └─────────┬──────────┘
-                                                    │  synthesized PCM     │
-  ┌──────────────┐   ┌─────────────────┐            ▼                     │
-  │ Oboe playback│◀──│ output SPSC ring │◀───────────────────────────────┘
-  │  (RT thread) │   │  (lock-free)     │
-  └──────────────┘   └─────────────────┘
+```mermaid
+flowchart TB
+  subgraph UI["Kotlin / Compose"]
+    MainActivity["MainActivity<br/>permissions + lifecycle"]
+    OneVoiceNative["OneVoiceNative<br/>Kotlin JNI facade"]
+    MainActivity --> OneVoiceNative
+  end
+
+  JNI[["JNI boundary<br/>init / start / stop / destroy only"]]
+  OneVoiceNative --> JNI
+
+  subgraph Core["C++ realtime core - libonevoice_core.so"]
+    direction LR
+    Mic([Mic])
+    Capture["Oboe capture<br/>RT thread"]
+    InputRing["input SPSC ring<br/>lock-free"]
+    Worker["AI worker<br/>native thread"]
+    QNN["QNN / Hexagon HTP<br/>graphExecute()"]
+    OutputRing["output SPSC ring<br/>lock-free"]
+    Playback["Oboe playback<br/>RT thread"]
+    Speaker([Speaker])
+
+    Mic --> Capture --> InputRing --> Worker --> QNN
+    QNN -->|"synthesized PCM"| OutputRing --> Playback --> Speaker
+  end
+
+  JNI -. "lifecycle control<br/>no audio frames" .-> Worker
 ```
 
 | Layer | File(s) | Responsibility |

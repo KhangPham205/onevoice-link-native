@@ -22,21 +22,23 @@ OneVoice Link turns a Snapdragon® phone into a real-time, offline interpreter. 
 
 ## Architecture at a glance
 
-```
-┌───────────────────────── Android app (Kotlin / Jetpack Compose) ─────────────────────────┐
-│   MainActivity  ──▶  OneVoiceNative  (JNI bridge, com.onevoice.link.core)                  │
-│                          │   initEngine · startEngine · stopEngine · destroyEngine         │
-└──────────────────────────┼────────────────────────────────────────────────────────────────┘
-                          │  JNI boundary — 4 lifecycle calls only, no audio data crosses here
-┌──────────────────────────▼──────────────────── libonevoice_core.so (C++20) ────────────────┐
-│                                                                                              │
-│   Mic ─▶ Oboe capture ─▶ ┌───────────┐ ─▶ AI worker ─▶ QNN / Hexagon HTP ──┐                │
-│          (RT thread)     │ SPSC ring │    (native      (INT8 S2ST graph)   │                │
-│                          └───────────┘     thread)                          ▼               │
-│   Speaker ◀─ Oboe playback ◀─ ┌───────────┐ ◀──────────── synthesized PCM ◀─┘               │
-│              (RT thread)      │ SPSC ring │                                                  │
-│                               └───────────┘                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  MainActivity["MainActivity<br/>Compose UI"] --> Bridge["OneVoiceNative<br/>JNI bridge"]
+  Bridge --> Lifecycle["init / start / stop / destroy"]
+
+  subgraph Core["libonevoice_core.so - C++20 realtime hot path"]
+    Engine["Native engine state"]
+    Mic([Mic]) --> Capture["Oboe capture<br/>RT callback"]
+    Capture --> InputRing["Input SPSC ring<br/>lock-free"]
+    InputRing --> Worker["AI worker<br/>native thread"]
+    Worker --> QNN["QNN / Hexagon HTP<br/>INT8 S2ST graph"]
+    QNN --> OutputRing["Output SPSC ring<br/>lock-free"]
+    OutputRing --> Playback["Oboe playback<br/>RT callback"]
+    Playback --> Speaker([Speaker])
+  end
+
+  Lifecycle -. "lifecycle only<br/>no audio buffers" .-> Engine
 ```
 
 Full details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -47,21 +49,21 @@ Full details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ```
 onevoice-link-native/
-├── android-app/            Jetpack Compose app (Kotlin DSL, Gradle version catalog)
-│   └── app/src/main/
-│       ├── java/com/onevoice/link/
-│       │   ├── MainActivity.kt          GSD dashboard + runtime permissions + lifecycle
-│       │   └── core/OneVoiceNative.kt   JNI bridge to the native core
-│       ├── jniLibs/arm64-v8a/           packaged native libs (QNN staged here by Gradle)
-│       └── AndroidManifest.xml          RECORD_AUDIO + Bluetooth (P2P) permissions
-├── native-core/            The C++ realtime engine → libonevoice_core.so
-│   ├── CMakeLists.txt
-│   ├── include/            audio_engine.h · ring_buffer.h · qnn_inference.h
-│   ├── src/                main_jni.cpp · audio_engine.cpp · ring_buffer.cpp · qnn_inference.cpp
-│   └── third_party/
-│       ├── oboe/           Google Oboe (committed, built from source)
-│       └── qnn_sdk/        Qualcomm QNN SDK (VENDORED LOCALLY, NOT committed — see below)
-└── docs/                   Architecture, build, JNI API, and QNN integration guides
+|-- android-app/            Jetpack Compose app (Kotlin DSL, Gradle version catalog)
+|   `-- app/src/main/
+|       |-- java/com/onevoice/link/
+|       |   |-- MainActivity.kt          GSD dashboard + runtime permissions + lifecycle
+|       |   `-- core/OneVoiceNative.kt   JNI bridge to the native core
+|       |-- jniLibs/arm64-v8a/           packaged native libs (QNN staged here by Gradle)
+|       `-- AndroidManifest.xml          RECORD_AUDIO + Bluetooth (P2P) permissions
+|-- native-core/            C++ realtime engine -> libonevoice_core.so
+|   |-- CMakeLists.txt
+|   |-- include/            audio_engine.h, ring_buffer.h, qnn_inference.h
+|   |-- src/                main_jni.cpp, audio_engine.cpp, ring_buffer.cpp, qnn_inference.cpp
+|   `-- third_party/
+|       |-- oboe/           Google Oboe (committed, built from source)
+|       `-- qnn_sdk/        Qualcomm QNN SDK (VENDORED LOCALLY, NOT committed; see below)
+`-- docs/                   Architecture, build, JNI API, and QNN integration guides
 ```
 
 ---
@@ -101,6 +103,7 @@ See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags,
 | [docs/BUILD.md](docs/BUILD.md) | Toolchain, QNN vendoring, Gradle↔CMake binding, compiler flags, troubleshooting. |
 | [docs/JNI_API.md](docs/JNI_API.md) | The native ABI contract and the Kotlin bridge (`OneVoiceNative`). |
 | [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md) | QNN SDK layout, packaging `.so` into the APK, and the runtime `dlopen` chain. |
+| [docs/MODEL_HANDOFF.md](docs/MODEL_HANDOFF.md) | Contract for the AI/model team: everything to deliver alongside the `.bin`. |
 
 ---
 
