@@ -151,6 +151,9 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeInitEngine(
 JNIEXPORT jboolean JNICALL
 Java_com_onevoice_link_core_OneVoiceNative_nativeStartEngine(JNIEnv* /*env*/, jclass /*clazz*/) {
     if (!g_engine) return JNI_FALSE;
+    // Idempotent: a second start while running would move-assign a new thread
+    // onto the still-joinable worker, which calls std::terminate().
+    if (g_engine->running.load(std::memory_order_acquire)) return JNI_TRUE;
     g_engine->running.store(true, std::memory_order_release);
     g_engine->worker = std::thread(workerLoop, g_engine.get());
     if (g_engine->audio->start() != 0) {

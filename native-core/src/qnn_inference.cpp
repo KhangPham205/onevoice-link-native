@@ -114,19 +114,45 @@ bool QnnInference::loadBackend_() {
         LOGE("dlopen(\"%s\") failed: %s", cfg_.backendLibPath.c_str(), dlerror());
         return false;
     }
-    // The backend exposes a single provider symbol; it fills in a versioned
-    // QnnInterface_t from which the active API table is selected by macro.
-    using GetProviderFn = Qnn_ErrorHandle_t (*)(QnnInterface_t*);
-    auto getProvider = reinterpret_cast<GetProviderFn>(
-        dlsym(state_->backendLib, "QnnInterface_getProviderInterface"));
-    if (!getProvider) {
-        LOGE("dlsym(QnnInterface_getProviderInterface) failed: %s", dlerror());
+    // The backend exports QnnInterface_getProviders(), which returns a *list* of
+    // interface providers. We must pick the one whose core API version matches
+    // the headers we compiled against, because that is the union member
+    // (QNN_INTERFACE_VER_NAME) we read the function table from.
+    using GetProvidersFn =
+        Qnn_ErrorHandle_t (*)(const QnnInterface_t***, uint32_t*);
+    auto getProviders = reinterpret_cast<GetProvidersFn>(
+        dlsym(state_->backendLib, "QnnInterface_getProviders"));
+    if (!getProviders) {
+        LOGE("dlsym(QnnInterface_getProviders) failed: %s", dlerror());
         return false;
     }
-    if (QNN_SUCCESS != getProvider(&state_->interface)) {
-        LOGE("QnnInterface_getProviderInterface returned error");
+
+    const QnnInterface_t** providers = nullptr;
+    uint32_t numProviders = 0;
+    if (QNN_SUCCESS != getProviders(&providers, &numProviders) ||
+        !providers || numProviders == 0) {
+        LOGE("QnnInterface_getProviders returned no providers");
         return false;
     }
+
+    const QnnInterface_t* chosen = nullptr;
+    for (uint32_t i = 0; i < numProviders; ++i) {
+        const Qnn_Version_t& ver = providers[i]->apiVersion.coreApiVersion;
+        // Same major = ABI-compatible; minor is additive, so >= is safe.
+        if (ver.major == QNN_API_VERSION_MAJOR &&
+            ver.minor >= QNN_API_VERSION_MINOR) {
+            chosen = providers[i];
+            break;
+        }
+    }
+    if (!chosen) {
+        LOGE("No QNN provider matches core API v%d.%d",
+             QNN_API_VERSION_MAJOR, QNN_API_VERSION_MINOR);
+        return false;
+    }
+    // Copy the selected interface so our api pointer does not depend on the
+    // provider-list storage remaining valid.
+    state_->interface = *chosen;
     state_->api = &state_->interface;
 
     if (QNN_SUCCESS != state_->api->QNN_INTERFACE_VER_NAME.backendCreate(
@@ -151,8 +177,11 @@ bool QnnInference::loadBackend_() {
 // ---------------------------------------------------------------------------
 bool QnnInference::createContextFromBinary_() {
 #if ONEVOICE_HAS_QNN
+    // deviceCreate(logger, config, &device) — there is NO backend parameter;
+    // passing state_->backend here (as the original code did) silently aliased
+    // the backend handle into the logger slot (both are void*).
     if (QNN_SUCCESS != state_->api->QNN_INTERFACE_VER_NAME.deviceCreate(
-            state_->backend, /*deviceConfig=*/nullptr, &state_->device)) {
+            /*logger=*/nullptr, /*deviceConfig=*/nullptr, &state_->device)) {
         LOGE("deviceCreate failed");
         return false;
     }
@@ -163,14 +192,17 @@ bool QnnInference::createContextFromBinary_() {
         return false;
     }
 
+    // contextCreateFromBinary(backend, device, config, binary, size, context, profile).
+    // The original code shifted the arguments: it passed device into the backend
+    // slot and nullptr into the device slot (all handles are void*, so it compiled).
     if (QNN_SUCCESS != state_->api->QNN_INTERFACE_VER_NAME.contextCreateFromBinary(
+            state_->backend,
             state_->device,
-            /*deviceConfig=*/nullptr,
             /*contextConfig=*/nullptr,
             blob.data(),
             blob.size(),
             &state_->context,
-            /*signal=*/nullptr)) {
+            /*profile=*/nullptr)) {
         LOGE("contextCreateFromBinary failed");
         return false;
     }

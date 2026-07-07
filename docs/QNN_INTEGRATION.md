@@ -31,8 +31,8 @@ Using the macro (rather than a hard-coded `v2_23`) keeps the code portable acros
 
 `QnnInference::init()` runs these steps in order, tearing down on any failure:
 
-1. **`loadBackend_`** — `dlopen(backendPath)` (e.g. `libQnnHtp.so`), `dlsym` the provider entry point, fill `QnnInterface_t`, then `backendCreate`.
-2. **`createContextFromBinary_`** — `deviceCreate`, read the `.bin` into memory, `contextCreateFromBinary` (loads the pre-compiled graphs straight onto the HTP — no on-device compilation).
+1. **`loadBackend_`** — `dlopen(backendPath)` (e.g. `libQnnHtp.so`), `dlsym("QnnInterface_getProviders")`, enumerate the returned providers and select the one whose `coreApiVersion` matches the compiled headers (`QNN_API_VERSION_MAJOR`, `minor >=`), copy its interface, then `backendCreate(logger=null, config=null, &backend)`.
+2. **`createContextFromBinary_`** — `deviceCreate(logger=null, config=null, &device)`, read the `.bin` into memory, `contextCreateFromBinary(backend, device, config=null, blob, size, &context, profile=null)` (loads the pre-compiled graphs straight onto the HTP — no on-device compilation).
 3. **`retrieveGraph_`** — `graphRetrieve(graphName)`.
 4. **`mapTensors_`** 🚧 — bind the raw-audio input and synthesized-PCM output tensors to the model's static INT8 shapes. **Placeholder** (model-specific; owned by the AI team).
 5. **`registerZeroCopyMem_`** 🚧 — register ION/FastRPC buffers with `QnnMem_register` so the HTP DMAs input/output directly, avoiding a per-`execute()` copy. **Placeholder.**
@@ -91,4 +91,15 @@ System.loadLibrary("onevoice_core")     → loads cleanly (no QNN in NEEDED)
 
 **To finish the inference path:** supply a QNN context `.bin` compiled for the target HTP, fill in `mapTensors_` with the model's tensor names/shapes and quant params, implement the (de)quantization in `execute()`, and (optionally) wire `registerZeroCopyMem_` for DMA inputs.
 
-**Known semantic note (unchanged from the original core):** `createContextFromBinary_` passes the backend handle where `deviceCreate` expects a log handle — both are `void*` so it compiles, but the AI/model team should review the intended argument wiring before device bring-up.
+## Bring-up correctness fixes
+
+Every QNN handle is a `void*` typedef, so argument mistakes on the C API compile cleanly and only surface as runtime failures. These were found and fixed in the bring-up path:
+
+| Fix | Was | Now |
+|---|---|---|
+| Provider entry point | `dlsym("QnnInterface_getProviderInterface")` — **symbol does not exist**; load would always fail | `dlsym("QnnInterface_getProviders")`, enumerate the list, and select the provider whose `coreApiVersion` matches the compiled headers |
+| `deviceCreate` | backend handle passed into the **logger** slot | `deviceCreate(logger=null, config=null, &device)` — there is no backend parameter |
+| `contextCreateFromBinary` | arguments **shifted** (device passed as backend, null as device) | `(backend, device, config, binary, size, &context, profile)` in the correct order |
+| `nativeStartEngine` (JNI) | a second start move-assigned a new thread onto the live worker → `std::terminate()` | idempotent — a start while running is a no-op returning `true` |
+
+There are **no** standalone `graphFree` (graphs are freed with the context) and `deviceFree` takes a single argument — both reflected in `shutdown()`.

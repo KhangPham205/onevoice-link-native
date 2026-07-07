@@ -62,7 +62,7 @@ fun initialize(nativeLibDir: String, modelDir: String): Boolean =
 - **State machine:** `NOT_INITIALIZED → (init) → INITIALIZED → (start) → RUNNING → (stop) → INITIALIZED → (destroy) → NOT_INITIALIZED`.
 - **Serialize the calls.** The native side keeps a single global engine and assumes the Kotlin layer does not call these concurrently. `MainActivity` runs each call on `Dispatchers.IO` one at a time and gates the UI on a `busy` flag.
 - **`nativeInitEngine`** opens audio + loads QNN but does **not** start audio (so the AI thread can be primed first). Idempotent: a second call returns `true` without re-initializing.
-- **`nativeStartEngine`** spawns the AI worker and starts full-duplex audio; returns `false` (and rolls back) if the stream fails to start.
+- **`nativeStartEngine`** spawns the AI worker and starts full-duplex audio; returns `false` (and rolls back) if the stream fails to start. Idempotent — a call while already running is a no-op returning `true` (a second start would otherwise move-assign onto the live worker thread and `std::terminate()`).
 - **`nativeStopEngine`** joins the worker and stops audio but keeps the engine initialized for a fast restart.
 - **`nativeDestroyEngine`** fully releases everything. **Safe to call unconditionally** — it no-ops if the engine was never created — so it is wired directly into `Activity.onDestroy()`.
 - Calls may fail gracefully: `initialize`/`start` are wrapped in `runCatching` in the UI so a native error surfaces as a status message rather than crashing the process.
