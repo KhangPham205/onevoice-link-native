@@ -32,3 +32,9 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Vendored Qualcomm QNN SDK — large, often NDA prebuilt libs (.so + headers).
+# Vendored locally under native-core/third_party/qnn_sdk; CMake falls back to
+# stub mode (via __has_include) when absent, so it must NOT be committed.
+# Note: google/oboe IS committed (git subtree) and is intentionally tracked.
+/native-core/third_party/qnn_sdk/
