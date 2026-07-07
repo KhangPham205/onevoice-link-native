@@ -23,19 +23,19 @@ OneVoice Link turns a Snapdragon® phone into a real-time, offline interpreter. 
 ## Architecture at a glance
 
 ```
-┌───────────────────────── Android app (Kotlin / Jetpack Compose) ─────────────────────────┐
-│   MainActivity  ──▶  OneVoiceNative  (JNI bridge, com.onevoice.link.core)                  │
-│                          │   initEngine · startEngine · stopEngine · destroyEngine         │
+┌───────────────────────── Android app (Kotlin / Jetpack Compose) ──────────────────────────┐
+│   MainActivity  ──▶  OneVoiceNative  (JNI bridge, com.onevoice.link.core)                │
+│                          │   initEngine · startEngine · stopEngine · destroyEngine        │
 └──────────────────────────┼────────────────────────────────────────────────────────────────┘
-                          │  JNI boundary — 4 lifecycle calls only, no audio data crosses here
-┌──────────────────────────▼──────────────────── libonevoice_core.so (C++20) ────────────────┐
-│                                                                                              │
-│   Mic ─▶ Oboe capture ─▶ ┌───────────┐ ─▶ AI worker ─▶ QNN / Hexagon HTP ──┐                │
-│          (RT thread)     │ SPSC ring │    (native      (INT8 S2ST graph)   │                │
-│                          └───────────┘     thread)                          ▼               │
-│   Speaker ◀─ Oboe playback ◀─ ┌───────────┐ ◀──────────── synthesized PCM ◀─┘               │
-│              (RT thread)      │ SPSC ring │                                                  │
-│                               └───────────┘                                                  │
+                           │  JNI boundary — 4 lifecycle calls only, no audio data crosses here
+┌──────────────────────────▼──────────────────── libonevoice_core.so (C++20) ──────────────┐
+│                                                                                          │
+│   Mic ─▶ Oboe capture ─▶ ┌───────────┐ ─▶ AI worker ─▶ QNN / Hexagon HTP ───┐          │
+│          (RT thread)      │ SPSC ring │    (native      (INT8 S2ST graph)     │           │
+│                           └───────────┘     thread)                           ▼           │
+│   Speaker ◀─ Oboe playback ◀─ ┌───────────┐ ◀──────────── synthesized PCM ◀─┘          │
+│              (RT thread)       │ SPSC ring │                                              │
+│                                └───────────┘                                              │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
