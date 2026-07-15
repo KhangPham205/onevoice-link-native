@@ -23,7 +23,7 @@ OneVoice Link turns a Snapdragon phone into a real-time, offline interpreter. Sp
 ## Architecture at a glance
 
 ```text
-+---------------- Android app (Kotlin / Jetpack Compose) ----------------+
++---------------- Android app (Kotlin / Jetpack Compose) -----------------+
 | MainActivity -> OneVoiceNative (JNI bridge, com.onevoice.link.core)     |
 |                 initEngine / startEngine / stopEngine / destroyEngine   |
 +-------------------------------+-----------------------------------------+
