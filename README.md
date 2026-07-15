@@ -102,6 +102,9 @@ See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags,
 | [docs/BUILD.md](docs/BUILD.md) | Toolchain, QNN vendoring, Gradle <-> CMake binding, compiler flags, troubleshooting. |
 | [docs/JNI_API.md](docs/JNI_API.md) | The native ABI contract and the Kotlin bridge (`OneVoiceNative`). |
 | [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md) | QNN SDK layout, packaging `.so` into the APK, and the runtime `dlopen` chain. |
+| [docs/MODEL_HANDOFF.md](docs/MODEL_HANDOFF.md) | Contract for the AI/model team: everything to deliver alongside the `.bin`. |
+| [docs/EMULATOR_TESTING.md](docs/EMULATOR_TESTING.md) | Running the full cascade on the emulator with HuggingFace models (no NPU needed). |
+| [docs/HF_INTEGRATION_REPORT.md](docs/HF_INTEGRATION_REPORT.md) | Integration report (vi): what was integrated for emulator testing — libraries, model conversion, issues & fixes. |
 
 ---
 

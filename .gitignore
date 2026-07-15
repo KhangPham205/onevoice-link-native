@@ -38,3 +38,12 @@ google-services.json
 # stub mode (via __has_include) when absent, so it must NOT be committed.
 # Note: google/oboe IS committed (git subtree) and is intentionally tracked.
 /native-core/third_party/qnn_sdk/
+
+# HuggingFace models for the emulator pipeline (multi-GB; see docs/EMULATOR_TESTING.md)
+/models-src/
+/models-hf/
+# sherpa-onnx AAR (fetched by tools/models/fetch-sherpa-assets.ps1)
+/android-app/app/libs/*.aar
+# Python conversion tooling
+/tools/models/.venv/
+/tools/models/.pip-cache/

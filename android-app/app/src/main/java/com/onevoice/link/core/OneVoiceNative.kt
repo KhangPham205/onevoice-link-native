@@ -18,11 +18,19 @@ package com.onevoice.link.core
  */
 object OneVoiceNative {
 
+    /**
+     * Whether libonevoice_core.so loaded for this ABI. The core now builds for
+     * x86_64 too (QNN-stub mode), so this is normally true even on the
+     * emulator — but calling any `external fun` with [isLoaded] == false would
+     * throw UnsatisfiedLinkError, so backends must check it first.
+     */
+    val isLoaded: Boolean
+
     init {
         // Loads libonevoice_core.so from the APK's nativeLibraryDir. Its QNN
         // NEEDED deps (libQnnSystem/libQnnHtp/…) are staged there by the
         // copyQnnRuntimeLibs Gradle task, so this call does not UnsatisfiedLinkError.
-        System.loadLibrary("onevoice_core")
+        isLoaded = runCatching { System.loadLibrary("onevoice_core") }.isSuccess
     }
 
     // ---- Raw JNI ABI (do not change arity/order without the C++ side) --------

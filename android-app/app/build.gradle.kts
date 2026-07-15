@@ -68,9 +68,12 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Task 1 — realtime core is Snapdragon-only; build a single ABI.
+        // arm64-v8a: Snapdragon devices (QNN/HTP path).
+        // x86_64: Android Studio emulator (HF ONNX fallback path; the native
+        // core builds in QNN-stub mode there and nativeInitEngine returns false).
         ndk {
             abiFilters.add("arm64-v8a")
+            abiFilters.add("x86_64")
         }
 
         // Task 1 — inject the optimized C++ toolchain flags and shared STL.
@@ -109,6 +112,11 @@ android {
             // dynamic loader can mmap the libs directly on 16 KB-page devices
             // (Android 15+), matching how the core .so is aligned in CMake.
             useLegacyPackaging = false
+            // Both the sherpa-onnx AAR and onnxruntime-android carry a
+            // libonnxruntime.so for 32-bit ABIs we don't even package
+            // (abiFilters = arm64-v8a, x86_64 — where the static-link AAR has
+            // none and only the Maven ORT copy exists). Silence the collision.
+            pickFirsts.add("lib/**/libonnxruntime.so")
         }
     }
 
@@ -139,6 +147,15 @@ tasks.named("preBuild") {
 }
 
 dependencies {
+    // HF emulator pipeline: sherpa-onnx (ASR nemo_ctc + Kokoro TTS) ships as an
+    // official AAR from the k2-fsa GitHub releases — no Maven artifact exists.
+    // Fetch it once with:  tools/models/fetch-sherpa-assets.ps1
+    // static-link variant: ORT is linked INTO libsherpa-onnx-jni.so, so it
+    // doesn't collide with onnxruntime-android's libonnxruntime.so below.
+    implementation(files("libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar"))
+    // MarianMT vi->en runs on ONNX Runtime (Maven Central).
+    implementation(libs.onnxruntime.android)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

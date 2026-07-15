@@ -41,13 +41,17 @@ set(CMAKE_SHARED_LINKER_FLAGS "-flto -Wl,-O1 -Wl,--gc-sections -Wl,-z,max-page-s
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
-# ARMv8.2 dot-product + CRC + crypto help NEON vectorization that feeds the HTP.
 # Function/data sectioning lets the linker garbage-collect dead code (--gc-sections).
 add_compile_options(
-    $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+dotprod+crc+crypto>
     $<$<COMPILE_LANGUAGE:CXX>:-ffunction-sections>
     $<$<COMPILE_LANGUAGE:CXX>:-fdata-sections>
 )
+# ARMv8.2 dot-product + CRC + crypto help NEON vectorization that feeds the HTP.
+# arm64-only: the x86_64 build (Android Studio emulator, QNN stub mode) must not
+# see ARM -march flags.
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+dotprod+crc+crypto>)
+endif()
 
 # ----------------------------------------------------------------------------
 # Third-party dependency locations (vendored under native-core/third_party so
@@ -88,13 +92,16 @@ target_include_directories(onevoice_core PRIVATE
 # --- Qualcomm QNN prebuilt backend ------------------------------------------
 # libQnnHtp.so drives the Hexagon HTP and is dlopen'd at runtime.
 # libQnnSystem.so loads the serialized .dlc/.bin context onto the device.
-if(EXISTS "${QNN_SDK_DIR}/lib/aarch64-android")
+# arm64-only: the prebuilts are aarch64; on x86_64 (emulator) the core still
+# compiles against the QNN headers but the runtime dlopen simply fails and
+# nativeInitEngine returns false — the Kotlin layer falls back to the HF path.
+if(EXISTS "${QNN_SDK_DIR}/lib/aarch64-android" AND ANDROID_ABI STREQUAL "arm64-v8a")
     target_link_directories(onevoice_core PRIVATE ${QNN_SDK_DIR}/lib/aarch64-android)
     target_link_libraries(onevoice_core PRIVATE QnnSystem QnnHtp QnnHtpPrepare)
 else()
     message(WARNING
-        "QNN SDK libs not found at ${QNN_SDK_DIR}; QNN calls will compile as "
-        "stubs via __has_include guards. Vendor the SDK there to enable HTP.")
+        "QNN SDK libs not linked for ABI ${ANDROID_ABI}; QNN is available only "
+        "on arm64-v8a with the SDK vendored under ${QNN_SDK_DIR}.")
 endif()
 
 # --- Android platform libraries ---------------------------------------------
