@@ -38,3 +38,24 @@ google-services.json
 # stub mode (via __has_include) when absent, so it must NOT be committed.
 # Note: google/oboe IS committed (git subtree) and is intentionally tracked.
 /native-core/third_party/qnn_sdk/
+
+# QNN context binaries (.bin) compiled AOT for Hexagon HTP v73 — ~5.9 GB.
+# Delivered out-of-band by the model team; see onevoice-npu-bins/HANDOFF.md.
+# The deploy layout under models-npu/ is generated from these by
+# tools/models/stage-npu-models.sh, so it is regenerable and also ignored.
+/onevoice-npu-bins/
+/models-npu/
+
+# HuggingFace source + converted models for the CPU reference pipeline (multi-GB).
+/models-src/
+/models-hf/
+# Python conversion tooling
+/tools/models/.venv/
+/tools/models/.pip-cache/
+# Prebuilt native libs dropped in for NDK-less UI preview builds.
+/android-app/app/src/main/jniLibs/arm64-v8a/*.so
+
+# Third-party/licensed runtime binaries are fetched or copied from local SDKs.
+# Keep their integration code and manifests in Git, not the binary payloads.
+/android-app/app/libs/*.aar
+/android-app/app/src/main/assets/dsp/*.so

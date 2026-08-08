@@ -1,3 +1,90 @@
 <resources>
     <string name="app_name">OneVoice Link</string>
+
+    <!-- Header -->
+    <string name="header_tagline">Private • offline • on-device speech translation</string>
+    <string name="header_tagline_a11y">Private, offline, on-device speech to speech translation.</string>
+
+    <!-- Status card -->
+    <string name="status_card_overline">ENGINE STATUS</string>
+    <string name="stage_not_initialized">Not Initialized</string>
+    <string name="stage_initialized">Ready</string>
+    <string name="stage_running">Listening / Translating</string>
+
+    <!-- Status messages -->
+    <string name="msg_idle">Idle — load the selected models to begin.</string>
+    <string name="msg_idle_offline">Offline CPU selected — load ASR, translation, and speech models to begin.</string>
+    <string name="msg_idle_qnn">QNN HTP selected — load and verify the context binaries.</string>
+    <string name="msg_initializing">Loading the selected models…</string>
+    <string name="msg_initializing_offline">Loading the complete offline ASR → MT → TTS pipeline…</string>
+    <string name="msg_initializing_qnn">Bringing up HTP and verifying the QNN cascade…</string>
+    <string name="msg_initialized">Models are ready.</string>
+    <string name="msg_initialized_offline">Offline speech translation is ready.</string>
+    <string name="msg_initialized_qnn">All QNN contexts loaded and graph contracts verified.</string>
+    <string name="msg_init_failed">Model loading failed.</string>
+    <string name="msg_native_error">Native error: %1$s</string>
+    <string name="msg_starting">Opening the microphone and starting the offline pipeline…</string>
+    <string name="msg_live">Listening. Speech and translation will appear below.</string>
+    <string name="msg_start_failed">Failed to start the audio stream.</string>
+    <string name="msg_stopping">Stopping stream…</string>
+    <string name="msg_stopped">Stopped. Models stay resident.</string>
+    <string name="msg_switching_backend">Releasing the current models and switching backend…</string>
+    <string name="msg_switching_direction">Releasing the current models and switching direction…</string>
+    <string name="msg_replaying">Replaying the last spoken translation.</string>
+    <string name="msg_replay_unavailable">No synthesized translation is ready to replay yet.</string>
+    <string name="msg_backend_error">%1$s</string>
+
+    <!-- Actions -->
+    <string name="action_initialize">Load Models</string>
+    <string name="action_load_offline">Load Offline Models</string>
+    <string name="action_verify_qnn">Verify QNN Cascade</string>
+    <string name="action_start_translating">Start Translating</string>
+    <string name="action_stop_translating">Stop Translating</string>
+    <string name="action_grant">Grant</string>
+
+    <!-- Mic permission -->
+    <string name="mic_granted">Microphone access granted</string>
+    <string name="mic_denied">Microphone access needed</string>
+    <string name="mic_denied_permanent_hint">Microphone was denied. Enable it for OneVoice Link in system settings.</string>
+    <string name="warn_mic_required">Grant microphone access to start the stream.</string>
+
+    <!-- Engine backend selector -->
+    <string name="backend_selector_overline">ENGINE BACKEND</string>
+    <string name="backend_hf">Offline CPU</string>
+    <string name="backend_qnn">QNN HTP · verify</string>
+
+    <!-- Conversation direction -->
+    <string name="direction_overline">DIRECTION</string>
+    <string name="direction_vi_en">VI → EN</string>
+    <string name="direction_en_vi">EN → VI</string>
+    <string name="direction_unavailable_asr_en">EN → VI needs an English ASR .bin — not in the model package yet (HANDOFF §4).</string>
+
+    <!-- Live text emitted by the runnable offline pipeline -->
+    <string name="translation_card_overline">LIVE TRANSLATION</string>
+    <string name="lang_vi">VIETNAMESE</string>
+    <string name="lang_en">ENGLISH</string>
+    <string name="translation_waiting_source">Your speech will appear here.</string>
+    <string name="translation_waiting_target">The translation will appear here.</string>
+
+    <!-- Model cascade -->
+    <string name="cascade_overline">MODEL CASCADE</string>
+    <string name="cascade_target">Target: %1$s · Hexagon %2$s</string>
+    <string name="cascade_summary">%1$d/%2$d stages · %3$s</string>
+    <string name="cascade_missing_hint">Push the binaries to %1$s</string>
+    <string name="stage_state_pending">queued</string>
+    <string name="stage_state_loading">loading…</string>
+    <string name="stage_state_loaded">%1$s · %2$.0f ms</string>
+    <string name="stage_state_missing">file not on device</string>
+    <string name="stage_state_failed">failed</string>
+
+    <!-- Scope banners: keep the capability boundary explicit per backend -->
+    <string name="scope_notice_offline">Runnable offline path: audio stays on the phone and is processed by the CPU ASR → MT → TTS pipeline.</string>
+    <string name="scope_notice_qnn">QNN verify-only path: context binaries are placed on the HTP and their graph contracts are checked. This backend does not execute speech translation yet.</string>
+
+    <!-- Accessibility -->
+    <string name="a11y_engine_status">Engine status: %1$s</string>
+    <string name="a11y_busy">Working</string>
+    <string name="a11y_grant_mic">Grant microphone permission</string>
+    <string name="a11y_replay">Replay the last spoken translation</string>
+    <string name="a11y_stage_row">Stage %1$s, %2$s</string>
 </resources>

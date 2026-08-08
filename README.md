@@ -1,22 +1,20 @@
 # OneVoice Link
 
-> **Ultra-low-latency, on-device Speech-to-Speech Translation (S2ST) for Android**, powered by the Qualcomm® AI Runtime (QNN) on the Hexagon™ NPU and Google Oboe for bare-metal audio.
+> **Offline, on-device Speech-to-Speech Translation (S2ST) for Android**, with a runnable sherpa-onnx/ONNX Runtime pipeline and a separate Qualcomm® QNN/Hexagon™ context-verification path.
 
 **Submitted to the OneVoice AI Challenge 2026.**
 
-OneVoice Link turns a Snapdragon® phone into a real-time, offline interpreter. Speech captured from the microphone is streamed through a fully native C++ pipeline — capture → AI translation → synthesis → playback — that **never touches the JVM on the hot path**, so Android's garbage collector can never stall the audio or spike latency. The entire cascade runs on the device: no network, no cloud, usable off-grid.
+OneVoice Link turns a Snapdragon® phone into an offline interpreter. The complete path is `AudioRecord` → energy VAD → NeMo CTC ASR → MarianMT → Kokoro TTS → `AudioTrack`; it runs locally without network or cloud. A second backend verifies the five delivered QNN context binaries on the Hexagon HTP, but does not claim speech execution because that artifact set is not yet a closed TTS pipeline.
 
 ---
 
-## Why it's fast
+## Runtime paths
 
-| Design choice | Why it matters |
+| Path | Current capability |
 |---|---|
-| **Zero-Java hot path** | The audio→AI→audio loop lives entirely in `libonevoice_core.so`. The JVM only issues four lifecycle calls; ART GC pauses cannot tear the pipeline. |
-| **Qualcomm Hexagon HTP** | Inference runs on the NPU via a pre-compiled QNN context binary — no on-device graph compilation, near-zero warm-up. |
-| **Google Oboe, exclusive + low-latency** | Engages the AAudio MMAP fast path, bypassing the AudioFlinger mixer for the lowest possible round-trip latency. |
-| **Lock-free SPSC ring buffers** | Audio and AI threads exchange samples with cache-line-padded, branch-free ring buffers — no mutex, no allocation, no false sharing in the realtime callback. |
-| **LTO + `-O3` + ARMv8.2 dotprod** | The core is built with link-time optimization and NEON dot-product tuning to feed the HTP efficiently. |
+| **Offline CPU (default)** | Complete VI→EN / EN→VI ASR → MT → TTS orchestration. Only one direction is resident; capture queues and audio buffers are bounded. |
+| **QNN HTP · verify** | Initializes FastRPC/QNN, creates each context on SM8550/v73 and retrieves the exact graph declared by the manifest. |
+| **Native realtime core** | Oboe and lock-free SPSC infrastructure remain available for the future closed QNN execution cascade. |
 
 ---
 
@@ -24,21 +22,11 @@ OneVoice Link turns a Snapdragon® phone into a real-time, offline interpreter. 
 
 ```mermaid
 flowchart LR
-  MainActivity["MainActivity<br/>Compose UI"] --> Bridge["OneVoiceNative<br/>JNI bridge"]
-  Bridge --> Lifecycle["init / start / stop / destroy"]
-
-  subgraph Core["libonevoice_core.so - C++20 realtime hot path"]
-    Engine["Native engine state"]
-    Mic([Mic]) --> Capture["Oboe capture<br/>RT callback"]
-    Capture --> InputRing["Input SPSC ring<br/>lock-free"]
-    InputRing --> Worker["AI worker<br/>native thread"]
-    Worker --> QNN["QNN / Hexagon HTP<br/>INT8 S2ST graph"]
-    QNN --> OutputRing["Output SPSC ring<br/>lock-free"]
-    OutputRing --> Playback["Oboe playback<br/>RT callback"]
-    Playback --> Speaker([Speaker])
-  end
-
-  Lifecycle -. "lifecycle only<br/>no audio buffers" .-> Engine
+  UI["Compose dashboard"] --> HF["Offline CPU backend"]
+  UI --> QNN["QNN HTP verify backend"]
+  Mic([Mic]) --> HF
+  HF --> ASR["sherpa NeMo CTC"] --> MT["ORT MarianMT"] --> TTS["sherpa Kokoro"] --> Speaker([Speaker])
+  QNN --> JNI["OneVoiceNative / C++"] --> HTP["5 QNN contexts on HTP"]
 ```
 
 Full details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -52,19 +40,30 @@ onevoice-link-native/
 |-- android-app/            Jetpack Compose app (Kotlin DSL, Gradle version catalog)
 |   `-- app/src/main/
 |       |-- java/com/onevoice/link/
-|       |   |-- MainActivity.kt          GSD dashboard + runtime permissions + lifecycle
-|       |   `-- core/OneVoiceNative.kt   JNI bridge to the native core
-|       |-- jniLibs/arm64-v8a/           packaged native libs (QNN staged here by Gradle)
+|       |   |-- MainActivity.kt          M3 dashboard + runtime permissions + lifecycle
+|       |   |-- core/OneVoiceNative.kt   JNI bridge to the native core
+|       |   |-- core/NpuEngine.kt        per-stage cascade loading + status
+|       |   |-- core/NpuManifest.kt      parses assets/npu_manifest.json
+|       |   `-- hf/                      runnable ASR / MarianMT / Kokoro backend
+|       |-- assets/npu_manifest.json     stage -> .bin + exact QNN graph name
+|       |-- jniLibs/arm64-v8a/           extra prebuilt libs (QNN staged here by Gradle)
 |       `-- AndroidManifest.xml          RECORD_AUDIO + Bluetooth (P2P) permissions
 |-- native-core/            C++ realtime engine -> libonevoice_core.so
 |   |-- CMakeLists.txt
-|   |-- include/            audio_engine.h, ring_buffer.h, qnn_inference.h
-|   |-- src/                main_jni.cpp, audio_engine.cpp, ring_buffer.cpp, qnn_inference.cpp
+|   |-- include/            audio_engine.h, ring_buffer.h, qnn_runtime.h
+|   |-- src/                main_jni.cpp, audio_engine.cpp, ring_buffer.cpp, qnn_runtime.cpp
 |   `-- third_party/
 |       |-- oboe/           Google Oboe (committed, built from source)
 |       `-- qnn_sdk/        Qualcomm QNN SDK (VENDORED LOCALLY, NOT committed; see below)
-`-- docs/                   Architecture, build, JNI API, and QNN integration guides
+|-- onevoice-npu-bins/      QNN context binaries from the model team (~5.9 GB, NOT committed)
+|-- models-hf/              converted offline artifacts (NOT committed)
+|-- tools/models/           push-hf-models.sh, push-npu-models.sh, conversion/manifest tools
+`-- docs/                   Architecture, build, JNI API, QNN integration, NPU deploy
 ```
+
+> **Deploying to a phone:** use `push-hf-models.sh` for the runnable pipeline.
+> The separately compiled QNN `.bin` files are a load/compatibility proof only;
+> see [`docs/NPU_DEPLOY.md`](docs/NPU_DEPLOY.md) for that verify flow.
 
 ---
 
@@ -88,8 +87,10 @@ onevoice-link-native/
 3. **Install & run:**
    ```bash
    ./gradlew :app:installDebug
+   cd ..
+   tools/models/push-hf-models.sh vi-en R5CW72TP4EP
    ```
-   Grant the microphone permission, tap **Initialize Engine**, then **Start Translating**.
+   Grant microphone permission, leave **Offline CPU** selected, tap **Load Offline Models**, then **Start Translating**.
 
 See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags, and troubleshooting.
 
@@ -104,15 +105,17 @@ See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags,
 | [docs/JNI_API.md](docs/JNI_API.md) | The native ABI contract and the Kotlin bridge (`OneVoiceNative`). |
 | [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md) | QNN SDK layout, packaging `.so` into the APK, and the runtime `dlopen` chain. |
 | [docs/MODEL_HANDOFF.md](docs/MODEL_HANDOFF.md) | Contract for the AI/model team: everything to deliver alongside the `.bin`. |
+| [docs/OFFLINE_PIPELINE.md](docs/OFFLINE_PIPELINE.md) | Runnable pipeline, per-direction model layout and safe deployment. |
+| [QNN 0x36b1 incident](docs/incidents/2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md) | FastRPC linker-policy root cause, fix and testsig/signing lessons. |
 
 ---
 
 ## Project status
 
 - ✅ **Builds green** — `./gradlew :app:assembleDebug` produces a signed-debug APK for `arm64-v8a`.
-- ✅ **Realtime audio** — Oboe full-duplex capture/playback and lock-free SPSC ring buffers are fully implemented.
-- ✅ **QNN bring-up** — backend `dlopen`, device/context creation from a `.bin`, and graph retrieval are wired against the real QNN C API.
-- 🚧 **Model integration** — tensor binding (INT8 shapes), QnnMem zero-copy, and `graphExecute` are clearly-marked placeholders owned by the AI/model team (see [`qnn_inference.cpp`](native-core/src/qnn_inference.cpp)). Until a real serialized context binary is supplied, `initEngine` stops at `contextCreateFromBinary` and the UI reports the failure gracefully.
+- ✅ **Runnable offline S2ST** — VI→EN was exercised on the connected SM8550 phone through transcript, translation, Kokoro waveform and replay.
+- ✅ **QNN bring-up** — unsigned-PD FastRPC, backend/device creation, all five contexts and graph retrieval are verified on SM8550/v73.
+- 🚧 **QNN execution** — `graphExecute` host glue is not implemented and the delivered Kokoro QNN split lacks learned F0/N, exact HAR and overlap-add artifacts. The UI labels this path verify-only.
 
 See the roadmap notes in [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md#status--roadmap).
 

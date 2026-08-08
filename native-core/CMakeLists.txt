@@ -22,20 +22,25 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)            # -std=c++20, not gnu++20
 
-# Default to Release so the realtime core is always built for speed.
+# Default to Release if not specified (AGP usually provides this).
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# -O3 + Link-Time Optimization. -ffast-math is DELIBERATELY OMITTED: the INT8
-# inference path must keep numerically well-defined reductions/accumulations.
+# -O3 + Link-Time Optimization for Release.
 set(CMAKE_CXX_FLAGS_RELEASE  "-O3 -flto -DNDEBUG")
 set(CMAKE_C_FLAGS_RELEASE    "-O3 -flto -DNDEBUG")
+
+# -Og + No LTO for Debug.
+set(CMAKE_CXX_FLAGS_DEBUG    "-Og -g")
+set(CMAKE_C_FLAGS_DEBUG      "-Og -g")
+
+# Shared linker flags:
 # -Wl,-z,max-page-size=16384 : Android 15+ (API 35) requires 16 KB ELF segment
-# alignment for native libs to load on 16 KB-page devices. Oboe sets this on
-# itself (PRIVATE), so it does NOT propagate to libonevoice_core.so — apply it
-# here explicitly. (Only affects shared libs; Oboe is static, so it's untouched.)
-set(CMAKE_SHARED_LINKER_FLAGS "-flto -Wl,-O1 -Wl,--gc-sections -Wl,-z,max-page-size=16384")
+# alignment for native libs to load on 16 KB-page devices.
+set(CMAKE_SHARED_LINKER_FLAGS "-Wl,-O1 -Wl,--gc-sections -Wl,-z,max-page-size=16384")
+# Link-Time Optimization only for Release.
+set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-flto")
 
 # Hide symbols by default; only JNI extern "C" entry points are exported.
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
@@ -76,7 +81,7 @@ add_library(onevoice_core SHARED
     src/main_jni.cpp
     src/audio_engine.cpp
     src/ring_buffer.cpp
-    src/qnn_inference.cpp
+    src/qnn_runtime.cpp
 )
 
 target_include_directories(onevoice_core PRIVATE
@@ -86,12 +91,13 @@ target_include_directories(onevoice_core PRIVATE
 )
 
 # --- Qualcomm QNN prebuilt backend ------------------------------------------
-# libQnnHtp.so drives the Hexagon HTP and is dlopen'd at runtime.
-# libQnnSystem.so loads the serialized .dlc/.bin context onto the device.
-if(EXISTS "${QNN_SDK_DIR}/lib/aarch64-android")
-    target_link_directories(onevoice_core PRIVATE ${QNN_SDK_DIR}/lib/aarch64-android)
-    target_link_libraries(onevoice_core PRIVATE QnnSystem QnnHtp QnnHtpPrepare)
-else()
+# QNN is intentionally NOT linked into libonevoice_core.so. Every QNN entry
+# point is obtained from QnnInterface_getProviders after dlopen(), so linking
+# these libraries adds no symbols; it only creates ELF NEEDED entries. Those
+# entries make Android load libQnnHtp.so during System.loadLibrary(), before the
+# app can publish ADSP_LIBRARY_PATH, which is too early for FastRPC skeleton
+# discovery. The Gradle staging task still packages the runtime libraries.
+if(NOT EXISTS "${QNN_SDK_DIR}/lib/aarch64-android")
     message(WARNING
         "QNN SDK libs not found at ${QNN_SDK_DIR}; QNN calls will compile as "
         "stubs via __has_include guards. Vendor the SDK there to enable HTP.")
