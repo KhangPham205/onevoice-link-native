@@ -217,6 +217,29 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeExtractAsrFeatures(
     return nullptr;
 }
 
+// ---- nativeExtractGipformerFeatures(samples, directOutput) : String? ------
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeExtractGipformerFeatures(
+        JNIEnv* env, jclass /*clazz*/, jfloatArray samples, jobject outputBuffer) {
+    if (!samples || !outputBuffer) return env->NewStringUTF("null Gipformer frontend buffer");
+    const jsize count = env->GetArrayLength(samples);
+    float* output = static_cast<float*>(env->GetDirectBufferAddress(outputBuffer));
+    const jlong capacity = env->GetDirectBufferCapacity(outputBuffer);
+    if (!output || capacity < 0) {
+        return env->NewStringUTF("Gipformer output is not a direct ByteBuffer");
+    }
+    std::vector<float> waveform(static_cast<std::size_t>(count));
+    env->GetFloatArrayRegion(samples, 0, count, waveform.data());
+    if (env->ExceptionCheck()) return env->NewStringUTF("cannot read Gipformer samples");
+    std::string error;
+    if (!onevoice::makeGipformerFeatures(
+            waveform.data(), waveform.size(), output,
+            static_cast<std::size_t>(capacity) / sizeof(float), error)) {
+        return env->NewStringUTF(error.c_str());
+    }
+    return nullptr;
+}
+
 // ---- nativeBuildKokoroHar(directF0, directHar) : String? ------------------
 JNIEXPORT jstring JNICALL
 Java_com_onevoice_link_core_OneVoiceNative_nativeBuildKokoroHar(

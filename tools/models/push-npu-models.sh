@@ -4,8 +4,11 @@
 # ----------------------------------------------------------------------------
 # Copies the deploy subset of onevoice-npu-bins/ into the layout the app expects:
 #
-#   <filesDir>/models/npu/vi-en/{asr_parakeet_vi,mt_encoder,mt_decoder,
-#                                tts_encoder,tts_prosody,tts_decoder}.bin
+#   <filesDir>/models/npu/vi-en/{asr_parakeet_vi,asr_gipformer_encoder,
+#                                mt_encoder,mt_decoder,tts_encoder,
+#                                tts_prosody,tts_decoder}.bin
+#   <filesDir>/models/npu/vi-en/asr_gipformer_{decoder,joiner}.onnx
+#   <filesDir>/models/npu/vi-en/asr_gipformer_{tokens,bpe,config}.*
 #   <filesDir>/models/npu/en-vi/{mt_encoder,mt_decoder,tts_encoder,tts_decoder}.bin
 #
 # WHY THE TWO-STEP COPY (and not a plain `adb push` to external storage):
@@ -34,7 +37,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BINS="$REPO/onevoice-npu-bins"
 PKG="com.onevoice.link"
-TMP="/data/local/tmp/onevoice_stage.bin"
+TMP="/data/local/tmp/onevoice_stage.part"
 WHICH="${1:-all}"
 SERIAL="${2:-}"
 ADB="${ADB:-adb}"
@@ -50,6 +53,12 @@ adb_cmd() {
 # dest-relative-path <TAB> source-relative-path
 read -r -d '' VI_EN <<'EOF' || true
 vi-en/asr_parakeet_vi.bin	asr/parakeet_ctc_vi__DEPLOY/logits.bin
+vi-en/asr_gipformer_encoder.bin	asr/gipformer_65m_rnnt-bundle/bin/encoder.bin
+vi-en/asr_gipformer_decoder.onnx	asr/gipformer_65m_rnnt-bundle/decode/decoder-epoch-35-avg-6.onnx
+vi-en/asr_gipformer_joiner.onnx	asr/gipformer_65m_rnnt-bundle/decode/joiner-epoch-35-avg-6.onnx
+vi-en/asr_gipformer_tokens.txt	asr/gipformer_65m_rnnt-bundle/decode/tokens.txt
+vi-en/asr_gipformer_bpe.model	asr/gipformer_65m_rnnt-bundle/decode/bpe.model
+vi-en/asr_gipformer_config.json	asr/gipformer_65m_rnnt-bundle/decode/config.json
 vi-en/mt_encoder.bin	mt/opus_mt_vi_en__float_8gen2/encoder_float.bin
 vi-en/mt_decoder.bin	mt/opus_mt_vi_en__float_8gen2/decoder_float.bin
 vi-en/tts_encoder.bin	tts/kokoro_en__encoder_8gen2/encoder.bin
@@ -122,23 +131,54 @@ while IFS=$'\t' read -r dest src; do
     continue
   fi
   local_size=$(stat -c%s "$local_file")
+  local_sha=$(sha256sum "$local_file" | awk '{print $1}')
 
   # </dev/null on every adb call is load-bearing: adb reads stdin, and without
   # it the first push swallows the rest of $PLAN from this loop's heredoc.
-  # `|| echo 0` must run ON THE DEVICE: a missing file makes stat exit non-zero,
-  # which under `set -e` would kill the script at the first not-yet-pushed file.
-  remote_size=$(adb_cmd shell run-as "$PKG" sh -c "\"stat -c%s '$ROOT/$dest' 2>/dev/null || echo 0\"" </dev/null | tr -d '\r')
-  remote_size=${remote_size:-0}
-  if [ "$remote_size" = "$local_size" ]; then
-    printf '  = %-28s already present (%s bytes)\n' "$dest" "$local_size"
+  # Size alone is not enough for resumable deployment: a previous interrupted
+  # copy can have the expected length but corrupt contents. Hash the published
+  # file and skip it only when SHA-256 matches the source exactly.
+  remote_sha=$(
+    adb_cmd shell run-as "$PKG" sha256sum "$ROOT/$dest" </dev/null 2>/dev/null |
+      awk '{print $1}' | tr -d '\r' || true
+  )
+  if [ "$remote_sha" = "$local_sha" ]; then
+    printf '  = %-36s verified sha256=%s\n' "$dest" "${local_sha:0:12}"
     skipped=$((skipped + 1))
     continue
   fi
 
-  printf '  → %-28s %s MB\n' "$dest" "$((local_size / 1048576))"
+  printf '  → %-36s %s MB sha256=%s\n' \
+    "$dest" "$((local_size / 1048576))" "${local_sha:0:12}"
   adb_cmd push "$local_file" "$TMP" >/dev/null </dev/null
-  adb_cmd shell run-as "$PKG" cp "$TMP" "$ROOT/$dest" </dev/null
-  # Free the staging copy immediately: the ASR blob alone is 1.15 GB.
+  remote_part="$ROOT/$dest.part"
+  adb_cmd shell run-as "$PKG" cp "$TMP" "$remote_part" </dev/null
+
+  # Never expose a partial model under its final name. Verify the app-owned
+  # .part copy, then rename it atomically within filesDir. Both source and
+  # destination are on /data, so mv cannot degrade into copy+delete.
+  part_sha=$(
+    adb_cmd shell run-as "$PKG" sha256sum "$remote_part" </dev/null |
+      awk '{print $1}' | tr -d '\r'
+  )
+  if [ "$part_sha" != "$local_sha" ]; then
+    echo "!! SHA-256 mismatch for $dest: local=$local_sha device=$part_sha" >&2
+    adb_cmd shell run-as "$PKG" rm -f "$remote_part" </dev/null || true
+    adb_cmd shell rm -f "$TMP" </dev/null || true
+    exit 1
+  fi
+  adb_cmd shell run-as "$PKG" mv "$remote_part" "$ROOT/$dest" </dev/null
+  published_sha=$(
+    adb_cmd shell run-as "$PKG" sha256sum "$ROOT/$dest" </dev/null |
+      awk '{print $1}' | tr -d '\r'
+  )
+  if [ "$published_sha" != "$local_sha" ]; then
+    echo "!! post-publish SHA-256 mismatch for $dest" >&2
+    adb_cmd shell rm -f "$TMP" </dev/null || true
+    exit 1
+  fi
+  # Free the shell-owned staging copy immediately: Parakeet is still retained
+  # side-by-side and is the largest single blob at roughly 1.15 GB.
   adb_cmd shell rm -f "$TMP" </dev/null
   pushed=$((pushed + 1))
 done <<< "$PLAN"

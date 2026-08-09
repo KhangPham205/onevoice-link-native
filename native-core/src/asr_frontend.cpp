@@ -22,6 +22,11 @@ constexpr float kSampleRate = 16000.0f;
 constexpr float kLogGuard = 1.0f / 16777216.0f;  // 2^-24
 constexpr float kPi = 3.14159265358979323846f;
 
+constexpr std::size_t kGipFrames = 1000;
+constexpr float kGipLowHz = 20.0f;
+constexpr float kGipHighHz = 7600.0f;  // Kaldi high_freq=-400 at 16 kHz.
+constexpr float kPoveyExponent = 0.85f;
+
 float hzToMel(float hz) {
     constexpr float fSp = 200.0f / 3.0f;
     constexpr float minLogHz = 1000.0f;
@@ -88,6 +93,46 @@ MelBank makeMelBank() {
         }
     }
     return bank;
+}
+
+float kaldiMel(float hz) {
+    return 1127.0f * std::log1p(hz / 700.0f);
+}
+
+MelBank makeKaldiMelBank() {
+    MelBank bank{};
+    const float lowMel = kaldiMel(kGipLowHz);
+    const float highMel = kaldiMel(kGipHighHz);
+    const float interval = (highMel - lowMel) / static_cast<float>(kMels + 1);
+    for (std::size_t mel = 0; mel < kMels; ++mel) {
+        const float left = lowMel + static_cast<float>(mel) * interval;
+        const float center = left + interval;
+        const float right = center + interval;
+        for (std::size_t bin = 0; bin < kBins; ++bin) {
+            const float frequency = static_cast<float>(bin) * kSampleRate /
+                static_cast<float>(kFft);
+            const float value = kaldiMel(frequency);
+            if (value > left && value < right) {
+                bank[mel][bin] = value <= center
+                    ? (value - left) / (center - left)
+                    : (right - value) / (right - center);
+            }
+        }
+    }
+    return bank;
+}
+
+std::size_t reflectIndex(long index, std::size_t size) {
+    // Kaldi's snip_edges=false reflects a frame at the waveform boundaries.
+    // `size` is the static ten-second input, whose unfilled tail is zero.
+    while (index < 0 || index >= static_cast<long>(size)) {
+        if (index < 0) {
+            index = -index - 1;
+        } else {
+            index = 2 * static_cast<long>(size) - 1 - index;
+        }
+    }
+    return static_cast<std::size_t>(index);
 }
 
 }  // namespace
@@ -174,6 +219,88 @@ bool makeParakeetFeatures(const float* samples, std::size_t sampleCount,
         }
         for (std::size_t frame = validFrames; frame < kFrames; ++frame) {
             output[frame * kMels + mel] = 0.0f;
+        }
+    }
+    return true;
+}
+
+bool makeGipformerFeatures(const float* samples, std::size_t sampleCount,
+                           float* output, std::size_t outputCount,
+                           std::string& error) {
+    error.clear();
+    if (!samples || !output) {
+        error = "Gipformer frontend received a null buffer";
+        return false;
+    }
+    if (sampleCount == 0 || sampleCount > kSamples) {
+        error = "Gipformer segment must contain 1..160000 samples";
+        return false;
+    }
+    if (outputCount < kGipFrames * kMels) {
+        error = "Gipformer feature buffer is smaller than [1000,80]";
+        return false;
+    }
+
+    // The exported encoder has no length input. Present the same static ten
+    // seconds used at conversion time and zero-pad the captured utterance.
+    std::vector<float> waveform(kSamples, 0.0f);
+    // sherpa's normalize_samples=true means the public [-1,+1] samples are
+    // already in the feature extractor's expected scale (false performs the
+    // legacy *32768 conversion).
+    std::copy(samples, samples + sampleCount, waveform.begin());
+
+    static const MelBank melBank = makeKaldiMelBank();
+    static const std::array<float, kWindow> window = [] {
+        std::array<float, kWindow> values{};
+        for (std::size_t i = 0; i < kWindow; ++i) {
+            const float hann = 0.5f - 0.5f * std::cos(
+                2.0f * kPi * static_cast<float>(i) /
+                static_cast<float>(kWindow - 1));
+            values[i] = std::pow(hann, kPoveyExponent);
+        }
+        return values;
+    }();
+
+    std::array<float, kWindow> frameValues{};
+    std::array<std::complex<float>, kFft> spectrum{};
+    std::array<float, kBins> power{};
+    constexpr long halfWindow = static_cast<long>(kWindow / 2);
+    constexpr long halfShift = static_cast<long>(kHop / 2);
+
+    for (std::size_t frame = 0; frame < kGipFrames; ++frame) {
+        // Kaldi FirstSampleOfFrame() for snip_edges=false centers frame zero
+        // half a frame shift after time zero: 0*160 + 80 - 200 = -120.
+        const long start = static_cast<long>(frame * kHop) + halfShift - halfWindow;
+        double sum = 0.0;
+        for (std::size_t i = 0; i < kWindow; ++i) {
+            const auto source = reflectIndex(start + static_cast<long>(i), kSamples);
+            frameValues[i] = waveform[source];
+            sum += frameValues[i];
+        }
+
+        // Kaldi defaults: remove_dc_offset=true, preemphasis=0.97, dither=0.
+        const float mean = static_cast<float>(sum / static_cast<double>(kWindow));
+        for (float& value : frameValues) value -= mean;
+        for (std::size_t i = kWindow - 1; i > 0; --i) {
+            frameValues[i] -= kPreemphasis * frameValues[i - 1];
+        }
+        frameValues[0] -= kPreemphasis * frameValues[0];
+
+        spectrum.fill({0.0f, 0.0f});
+        for (std::size_t i = 0; i < kWindow; ++i) {
+            spectrum[i] = frameValues[i] * window[i];
+        }
+        fft(spectrum);
+        for (std::size_t bin = 0; bin < kBins; ++bin) {
+            power[bin] = std::norm(spectrum[bin]);
+        }
+        for (std::size_t mel = 0; mel < kMels; ++mel) {
+            double energy = 0.0;
+            for (std::size_t bin = 0; bin < kBins; ++bin) {
+                energy += static_cast<double>(melBank[mel][bin]) * power[bin];
+            }
+            output[frame * kMels + mel] = std::log(std::max(
+                static_cast<float>(energy), std::numeric_limits<float>::epsilon()));
         }
     }
     return true;

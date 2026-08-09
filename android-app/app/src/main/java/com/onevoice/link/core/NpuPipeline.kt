@@ -20,7 +20,9 @@ import kotlin.math.roundToInt
 
 /** Host glue around the separately compiled QNN contexts for VI -> EN. */
 internal class NpuPipeline private constructor(
+    private val asrMode: NpuAsrMode,
     private val asrTokens: List<String>,
+    private val gipformerDecoder: GipformerRnntDecoder?,
     private val translator: QnnMarianTranslator,
     private val ttsTokenIds: Set<Int>,
     private val voices: FileChannel?,
@@ -28,8 +30,14 @@ internal class NpuPipeline private constructor(
     private val cpuTts: OfflineTts?,
 ) : Closeable {
     companion object {
-        private const val ASR_FEATURE_BYTES = 1 * 1001 * 80 * Float.SIZE_BYTES
-        private const val ASR_LOGIT_BYTES = 1 * 126 * 1025 * Float.SIZE_BYTES
+        private const val PARAKEET_FEATURE_BYTES = 1 * 1001 * 80 * Float.SIZE_BYTES
+        private const val PARAKEET_LOGIT_BYTES = 1 * 126 * 1025 * Float.SIZE_BYTES
+        private const val GIPFORMER_FEATURE_BYTES =
+            1 * GipformerRnntDecoder.FEATURE_FRAMES * GipformerRnntDecoder.FEATURE_DIM *
+                Float.SIZE_BYTES
+        private const val GIPFORMER_OUTPUT_BYTES =
+            1 * GipformerRnntDecoder.ENCODER_FRAMES * GipformerRnntDecoder.ENCODER_DIM *
+                Float.SIZE_BYTES
         private const val ASR_HOP_SAMPLES = 160
         private const val ASR_SUBSAMPLING = 8
         private const val ASR_OUTPUT_FRAMES = 126
@@ -42,16 +50,28 @@ internal class NpuPipeline private constructor(
 
         fun load(
             directionRoot: File,
+            asrStage: StageSpec,
             useCpuTts: Boolean = false,
             cpuTtsModel: File? = null,
         ): NpuPipeline {
+            val asrMode = NpuAsrMode.from(asrStage)
             val requiredNames = buildList {
                 addAll(
                     listOf(
-                        "asr_tokens.txt", "mt_source.spm", "mt_vocab.json", "mt_config.json",
+                        "mt_source.spm", "mt_vocab.json", "mt_config.json",
                         "tts_tokens.txt", "tts_voices.bin",
                     ),
                 )
+                when (asrMode) {
+                    NpuAsrMode.PARAKEET_CTC -> add("asr_tokens.txt")
+                    NpuAsrMode.GIPFORMER_RNNT -> addAll(
+                        listOf(
+                            "asr_gipformer_decoder.onnx",
+                            "asr_gipformer_joiner.onnx",
+                            "asr_gipformer_tokens.txt",
+                        ),
+                    )
+                }
                 if (!useCpuTts) add("tts_frontend.onnx")
             }
             val required = requiredNames.map { File(directionRoot, it) }.toMutableList()
@@ -71,13 +91,18 @@ internal class NpuPipeline private constructor(
                 "Missing eSpeak frontend data: ${espeakMissing.joinToString { it.name }}. " +
                     "Run tools/models/push-npu-models.sh vi-en R5CW72TP4EP."
             }
-            val asrIndex = parseIndexedTokens(File(directionRoot, "asr_tokens.txt"))
-            val asrTokens = arrayOfNulls<String>(asrIndex.size)
-            asrIndex.forEach { (token, id) ->
-                if (id in asrTokens.indices) asrTokens[id] = token
-            }
-            require(asrTokens.size == 1025 && asrTokens.last() == "<blk>") {
-                "Unexpected ASR vocabulary (${asrTokens.size} tokens)"
+            val asrTokens = if (asrMode == NpuAsrMode.PARAKEET_CTC) {
+                val asrIndex = parseIndexedTokens(File(directionRoot, "asr_tokens.txt"))
+                val indexed = arrayOfNulls<String>(asrIndex.size)
+                asrIndex.forEach { (token, id) ->
+                    if (id in indexed.indices) indexed[id] = token
+                }
+                require(indexed.size == 1025 && indexed.last() == "<blk>") {
+                    "Unexpected ASR vocabulary (${indexed.size} tokens)"
+                }
+                indexed.map { it ?: "<unk>" }
+            } else {
+                emptyList()
             }
             val ttsTokens = parseIndexedTokens(File(directionRoot, "tts_tokens.txt"))
             val kokoroConfig = { modelPath: String ->
@@ -95,19 +120,46 @@ internal class NpuPipeline private constructor(
                     silenceScale = 1.0f,
                 )
             }
-            return NpuPipeline(
-                asrTokens = asrTokens.map { it ?: "<unk>" },
-                translator = QnnMarianTranslator.load(directionRoot),
-                ttsTokenIds = ttsTokens.values.toSet(),
-                voices = if (useCpuTts) null else
-                    FileInputStream(File(directionRoot, "tts_voices.bin")).channel,
-                ttsFrontend = if (useCpuTts) null else OfflineTts(
-                    config = kokoroConfig(File(directionRoot, "tts_frontend.onnx").absolutePath),
-                ),
-                cpuTts = if (useCpuTts) OfflineTts(
-                    config = kokoroConfig(requireNotNull(cpuTtsModel).absolutePath),
-                ) else null,
-            )
+            var gipformer: GipformerRnntDecoder? = null
+            var translator: QnnMarianTranslator? = null
+            var voices: FileChannel? = null
+            var ttsFrontend: OfflineTts? = null
+            var cpuTts: OfflineTts? = null
+            try {
+                if (asrMode == NpuAsrMode.GIPFORMER_RNNT) {
+                    gipformer = GipformerRnntDecoder.load(directionRoot)
+                }
+                translator = QnnMarianTranslator.load(directionRoot)
+                if (useCpuTts) {
+                    cpuTts = OfflineTts(
+                        config = kokoroConfig(requireNotNull(cpuTtsModel).absolutePath),
+                    )
+                } else {
+                    voices = FileInputStream(File(directionRoot, "tts_voices.bin")).channel
+                    ttsFrontend = OfflineTts(
+                        config = kokoroConfig(
+                            File(directionRoot, "tts_frontend.onnx").absolutePath,
+                        ),
+                    )
+                }
+                return NpuPipeline(
+                    asrMode = asrMode,
+                    asrTokens = asrTokens,
+                    gipformerDecoder = gipformer,
+                    translator = checkNotNull(translator),
+                    ttsTokenIds = ttsTokens.values.toSet(),
+                    voices = voices,
+                    ttsFrontend = ttsFrontend,
+                    cpuTts = cpuTts,
+                )
+            } catch (failure: Throwable) {
+                runCatching { cpuTts?.release() }
+                runCatching { ttsFrontend?.release() }
+                runCatching { voices?.close() }
+                runCatching { translator?.close() }
+                runCatching { gipformer?.close() }
+                throw failure
+            }
         }
 
         private fun parseIndexedTokens(file: File): Map<String, Int> = buildMap {
@@ -121,8 +173,20 @@ internal class NpuPipeline private constructor(
         }
     }
 
-    private val asrFeatures = direct(ASR_FEATURE_BYTES)
-    private val asrLogits = direct(ASR_LOGIT_BYTES)
+    private val asrFeatures = direct(
+        if (asrMode == NpuAsrMode.GIPFORMER_RNNT) {
+            GIPFORMER_FEATURE_BYTES
+        } else {
+            PARAKEET_FEATURE_BYTES
+        },
+    )
+    private val asrOutput = direct(
+        if (asrMode == NpuAsrMode.GIPFORMER_RNNT) {
+            GIPFORMER_OUTPUT_BYTES
+        } else {
+            PARAKEET_LOGIT_BYTES
+        },
+    )
     private val ttsIds = direct(512 * Int.SIZE_BYTES)
     private val ttsStyle = direct(256 * Float.SIZE_BYTES)
     private val ttsD = direct(512 * 640 * Float.SIZE_BYTES)
@@ -142,9 +206,37 @@ internal class NpuPipeline private constructor(
         require(samples.isNotEmpty() && samples.size <= 160_000) {
             "NPU ASR accepts 1..160000 samples"
         }
+        return when (asrMode) {
+            NpuAsrMode.PARAKEET_CTC -> recognizeParakeet(samples)
+            NpuAsrMode.GIPFORMER_RNNT -> recognizeGipformer(samples)
+        }
+    }
+
+    private fun recognizeGipformer(samples: FloatArray): String {
+        checkNative(OneVoiceNative.nativeExtractGipformerFeatures(samples, asrFeatures))
+        execute("asr", arrayOf(asrFeatures), arrayOf(asrOutput))
+        // Kaldi snip_edges=false creates round(sampleCount / 160) frames. The
+        // encoder's exported length graph is (((T - 7) / 2) + 1) / 2.
+        val validFeatureFrames = ((samples.size + ASR_HOP_SAMPLES / 2) /
+            ASR_HOP_SAMPLES).coerceIn(1, GipformerRnntDecoder.FEATURE_FRAMES)
+        val validEncoderFrames = ((((validFeatureFrames - 7).coerceAtLeast(0) / 2) + 1) / 2)
+            .coerceIn(1, GipformerRnntDecoder.ENCODER_FRAMES)
+        val transcript = checkNotNull(gipformerDecoder) {
+            "Gipformer decoder is unavailable"
+        }.decode(asrOutput, validEncoderFrames)
+        Log.i(
+            TAG,
+            "ASR model=gipformer-rnnt samples=${samples.size} " +
+                "featureFrames=$validFeatureFrames encoderFrames=$validEncoderFrames " +
+                "transcript=\"$transcript\"",
+        )
+        return transcript
+    }
+
+    private fun recognizeParakeet(samples: FloatArray): String {
         checkNative(OneVoiceNative.nativeExtractAsrFeatures(samples, asrFeatures))
-        execute("asr", arrayOf(asrFeatures), arrayOf(asrLogits))
-        val logits = asrLogits.asFloatBuffer()
+        execute("asr", arrayOf(asrFeatures), arrayOf(asrOutput))
+        val logits = asrOutput.asFloatBuffer()
         // The graph is statically padded to 10 seconds/126 CTC steps and has no
         // external length tensor. Do not decode logits belonging solely to the
         // zero-padded tail; those steps can repeat an earlier phrase after the
@@ -177,7 +269,8 @@ internal class NpuPipeline private constructor(
         }.replace('▁', ' ').trim().also { transcript ->
             Log.i(
                 TAG,
-                "ASR samples=${samples.size} featureFrames=$validFeatureFrames " +
+                "ASR model=parakeet-ctc samples=${samples.size} " +
+                    "featureFrames=$validFeatureFrames " +
                     "ctcFrames=$validLogitFrames transcript=\"$transcript\"",
             )
         }
@@ -399,10 +492,11 @@ internal class NpuPipeline private constructor(
     }
 
     override fun close() {
-        translator.close()
-        ttsFrontend?.release()
         cpuTts?.release()
+        ttsFrontend?.release()
         voices?.close()
+        translator.close()
+        gipformerDecoder?.close()
     }
 
     private fun execute(stage: String, inputs: Array<ByteBuffer>, outputs: Array<ByteBuffer>) {
@@ -413,6 +507,33 @@ internal class NpuPipeline private constructor(
         check(error == null) { error ?: "unknown QNN execution error" }
     }
 
+}
+
+private enum class NpuAsrMode {
+    PARAKEET_CTC,
+    GIPFORMER_RNNT;
+
+    companion object {
+        fun from(stage: StageSpec): NpuAsrMode {
+            val input = stage.inputs.singleOrNull()
+            val output = stage.outputs.singleOrNull()
+            return when {
+                input?.name == "x" && input.dtype == "FLOAT_32" &&
+                    input.dims == listOf(1, 1000, 80) &&
+                    output?.name == "output_0" && output.dtype == "FLOAT_32" &&
+                    output.dims == listOf(1, 248, 512) -> GIPFORMER_RNNT
+
+                input?.name == "input_features" && input.dtype == "FLOAT_32" &&
+                    input.dims == listOf(1, 1001, 80) &&
+                    output?.name == "output_0" && output.dtype == "FLOAT_32" &&
+                    output.dims == listOf(1, 126, 1025) -> PARAKEET_CTC
+
+                else -> error(
+                    "Unsupported NPU ASR contract: ${stage.inputs} -> ${stage.outputs}",
+                )
+            }
+        }
+    }
 }
 
 /** Fixed-shape cached Marian decoder driven one token at a time on HTP. */

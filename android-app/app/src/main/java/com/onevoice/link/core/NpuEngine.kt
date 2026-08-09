@@ -235,6 +235,7 @@ class NpuEngine(
             }
             pipeline = NpuPipeline.load(
                 directionRoot = directionRoot,
+                asrStage = spec.stages.single { it.stage == "asr" },
                 useCpuTts = useCpuTts,
                 cpuTtsModel = cpuTtsModel,
             )

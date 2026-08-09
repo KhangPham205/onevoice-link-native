@@ -67,6 +67,12 @@ object OneVoiceNative {
     /** NeMo-compatible 16 kHz PCM float -> direct [1,1001,80] FLOAT32. */
     external fun nativeExtractAsrFeatures(samples: FloatArray, output: ByteBuffer): String?
 
+    /** Kaldi/icefall-compatible 16 kHz PCM float -> direct [1,1000,80] FLOAT32. */
+    external fun nativeExtractGipformerFeatures(
+        samples: FloatArray,
+        output: ByteBuffer,
+    ): String?
+
     /** Kokoro F0 [50] -> harmonic STFT [22,3001], both direct FLOAT32. */
     external fun nativeBuildKokoroHar(
         f0: ByteBuffer,

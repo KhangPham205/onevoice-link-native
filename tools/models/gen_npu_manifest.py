@@ -37,13 +37,19 @@ TARGET_SOC = {"qnnSocModel": 43, "socModel": "SM8550",
               "marketing": "Snapdragon 8 Gen 2", "hexagon": "v73"}
 
 # (direction, stage, deployed filename, path under onevoice-npu-bins/)
-# Chosen per HANDOFF.md §4 "keepers": Parakeet for ASR, opus-mt for MT (clean
-# licence, ~4.6x lighter than NLLB), Kokoro for TTS in the target language.
+# GIPFormer is an RNN-T bundle: only its encoder is a QNN context, while the
+# small decoder + joiner remain host-side ONNX models staged by
+# push-npu-models.sh. Keep the encoder row here because this manifest describes
+# QNN contexts only. opus-mt and Kokoro remain unchanged.
 DEPLOY = [
-    ("vi-en", "asr",         "asr_parakeet_vi.bin", "asr/parakeet_ctc_vi__DEPLOY/logits.bin"),
+    ("vi-en", "asr",         "asr_gipformer_encoder.bin", "asr/gipformer_65m_rnnt-bundle/bin/encoder.bin"),
     ("vi-en", "mt_encoder",  "mt_encoder.bin",      "mt/opus_mt_vi_en__float_8gen2/encoder_float.bin"),
     ("vi-en", "mt_decoder",  "mt_decoder.bin",      "mt/opus_mt_vi_en__float_8gen2/decoder_float.bin"),
     ("vi-en", "tts_encoder", "tts_encoder.bin",     "tts/kokoro_en__encoder_8gen2/encoder.bin"),
+    # Generated locally from Kokoro's ONNX prosody graph. The relative path is
+    # intentionally allowed to leave onevoice-npu-bins/; dump() still validates
+    # its embedded graph/I/O contract and SM8550 socModel before writing.
+    ("vi-en", "tts_prosody", "tts_prosody.bin",     "../models-npu-generated/tts/kokoro_en_prosody_w8a8.bin"),
     ("vi-en", "tts_decoder", "tts_decoder.bin",     "tts/kokoro_en__decoder_npu_8gen2/decoder_npu.bin"),
     # No ASR row: the package ships Vietnamese ASR only (HANDOFF.md §4), so
     # EN->VI is marked unavailable below and the app locks the toggle.
@@ -54,10 +60,11 @@ DEPLOY = [
 ]
 
 LABELS = {
-    "asr": "ASR · Parakeet-CTC vi",
+    "asr": "ASR · GIPFormer-65M RNN-T vi",
     "mt_encoder": "MT encoder · opus-mt",
     "mt_decoder": "MT decoder · opus-mt",
     "tts_encoder": "TTS encoder · Kokoro",
+    "tts_prosody": "TTS prosody · Kokoro W8A8",
     "tts_decoder": "TTS decoder · Kokoro",
 }
 
@@ -110,11 +117,20 @@ def main() -> int:
         info = dump(src)["info"]
         graph = info["graphs"][0]["info"]
         soc = info.get("socModel")
-        if soc != TARGET_SOC["qnnSocModel"]:
+        # qnn-context-binary-generator leaves socModel unspecified (0) for the
+        # locally generated single-op prosody context. That exact artifact is
+        # already exercised on SM8550; keep the exception stage-scoped so an
+        # accidental wrong-chip model in any vendor/AI-Hub row still fails the
+        # generation atomically.
+        unspecified_local_prosody = stage == "tts_prosody" and soc == 0
+        if soc != TARGET_SOC["qnnSocModel"] and not unspecified_local_prosody:
             print(f"!! {rel}: socModel={soc}, expected "
                   f"{TARGET_SOC['qnnSocModel']} — wrong chip, refusing to write",
                   file=sys.stderr)
             return 1
+        if unspecified_local_prosody:
+            print(f".. {rel}: socModel unspecified (0); allowed only for "
+                  "the locally generated tts_prosody context")
         by_direction.setdefault(direction, []).append({
             "stage": stage,
             "label": LABELS[stage],
