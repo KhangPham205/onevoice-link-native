@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Dark platform window behind the Compose dark UI (the light parent
+         previously showed a white window during transitions in dark mode). -->
+    <style name="Theme.OneVoiceLink" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/surface_dark</item>
+    </style>
+</resources>

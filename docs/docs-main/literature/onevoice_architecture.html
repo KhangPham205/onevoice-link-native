@@ -1,0 +1,341 @@
+<title>OneVoice — Kiến trúc đề xuất</title>
+<style>
+  :root{
+    --paper:#F3F5F7; --card:#FFFFFF; --ink:#1A1F24; --steel:#647079;
+    --line:#DDE3E8; --line-soft:#E8ECEF;
+    --teal:#0F7A85; --teal-soft:#E2F0F1;
+    --signal:#E2580B; --signal-soft:#FBE7DA;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,"Cascadia Code",Consolas,monospace;
+    --maxw:760px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font-family:var(--sans);font-size:17px;line-height:1.7;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px;}
+  .wide{max-width:880px;}
+
+  /* ---- typography ---- */
+  h1{font-size:clamp(2.1rem,6vw,3.1rem);line-height:1.05;letter-spacing:-.02em;
+    font-weight:800;margin:0;text-wrap:balance;}
+  h2{font-size:1.55rem;line-height:1.2;letter-spacing:-.015em;font-weight:750;
+    margin:0 0 .2em;text-wrap:balance;}
+  h3{font-size:1.18rem;font-weight:700;margin:0;letter-spacing:-.01em;}
+  p{margin:.7em 0;}
+  .lead{font-size:1.25rem;line-height:1.55;color:#33393F;}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;font-weight:600;
+    letter-spacing:.18em;text-transform:uppercase;color:var(--teal);}
+  .label{font-family:var(--mono);font-size:.7rem;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--steel);}
+  strong{font-weight:700;}
+  .vi-en{color:var(--steel);font-style:italic;}
+
+  /* ---- hero ---- */
+  header.hero{position:relative;overflow:hidden;background:#101417;color:#EAF0F2;
+    border-bottom:3px solid var(--signal);}
+  header.hero .wrap{position:relative;z-index:2;padding-top:84px;padding-bottom:72px;}
+  header.hero .eyebrow{color:#5BC2CC;}
+  header.hero h1{color:#FFF;margin:.35em 0 .5em;}
+  header.hero .lead{color:#AEBBC2;max-width:34ch;}
+  #wave{position:absolute;inset:0;width:100%;height:100%;z-index:1;opacity:.5;}
+  .hero-tag{display:inline-flex;gap:10px;align-items:center;margin-top:26px;
+    font-family:var(--mono);font-size:.78rem;color:#8A99A1;}
+  .hero-tag b{color:#EAF0F2;font-weight:600;}
+
+  /* ---- sections ---- */
+  section{padding:60px 0;}
+  section + section{border-top:1px solid var(--line);}
+  .sec-head{margin-bottom:32px;}
+
+  /* ---- contrast cards (batch vs streaming) ---- */
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
+  .duo .pane{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:24px;}
+  .duo .pane.good{border-color:var(--teal);box-shadow:0 1px 0 var(--teal) inset;}
+  .duo .tag{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;
+    text-transform:uppercase;font-weight:600;}
+  .duo .old .tag{color:var(--steel);}
+  .duo .good .tag{color:var(--teal);}
+  .duo h3{margin:.5em 0 .3em;}
+  .duo p{font-size:.97rem;color:#3C434A;margin:.4em 0 0;}
+
+  /* ---- pipeline ---- */
+  .pipe{list-style:none;margin:0;padding:0;position:relative;}
+  .pipe::before{content:"";position:absolute;left:23px;top:14px;bottom:14px;
+    width:2px;background:linear-gradient(var(--teal),var(--teal) 70%,var(--signal));}
+  .step{position:relative;display:flex;gap:22px;padding:14px 0;align-items:flex-start;}
+  .node{flex:0 0 48px;width:48px;height:48px;border-radius:50%;background:var(--card);
+    border:2px solid var(--teal);color:var(--teal);display:grid;place-items:center;
+    font-family:var(--mono);font-weight:700;font-size:1.05rem;z-index:1;}
+  .step.heart .node{border-color:var(--signal);color:var(--signal);
+    box-shadow:0 0 0 5px var(--signal-soft);}
+  .step .body{padding-top:4px;}
+  .step .ttl{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;}
+  .step .role{font-family:var(--mono);font-size:.72rem;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--steel);}
+  .step p{font-size:.97rem;color:#3C434A;margin:.45em 0 0;}
+
+  /* ---- component deep cards ---- */
+  .comp{background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:30px;margin-top:22px;}
+  .comp.heart{border-color:var(--signal);background:linear-gradient(180deg,#FFF9F5,#FFF);}
+  .comp .kicker{display:flex;align-items:center;gap:12px;margin-bottom:6px;}
+  .comp .chip{font-family:var(--mono);font-size:.7rem;font-weight:700;letter-spacing:.08em;
+    padding:4px 9px;border-radius:6px;background:var(--teal-soft);color:var(--teal);}
+  .comp.heart .chip{background:var(--signal-soft);color:var(--signal);}
+  .qa{display:grid;gap:14px;margin-top:18px;}
+  .qa .row{display:grid;grid-template-columns:120px 1fr;gap:16px;
+    padding-bottom:14px;border-bottom:1px solid var(--line-soft);}
+  .qa .row:last-child{border-bottom:0;padding-bottom:0;}
+  .qa .q{font-family:var(--mono);font-size:.72rem;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--steel);padding-top:3px;}
+  .qa .a{font-size:1rem;color:#2C3238;}
+  .qa .a p{margin:0;}
+
+  /* ---- analogy callout ---- */
+  .ex{margin-top:20px;padding:16px 20px;border-left:3px solid var(--teal);
+    background:var(--teal-soft);border-radius:0 10px 10px 0;}
+  .comp.heart .ex{border-left-color:var(--signal);background:var(--signal-soft);}
+  .ex .label{display:block;margin-bottom:4px;}
+  .ex p{margin:0;font-size:1rem;}
+
+  /* ---- worked example table ---- */
+  .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card);}
+  table{border-collapse:collapse;width:100%;min-width:520px;font-size:.95rem;}
+  th,td{text-align:left;padding:13px 18px;border-bottom:1px solid var(--line-soft);vertical-align:top;}
+  thead th{background:#FAFBFC;font-family:var(--mono);font-size:.7rem;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--steel);font-weight:600;}
+  tbody tr:last-child td{border-bottom:0;}
+  td.t{font-family:var(--mono);color:var(--teal);white-space:nowrap;font-size:.85rem;}
+  tbody tr.fire td.t{color:var(--signal);font-weight:700;}
+
+  /* ---- why list ---- */
+  .why{display:grid;gap:14px;margin-top:8px;counter-reset:w;}
+  .why li{list-style:none;display:flex;gap:16px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;padding:18px 20px;}
+  .why li::before{counter-increment:w;content:counter(w);font-family:var(--mono);
+    font-weight:700;color:var(--signal);font-size:.9rem;flex:0 0 auto;
+    width:26px;height:26px;border-radius:6px;background:var(--signal-soft);
+    display:grid;place-items:center;}
+  .why b{display:block;margin-bottom:2px;}
+  .why span{font-size:.97rem;color:#3C434A;}
+
+  /* ---- footer decisions ---- */
+  footer{background:#101417;color:#AEBBC2;padding:48px 0;}
+  footer h2{color:#FFF;font-size:1.25rem;}
+  .decisions{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px;}
+  .decisions .d{background:#1A2024;border:1px solid #2A3338;border-radius:12px;padding:20px;}
+  .decisions .label{color:#5BC2CC;}
+  .decisions b{color:#EAF0F2;display:block;margin:6px 0 4px;font-size:1.05rem;}
+  .decisions p{font-size:.9rem;color:#8A99A1;margin:0;}
+  .foot-note{margin-top:26px;font-size:.82rem;color:#6B7980;font-family:var(--mono);}
+
+  @media (max-width:640px){
+    .duo,.decisions{grid-template-columns:1fr;}
+    .qa .row{grid-template-columns:1fr;gap:4px;}
+    section{padding:46px 0;}
+  }
+  @media (prefers-reduced-motion:reduce){#wave{opacity:.32;}}
+</style>
+
+<header class="hero">
+  <canvas id="wave" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <span class="eyebrow">OneVoice AI Challenge · Kiến trúc đề xuất</span>
+    <h1>Phiên dịch cabin<br>bỏ túi</h1>
+    <p class="lead">Một thiết bị dịch giọng nói thời gian thực, chạy 100% trên điện thoại — dịch <em>trong lúc</em> người ta đang nói, không chờ nói xong.</p>
+    <div class="hero-tag">
+      <span>NGHE</span><b>→</b><span>DỊCH</span><b>→</b><span>NÓI</span>
+      <b style="color:#E2580B">·</b><span>streaming, on-device</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Ý tưởng cốt lõi</span>
+      <h2>Người ghi chép, hay phiên dịch cabin?</h2>
+    </div>
+    <div class="duo">
+      <div class="pane old">
+        <span class="tag">Kiểu cũ · batch</span>
+        <h3>Người ghi chép</h3>
+        <p>Bạn nói hết câu → im lặng → máy mới bắt đầu dịch → rồi mới phát ra. Chậm, ngắt quãng, mất tự nhiên.</p>
+      </div>
+      <div class="pane good">
+        <span class="tag">Kiểu SOTA · streaming</span>
+        <h3>Phiên dịch cabin (LHQ)</h3>
+        <p>Dịch <em>ngay trong lúc</em> diễn giả đang nói, chỉ trễ vài giây. Đây là cảm giác mà đề bài muốn: phản hồi gần như tức thời, ít gián đoạn.</p>
+      </div>
+    </div>
+    <p style="margin-top:22px;color:#3C434A">Mọi kỹ thuật bên dưới chỉ phục vụ một mục tiêu: <strong>làm cho cái máy hành xử như phiên dịch cabin, chứ không phải người ghi chép.</strong></p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap wide">
+    <div class="sec-head">
+      <span class="eyebrow">Toàn cảnh</span>
+      <h2>Dây chuyền 5 khối</h2>
+    </div>
+    <ol class="pipe">
+      <li class="step"><div class="node">1</div><div class="body">
+        <div class="ttl"><h3>VAD</h3><span class="role">Có ai đang nói không?</span></div>
+        <p>Bộ lọc nhẹ luôn lắng nghe, chỉ đánh thức cả hệ thống khi thật sự có người mở miệng — bỏ qua tiếng máy móc, tiếng ồn.</p>
+      </div></li>
+      <li class="step"><div class="node">2</div><div class="body">
+        <div class="ttl"><h3>ASR streaming</h3><span class="role">Tai + tốc ký</span></div>
+        <p>Biến tiếng nói thành chữ, hiện dần ra trong lúc đang nói (bản tạm → bản chốt).</p>
+      </div></li>
+      <li class="step"><div class="node">3</div><div class="body">
+        <div class="ttl"><h3>Nhận diện dấu câu</h3><span class="role">Câu đã hết chưa?</span></div>
+        <p>Tự thêm dấu chấm/phẩy để biết khi nào "đủ ý để dịch" và khi nào cần dọn bộ nhớ.</p>
+      </div></li>
+      <li class="step heart"><div class="node">4</div><div class="body">
+        <div class="ttl"><h3>MT streaming + AlignAtt</h3><span class="role" style="color:#E2580B">Trái tim · khi nào nên dịch</span></div>
+        <p>Dịch chữ nguồn sang chữ đích — và quyết định thông minh: chờ thêm, hay dịch ngay.</p>
+      </div></li>
+      <li class="step"><div class="node">5</div><div class="body">
+        <div class="ttl"><h3>TTS</h3><span class="role">Cái miệng</span></div>
+        <p>Biến chữ tiếng đích thành giọng nói phát ra loa cho người bận tay nghe.</p>
+      </div></li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Từng khối · giải thích cho người non-tech</span>
+      <h2>Mỗi khối làm gì, và vì sao cần nó</h2>
+    </div>
+
+    <article class="comp">
+      <div class="kicker"><span class="chip">01 · VAD</span><h3>Tai biết khi nào có người nói</h3></div>
+      <div class="qa">
+        <div class="row"><div class="q">Là gì</div><div class="a"><p>Một bộ lọc nhỏ, luôn lắng nghe và trả lời đúng một câu: <em>"Đây là tiếng người, hay chỉ là tạp âm?"</em></p></div></div>
+        <div class="row"><div class="q">Vấn đề</div><div class="a"><p>Nhà máy ồn ào. Nếu nhồi hết mọi âm thanh vào khối nhận dạng (nặng, tốn pin), máy vừa chậm vừa dịch nhầm cả tiếng ồn thành chữ.</p></div></div>
+        <div class="row"><div class="q">Cách chạy</div><div class="a"><p>Cắt âm thanh thành mẩu ~20–30 mili-giây, mỗi mẩu hỏi "có giọng người không?". Có → mở van; im lặng/ồn → đóng van. Dùng loại nhẹ như FSMN-VAD.</p></div></div>
+      </div>
+      <div class="ex"><span class="label">Ví dụ dễ hiểu</span><p>Giống cái <strong>đèn cảm ứng bật khi có người</strong> — chỉ thắp sáng khi cần, còn lại thì tắt để tiết kiệm.</p></div>
+    </article>
+
+    <article class="comp">
+      <div class="kicker"><span class="chip">02 · ASR</span><h3>Tiếng nói → chữ, hiện dần</h3></div>
+      <div class="qa">
+        <div class="row"><div class="q">Là gì</div><div class="a"><p>Khối phiên âm giọng nói thành chữ. "Streaming" = chữ hiện ra <em>trong lúc</em> bạn đang nói.</p></div></div>
+        <div class="row"><div class="q">Tinh tế</div><div class="a"><p><strong>Bản TẠM</strong> (partial): đoán nhanh, hiện ngay để thấy phản hồi tức thì — có thể còn sai, sẽ tự sửa. <strong>Bản CHỐT</strong> (final): khi đã chắc, "đóng băng" để đưa đi dịch &amp; phát giọng (vì giọng đã phát thì không sửa được).</p></div></div>
+        <div class="row"><div class="q">Cách chạy</div><div class="a"><p>PhoWhisper (VI), Whisper-small (EN), Paraformer-zh (ZH), EZWhisper-KR (KO).</p></div></div>
+      </div>
+      <div class="ex"><span class="label">Ví dụ dễ hiểu</span><p>Như <strong>phụ đề tự động trên YouTube</strong>: bạn nói "cho tôi cái cờ…" → hiện <em>"cờ lê"</em>; nói tiếp "…cờ-lê 14 ly" → chốt lại "cờ lê".</p></div>
+    </article>
+
+    <article class="comp">
+      <div class="kicker"><span class="chip">03 · Dấu câu</span><h3>Câu này đã hết chưa?</h3></div>
+      <div class="qa">
+        <div class="row"><div class="q">Là gì</div><div class="a"><p>Khối tự thêm dấu chấm/phẩy vào dòng chữ — vì giọng nói không "đọc" ra dấu câu.</p></div></div>
+        <div class="row"><div class="q">Vấn đề</div><div class="a"><p>Máy dịch tốt nhất khi có trọn ý. Nhưng trong luồng nói liên tục, làm sao biết "đã xong một ý" hay "còn nói dở"?</p></div></div>
+        <div class="row"><div class="q">Làm 2 việc</div><div class="a"><p><strong>(1)</strong> Báo khối dịch: "đủ ý rồi, dịch đi!" — không chờ vô tận. <strong>(2)</strong> Dọn bộ nhớ: xóa câu cũ khỏi RAM. Điện thoại không có RAM vô hạn như server — không dọn thì nói càng lâu càng treo.</p></div></div>
+      </div>
+      <div class="ex"><span class="label">Ví dụ dễ hiểu</span><p>Dấu chấm là <strong>điểm để ngắt dòng và dọn dẹp</strong> — như xuống dòng rồi xóa bảng để viết ý mới.</p></div>
+    </article>
+
+    <article class="comp heart">
+      <div class="kicker"><span class="chip">04 · MT + AlignAtt</span><h3>Trái tim: "khi nào nên dịch?"</h3></div>
+      <div class="qa">
+        <div class="row"><div class="q">Là gì</div><div class="a"><p>Biến chữ nguồn → chữ đích. Nhưng phần thông minh không nằm ở việc dịch (model nào cũng dịch được) — mà ở <strong>quyết định KHI NÀO bắt đầu dịch.</strong></p></div></div>
+        <div class="row"><div class="q">Thế lưỡng nan</div><div class="a"><p>Dịch <strong>quá sớm</strong> → thiếu thông tin → sai. Dịch <strong>quá muộn</strong> → trễ → mất real-time.</p></div></div>
+        <div class="row"><div class="q">Vì sao tiếng Hàn khó</div><div class="a"><p>Trật tự từ ngược: <span class="vi-en">Việt:</span> "Tôi <strong>ăn</strong> cơm" — <span class="vi-en">Hàn:</span> "Tôi cơm <strong>ăn</strong>" (động từ ở <strong>cuối</strong>). Nghe "Tôi cơm…" mà dịch vội thành "I rice…" là sai — phải chờ động từ ra.</p></div></div>
+        <div class="row"><div class="q">AlignAtt</div><div class="a"><p>Máy luôn "dồn chú ý" vào những chữ nguồn nó đang dùng. Nếu còn chú ý vào <strong>chữ vừa mới nghe</strong> (chưa ổn) → <strong>CHỜ</strong>. Nếu chú ý đã lùi về <strong>chữ cũ chắc chắn</strong> → <strong>DỊCH</strong>. Có núm xoay (δ) chỉnh "ưa nhanh / ưa chính xác" ngay lúc chạy.</p></div></div>
+        <div class="row"><div class="q">Kết quả đo</div><div class="a"><p>Giảm <strong>35% độ trễ cảm nhận, xuống ~1.5 giây</strong>, chất lượng gần bằng kiểu chờ-trọn-câu. Model: Qwen3-4B + từ điển thuật ngữ ngành.</p></div></div>
+      </div>
+      <div class="ex"><span class="label">Ví dụ dễ hiểu</span><p>Là <strong>giác quan của phiên dịch viên</strong> — biết tự hỏi "mình đã nghe đủ để dịch chính xác chưa?" ở từng nhịp.</p></div>
+    </article>
+
+    <article class="comp">
+      <div class="kicker"><span class="chip">05 · TTS</span><h3>Cái miệng</h3></div>
+      <div class="qa">
+        <div class="row"><div class="q">Là gì</div><div class="a"><p>Biến chữ tiếng đích → giọng nói phát ra loa.</p></div></div>
+        <div class="row"><div class="q">Vấn đề</div><div class="a"><p>Công nhân bận tay, đeo găng, không nhìn màn hình được → phải <strong>nghe</strong> bản dịch. Màn hình chỉ là phụ trợ.</p></div></div>
+        <div class="row"><div class="q">Đã chốt</div><div class="a"><p>Kokoro (hay, nhẹ) <strong>không có tiếng Việt</strong> → chiều dịch <em>ra</em> tiếng Việt dùng Piper / Moonshine. Kokoro lo EN/ZH/KO.</p></div></div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<section>
+  <div class="wrap wide">
+    <div class="sec-head">
+      <span class="eyebrow">Ráp lại</span>
+      <h2>Một câu nói, đi qua cả dây chuyền</h2>
+      <p style="color:#3C434A;margin-top:8px">Tổ trưởng người Hàn nói: <strong>"부품을 왼쪽에 놓으세요"</strong> <span class="vi-en">— "Đặt linh kiện sang bên trái"</span></p>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Thời điểm</th><th>Chuyện gì xảy ra</th></tr></thead>
+        <tbody>
+          <tr><td class="t">Mở miệng</td><td>VAD bật van, đánh thức hệ thống.</td></tr>
+          <tr><td class="t">"부품을…"<br><span class="vi-en">linh kiện</span></td><td>ASR phiên âm dần, màn hình hiện bản tạm. MT thấy mới có danh từ, <strong>chưa có động từ → CHỜ</strong>.</td></tr>
+          <tr><td class="t">"왼쪽에…"<br><span class="vi-en">bên trái</span></td><td>ASR phiên âm tiếp; MT vẫn chờ vì động từ tiếng Hàn ở cuối.</td></tr>
+          <tr class="fire"><td class="t">"놓으세요"<br><span class="vi-en">hãy đặt</span></td><td>Động từ ra! ASR đoán <strong>kết câu (dấu chấm)</strong> → MT <strong>DỊCH NGAY</strong> → "Đặt linh kiện sang bên trái".</td></tr>
+          <tr><td class="t">Tức thì</td><td>TTS (Piper) đọc tiếng Việt ra loa; phụ đề chốt hiện trên màn hình; bộ nhớ được dọn cho câu sau.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:18px;color:#3C434A">Tổng trễ cảm nhận: <strong>~1–1.5 giây</strong> sau khi anh ấy dứt lời. Đó là cảm giác "phiên dịch cabin".</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Quyết định kiến trúc</span>
+      <h2>Vì sao chọn 3-khối nối tiếp, không "1 model làm tất"?</h2>
+      <p style="color:#3C434A;margin-top:8px">Có hướng "một model AI nuốt thẳng giọng → đẻ ra giọng" (end-to-end). Gọn hơn, nhưng không hợp cuộc thi này:</p>
+    </div>
+    <ol class="why">
+      <li><span><b>Khó nhét vào điện thoại</b>Loại all-in-one nặng, khó tối ưu xuống chip Hexagon. Pipeline 3-khối thì Qualcomm AI Hub đã có sẵn từng mảnh được tối ưu trước.</span></li>
+      <li><span><b>Tiếng Việt + Hàn/Trung là low-resource</b>Gần như không có model all-in-one phủ đủ 3 cặp có tiếng Việt. Pipeline cho phép thay từng khối bằng model tốt nhất cho từng ngôn ngữ.</span></li>
+      <li><span><b>Sửa &amp; đo được từng phần</b>Hỏng chỗ nào biết chỗ đó. End-to-end là hộp đen — hỏng không biết tại đâu, chết ở vòng tinh chỉnh.</span></li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap wide">
+    <h2>Đã chốt cho bài dự thi</h2>
+    <div class="decisions">
+      <div class="d"><span class="label">Thiết bị</span><b>App trên điện thoại Snapdragon 8 Elite</b><p>Đúng "any portable device", BOM thấp, Hexagon NPU mạnh. Dev trên phone đang có → benchmark qua Qualcomm AI Hub.</p></div>
+      <div class="d"><span class="label">Ngách</span><b>Nhà máy FDI Hàn / Đài tại VN</b><p>Khớp đúng 2 cặp khó-nhất-giá-trị-cao-nhất VI↔KO, VI↔ZH. VI↔EN làm demo "ăn chắc".</p></div>
+    </div>
+    <p class="foot-note">Kiến trúc: cascaded streaming · NGHE → DỊCH → NÓI · 100% on-device · mục tiêu UPL ~1.5s</p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var c=document.getElementById('wave');if(!c)return;
+  var ctx=c.getContext('2d'),w,h,dpr=Math.min(window.devicePixelRatio||1,2);
+  var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+  function size(){w=c.clientWidth;h=c.clientHeight;c.width=w*dpr;c.height=h*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);}
+  size();window.addEventListener('resize',size);
+  var lines=[{a:0.9,k:0.011,sp:0.018,col:'rgba(91,194,204,0.55)'},
+             {a:0.6,k:0.016,sp:0.026,col:'rgba(226,88,11,0.45)'}];
+  function draw(t){
+    ctx.clearRect(0,0,w,h);
+    for(var i=0;i<lines.length;i++){var L=lines[i];
+      ctx.beginPath();
+      for(var x=0;x<=w;x+=4){
+        var env=Math.sin(x/w*Math.PI); // taper at edges
+        var y=h*0.55 + Math.sin(x*L.k + t*L.sp + i)*h*0.16*L.a*env;
+        x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      }
+      ctx.strokeStyle=L.col;ctx.lineWidth=2;ctx.stroke();
+    }
+  }
+  if(reduce){draw(0);return;}
+  var t=0;function loop(){t+=1;draw(t);requestAnimationFrame(loop);}loop();
+})();
+</script>

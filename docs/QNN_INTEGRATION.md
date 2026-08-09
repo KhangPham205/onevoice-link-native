@@ -1,105 +1,99 @@
 # QNN / Hexagon HTP integration
 
-This document covers how the Qualcomm AI Runtime (QNN) SDK is wired into the build, how its shared libraries are packaged into the APK, and how they are loaded at runtime.
+OneVoice dynamically loads QAIRT, restores six context binaries on HTP, and
+executes their graphs through a generic raw-buffer bridge. The live orchestration
+is in Kotlin; native code owns QNN metadata and the performance-sensitive audio
+frontends.
 
-## SDK layout
+## Runtime loading order
 
-The SDK is vendored (not committed) under `native-core/third_party/qnn_sdk/`, flat — `include/QNN/` and `lib/aarch64-android/` sit directly beneath it (no nested version folder). `CMakeLists.txt` points at exactly those paths:
+`libonevoice_core.so` has no QNN `DT_NEEDED` entries. The order is deliberate:
 
-```cmake
-set(QNN_SDK_DIR ${THIRD_PARTY_DIR}/qnn_sdk)
-target_include_directories(onevoice_core PRIVATE ${QNN_SDK_DIR}/include/QNN)
-target_link_directories   (onevoice_core PRIVATE ${QNN_SDK_DIR}/lib/aarch64-android)
-target_link_libraries     (onevoice_core PRIVATE QnnSystem QnnHtp QnnHtpPrepare)
+1. extract the matching Hexagon v73 skeleton into app-accessible storage;
+2. publish `ADSP_LIBRARY_PATH`;
+3. expose/load the public vendor `libcdsprpc.so` and request unsigned PD;
+4. `dlopen` packaged `libQnnSystem.so` and `libQnnHtp.so`;
+5. create one backend/device and one context per `.bin`;
+6. retrieve the exact graph name declared in `npu_manifest.json`.
+
+The manifest must contain the Android linker declaration because target API 31+
+cannot access even public vendor libraries unless it requests them:
+
+```xml
+<uses-native-library
+    android:name="libcdsprpc.so"
+    android:required="true" />
 ```
 
-## The versioned interface accessor
+`ADSP_LIBRARY_PATH` only controls DSP skeleton lookup. It does not modify the
+Android CPU linker namespace and it does not bypass SELinux or signing policy.
 
-QNN does not expose its functions as free symbols. A backend `.so` fills a `QnnInterface_t`, whose function pointers live inside a **versioned union member** named by the macro `QNN_INTERFACE_VER_NAME` (e.g. `v2_xx`, resolved from the SDK's API version):
+## Packaging
 
-```cpp
-// WRONG — no such member on the outer struct:
-state_->api->backendCreate(…);
+Gradle stages the ARM64 QAIRT host libraries in the APK. The Hexagon skeleton is
+a DSP ELF, not an ARM64 JNI library; it is kept as an asset and copied
+byte-for-byte into `filesDir/dsp` before runtime initialization.
 
-// RIGHT — go through the version accessor:
-state_->api->QNN_INTERFACE_VER_NAME.backendCreate(…);
+The current retail device runs the QAIRT unsigned v73 skeleton in unsigned PD.
+A generated `testsig-*.so` is neither a replacement QNN skeleton nor a way to
+authenticate arbitrary DSP code on production Samsung firmware.
+
+## Graph metadata and execution
+
+`QnnRuntime::loadModel` calls `QnnSystemContext_getBinaryInfo` before freeing the
+system context. It deep-copies every execution-critical tensor field:
+
+- tensor version, ID, name, type and data format;
+- data type and quantization parameters;
+- rank and dimensions.
+
+`QnnRuntime::executeGraph(stage, inputs, outputs, error)` then recreates the QNN
+tensor descriptors, attaches caller-owned direct buffers as RAW client buffers,
+validates count and byte capacity, and invokes `graphExecute`. Execution and
+context release share a mutex so a teardown cannot race a non-interruptible HTP
+call.
+
+Kotlin passes direct `ByteBuffer` instances through `OneVoiceNative` and reuses
+persistent buffers across utterances. This avoids per-token/per-bucket native
+allocations and direct-buffer accumulation.
+
+## Host glue versus learned inference
+
+The QNN package is a cascade, not one end-to-end graph. `NpuPipeline` performs
+the deterministic glue required to drive it:
+
+- ASR: 16 kHz NeMo-compatible fbank and CTC greedy decoding;
+- MT: SentencePiece and autoregressive Marian decoding with a persistent KV
+  cache;
+- TTS: token/style lookup, duration alignment, learned QNN prosody, harmonic
+  STFT, bucketed QNN waveform decoding, and seam fades.
+
+Every learned stage runs on HTP. The legacy `executeCascade` native entry point
+remains only for ABI compatibility and returns `false`; the live path calls the
+generic executor graph by graph.
+
+## Failure diagnosis
+
+`0x36b1` is `QNN_DEVICE_ERROR_INVALID_CONFIG`, not a signature diagnosis. Always
+read earlier lines in the log. The resolved incident on the target phone was:
+
+```text
+libcdsprpc.so not found
+  -> loadRemoteSymbols error 4000
+  -> transport setup 14001 / 0x36b1
 ```
 
-Using the macro (rather than a hard-coded `v2_23`) keeps the code portable across SDK versions. Note also that **there is no `graphFree`** in the QNN API — a graph is owned by its context and released by `contextFree`; and **`deviceFree` takes a single argument** (the device handle). These are reflected in `qnn_inference.cpp`.
+Adding the `uses-native-library` declaration exposed the firmware's public
+FastRPC library; `remote_session_control(UNSIGNED_MODULE)=0` then succeeded and
+all contexts loaded. See
+[the incident postmortem](incidents/2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md).
 
-## Bring-up sequence
+## Lifecycle invariants
 
-`QnnInference::init()` runs these steps in order, tearing down on any failure:
-
-1. **`loadBackend_`** — `dlopen(backendPath)` (e.g. `libQnnHtp.so`), `dlsym("QnnInterface_getProviders")`, enumerate the returned providers and select the one whose `coreApiVersion` matches the compiled headers (`QNN_API_VERSION_MAJOR`, `minor >=`), copy its interface, then `backendCreate(logger=null, config=null, &backend)`.
-2. **`createContextFromBinary_`** — `deviceCreate(logger=null, config=null, &device)`, read the `.bin` into memory, `contextCreateFromBinary(backend, device, config=null, blob, size, &context, profile=null)` (loads the pre-compiled graphs straight onto the HTP — no on-device compilation).
-3. **`retrieveGraph_`** — `graphRetrieve(graphName)`.
-4. **`mapTensors_`** 🚧 — bind the raw-audio input and synthesized-PCM output tensors to the model's static INT8 shapes. **Placeholder** (model-specific; owned by the AI team).
-5. **`registerZeroCopyMem_`** 🚧 — register ION/FastRPC buffers with `QnnMem_register` so the HTP DMAs input/output directly, avoiding a per-`execute()` copy. **Placeholder.**
-
-`execute()` then runs `graphExecute` per 1 s audio chunk (🚧 currently a silence stub until the tensor binding above is wired).
-
-## Packaging the runtime `.so` into the APK
-
-**Linking is not packaging.** CMake links `libonevoice_core.so` against the QNN libs, but AGP does *not* automatically copy prebuilt link-time dependencies into the APK. If they are missing from `nativeLibraryDir`, loading fails at runtime. So `build.gradle.kts` stages the required subset:
-
-```kotlin
-val copyQnnRuntimeLibs = tasks.register<Sync>("copyQnnRuntimeLibs") {
-    from(qnnAndroidLibDir) {
-        include("libQnnSystem.so", "libQnnHtp.so", "libQnnHtpPrepare.so", "libQnnHtpV*Stub.so")
-    }
-    into(File(qnnStagingRoot, "arm64-v8a"))
-    // … existence check via a locally-captured File (config-cache safe)
-}
-// registered as an extra jniLibs source dir; sequenced before the jniLibs merge.
-```
-
-This keeps ~96 MB of binaries out of git while guaranteeing they land in `lib/arm64-v8a/`. `packaging { jniLibs { useLegacyPackaging = false } }` stores them uncompressed and 16 KB page-aligned.
-
-Packaged set: `libQnnSystem.so`, `libQnnHtp.so`, `libQnnHtpPrepare.so`, and the CPU-side FastRPC stubs `libQnnHtpV{68,69,73,75,79,81}Stub.so` (+ their `CalculatorStub` variants), covering every recent Snapdragon HTP generation.
-
-## Runtime load chain (verified with `readelf`)
-
-A subtle but important point about *how* the libraries are loaded:
-
-- `libonevoice_core.so` has **no `NEEDED` entry** for any QNN library. The linker's default `--as-needed` drops them because the core references no QNN symbol at link time — it **`dlopen`s `libQnnHtp.so` at runtime** (the path passed as `backendPath`). Therefore `System.loadLibrary("onevoice_core")` succeeds on its own.
-- `libQnnHtp.so` in turn hard-depends only on system libs (`libc/libm/libdl/liblog`) and **`dlopen`s** `libQnnHtpPrepare.so` and the arch-appropriate `libQnnHtpV<arch>Stub.so` by name.
-
-So the whole chain resolves as long as every one of those files sits in `nativeLibraryDir` — which is exactly what the packaging step guarantees.
-
-```
-System.loadLibrary("onevoice_core")     → loads cleanly (no QNN in NEEDED)
-      └─ dlopen("<nativeLibDir>/libQnnHtp.so")   (backendPath from Kotlin)
-             ├─ dlopen("libQnnHtpPrepare.so")
-             └─ dlopen("libQnnHtpV<arch>Stub.so")  → FastRPC → Hexagon skel on the DSP
-```
-
-> The Hexagon-side skeletons (`libQnnHtpV<arch>Skel.so`, under `lib/hexagon-v<arch>/`) run on the DSP itself and are loaded over FastRPC from the platform's `ADSP_LIBRARY_PATH`, not from the APK. They are intentionally **not** in the packaged set.
-
-## Status & roadmap
-
-| Area | State |
-|---|---|
-| SDK bind (headers + link) | ✅ done |
-| `.so` packaging into APK | ✅ done, verified |
-| `dlopen` chain / library resolution | ✅ verified |
-| backend / device / context-from-binary / graph retrieve | ✅ wired against the real C API |
-| Tensor mapping (INT8 static shapes) | 🚧 placeholder — needs the model's `.dlc` tensor names/shapes |
-| QnnMem zero-copy (ION/FastRPC) | 🚧 placeholder — perf optimization |
-| `graphExecute` + PCM↔INT8 (de)quant | 🚧 placeholder — silence stub |
-| Serialized context binary (`.bin`) | ⛔ not yet supplied; `initEngine` fails at `contextCreateFromBinary` until it is |
-
-**To finish the inference path:** supply a QNN context `.bin` compiled for the target HTP, fill in `mapTensors_` with the model's tensor names/shapes and quant params, implement the (de)quantization in `execute()`, and (optionally) wire `registerZeroCopyMem_` for DMA inputs. The exact information the model team must hand over is specified in [MODEL_HANDOFF.md](MODEL_HANDOFF.md).
-
-## Bring-up correctness fixes
-
-Every QNN handle is a `void*` typedef, so argument mistakes on the C API compile cleanly and only surface as runtime failures. These were found and fixed in the bring-up path:
-
-| Fix | Was | Now |
-|---|---|---|
-| Provider entry point | `dlsym("QnnInterface_getProviderInterface")` — **symbol does not exist**; load would always fail | `dlsym("QnnInterface_getProviders")`, enumerate the list, and select the provider whose `coreApiVersion` matches the compiled headers |
-| `deviceCreate` | backend handle passed into the **logger** slot | `deviceCreate(logger=null, config=null, &device)` — there is no backend parameter |
-| `contextCreateFromBinary` | arguments **shifted** (device passed as backend, null as device) | `(backend, device, config, binary, size, &context, profile)` in the correct order |
-| `nativeStartEngine` (JNI) | a second start move-assigned a new thread onto the live worker → `std::terminate()` | idempotent — a start while running is a no-op returning `true` |
-
-There are **no** standalone `graphFree` (graphs are freed with the context) and `deviceFree` takes a single argument — both reflected in `shutdown()`.
+- Set the DSP search path and unsigned/signed PD mode before the first FastRPC
+  interaction.
+- Never silently fall back from requested signed PD to a null/default device.
+- Never free a context while its graph is executing.
+- Graphs are owned by contexts; QNN has no standalone `graphFree`.
+- Stop capture, join the pipeline worker, release contexts, then free device,
+  backend, and dynamic-library handles in reverse order.

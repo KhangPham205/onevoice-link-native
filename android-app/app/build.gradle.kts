@@ -6,11 +6,9 @@ plugins {
 // ============================================================================
 // Task 2 — Qualcomm QNN runtime library staging
 // ----------------------------------------------------------------------------
-// CMake *links* libonevoice_core.so against QnnSystem / QnnHtp / QnnHtpPrepare,
-// but linking is not packaging: those prebuilt .so files are NOT emitted into
-// the APK by the externalNativeBuild. Their sonames are recorded as ELF NEEDED
-// entries in libonevoice_core.so, so if they are absent from nativeLibraryDir
-// the very first System.loadLibrary("onevoice_core") throws UnsatisfiedLinkError.
+// The native wrapper dlopen()s QNN after ADSP_LIBRARY_PATH is configured. CMake
+// deliberately does not link these .so files (that would create eager NEEDED
+// entries), but dlopen dependencies still have to be packaged in the APK.
 //
 // We stage the exact subset the core depends on into a build-managed folder and
 // register it as an extra jniLibs source dir. Advantages over committing the
@@ -22,6 +20,15 @@ val qnnAndroidLibDir =
 // Resolved eagerly to a File: AGP 9's jniLibs.srcDir rejects lazy Providers
 // (it can't tell generated vs. static). The <abi> subdir lives beneath this root.
 val qnnStagingRoot = layout.buildDirectory.dir("qnnJniLibs").get().asFile
+val qnnSignedDspAssetsRoot = layout.buildDirectory.dir("qnnSignedDspAssets").get().asFile
+val qnnSignedSkelSource = providers.gradleProperty("qnnSignedSkel")
+    .orNull
+    ?.let(::file)
+val qnnPdMode = providers.gradleProperty("qnnPdMode").orElse("auto").get().also {
+    require(it in setOf("auto", "signed", "unsigned")) {
+        "qnnPdMode must be auto, signed, or unsigned (got '$it')"
+    }
+}
 
 val copyQnnRuntimeLibs = tasks.register<Sync>("copyQnnRuntimeLibs") {
     description = "Stage the QNN runtime .so files that libonevoice_core.so " +
@@ -51,6 +58,35 @@ val copyQnnRuntimeLibs = tasks.register<Sync>("copyQnnRuntimeLibs") {
     }
 }
 
+// Optional licensed artifact injection:
+//   ./gradlew :app:assembleDebug \
+//     -PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
+//
+// The DSP6 binary must be an asset, not an arm64 jniLib. It is extracted to a
+// real file at runtime and selected together with signed-PD device config. When
+// the property is absent this Sync task empties its output, preventing a stale
+// signed binary from leaking into a later build.
+val prepareQnnSignedDspAssets = tasks.register<Sync>("prepareQnnSignedDspAssets") {
+    description = "Stage an externally supplied production/test-signed Hexagon v73 skeleton."
+    group = "build"
+
+    if (qnnSignedSkelSource != null) {
+        from(qnnSignedSkelSource) {
+            rename { "libQnnHtpV73Skel.so" }
+        }
+    }
+    into(File(qnnSignedDspAssetsRoot, "dsp/signed"))
+
+    val signedSkel = qnnSignedSkelSource
+    doFirst {
+        if (signedSkel != null) {
+            require(signedSkel.isFile) {
+                "qnnSignedSkel does not name a file: $signedSkel"
+            }
+        }
+    }
+}
+
 android {
     namespace = "com.onevoice.link"
     compileSdk {
@@ -59,12 +95,21 @@ android {
         }
     }
 
+    // Pinned so every machine builds the core with the same toolchain; AGP's
+    // implicit default drifts between plugin versions.
+    ndkVersion = "27.2.12479018"
+
     defaultConfig {
         applicationId = "com.onevoice.link"
         minSdk = 28
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+
+        // `auto` uses the matching unsigned QAIRT skeleton unless an explicitly
+        // supplied signed skeleton is staged. `signed` never falls back to an
+        // unsigned/OEM-mismatched image.
+        buildConfigField("String", "QNN_PD_MODE", "\"$qnnPdMode\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -74,13 +119,11 @@ android {
         }
 
         // Task 1 — inject the optimized C++ toolchain flags and shared STL.
-        // -flto is set at compile here; the matching link-time -flto lives in
-        // native-core/CMakeLists.txt (CMAKE_SHARED_LINKER_FLAGS) so LTO is
-        // end-to-end. ANDROID_STL=c++_shared is required because Oboe/QNN and
+        // ANDROID_STL=c++_shared is required because Oboe/QNN and
         // our core must agree on a single libc++ instance across .so boundaries.
         externalNativeBuild {
             cmake {
-                cppFlags("-std=c++20", "-O3", "-flto")
+                cppFlags("-std=c++20")
                 arguments("-DANDROID_STL=c++_shared")
             }
         }
@@ -100,7 +143,16 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(qnnStagingRoot)
+            assets.srcDir(qnnSignedDspAssetsRoot)
         }
+    }
+
+    androidResources {
+        // The Hexagon skel ships as an asset (ADSP_LIBRARY_PATH needs a real
+        // file on disk, and packaged jniLibs are never extracted here). Storing
+        // it uncompressed lets the app check its size via openFd and stream it
+        // out without inflating 11 MB.
+        noCompress += "so"
     }
 
     packaging {
@@ -109,11 +161,29 @@ android {
             // dynamic loader can mmap the libs directly on 16 KB-page devices
             // (Android 15+), matching how the core .so is aligned in CMake.
             useLegacyPackaging = false
+            // sherpa-onnx is the complete offline fallback for ASR/TTS while
+            // MarianMT uses the official ORT Android artifact. The static-link
+            // sherpa AAR only overlaps ORT on unused 32-bit ABIs.
+            pickFirsts.add("lib/**/libonnxruntime.so")
         }
     }
 
     buildTypes {
+        debug {
+            externalNativeBuild {
+                cmake {
+                    // Fast compilation for debug builds
+                    cppFlags("-O0", "-g")
+                }
+            }
+        }
         release {
+            externalNativeBuild {
+                cmake {
+                    // Heavy optimization for production
+                    cppFlags("-O3", "-flto")
+                }
+            }
             optimization {
                 enable = false
             }
@@ -125,6 +195,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -132,13 +203,16 @@ android {
 // wire the staging task explicitly ahead of the jniLibs source merge (which
 // consumes the srcDir) and preBuild (so it also runs on a bare `assemble`).
 tasks.withType<com.android.build.gradle.tasks.MergeSourceSetFolders>().configureEach {
-    dependsOn(copyQnnRuntimeLibs)
+    dependsOn(copyQnnRuntimeLibs, prepareQnnSignedDspAssets)
 }
 tasks.named("preBuild") {
-    dependsOn(copyQnnRuntimeLibs)
+    dependsOn(copyQnnRuntimeLibs, prepareQnnSignedDspAssets)
 }
 
 dependencies {
+    implementation(files("libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar"))
+    implementation(libs.onnxruntime.android)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
