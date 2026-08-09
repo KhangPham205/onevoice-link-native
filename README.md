@@ -1,10 +1,10 @@
 # OneVoice Link
 
-> **Offline, on-device Speech-to-Speech Translation (S2ST) for Android**, with a runnable sherpa-onnx/ONNX Runtime pipeline and a separate Qualcomm® QNN/Hexagon™ context-verification path.
+> **Offline, on-device Speech-to-Speech Translation (S2ST) for Android**, with CPU, Qualcomm® QNN/Hexagon™ and hybrid execution paths.
 
 **Submitted to the OneVoice AI Challenge 2026.**
 
-OneVoice Link turns a Snapdragon® phone into an offline interpreter. The complete path is `AudioRecord` → energy VAD → NeMo CTC ASR → MarianMT → Kokoro TTS → `AudioTrack`; it runs locally without network or cloud. A second backend verifies the five delivered QNN context binaries on the Hexagon HTP, but does not claim speech execution because that artifact set is not yet a closed TTS pipeline.
+OneVoice Link turns a Snapdragon® phone into an offline interpreter. The complete path is `AudioRecord` → energy VAD → NeMo CTC ASR → MarianMT → Kokoro TTS → `AudioTrack`; it runs locally without network or cloud. Hybrid mode is the VI→EN default: ASR and translation execute on Hexagon HTP, while Kokoro renders the complete translated sentence on CPU for smooth speech.
 
 ---
 
@@ -12,9 +12,9 @@ OneVoice Link turns a Snapdragon® phone into an offline interpreter. The comple
 
 | Path | Current capability |
 |---|---|
-| **Offline CPU (default)** | Complete VI→EN / EN→VI ASR → MT → TTS orchestration. Only one direction is resident; capture queues and audio buffers are bounded. |
-| **QNN HTP · verify** | Initializes FastRPC/QNN, creates each context on SM8550/v73 and retrieves the exact graph declared by the manifest. |
-| **Native realtime core** | Oboe and lock-free SPSC infrastructure remain available for the future closed QNN execution cascade. |
+| **Hybrid (default)** | Complete VI→EN: QNN ASR + MarianMT on HTP, followed by whole-utterance CPU Kokoro. This is the recommended listening path. |
+| **Offline CPU** | Complete VI→EN / EN→VI ASR → MT → TTS reference pipeline. Only one direction is resident; queues and audio buffers are bounded. |
+| **Full QNN** | Complete six-stage VI→EN execution on HTP. Fixed-window Kokoro decoding requires host bucketing and currently has audible seam/continuity limitations. |
 
 ---
 
@@ -22,11 +22,16 @@ OneVoice Link turns a Snapdragon® phone into an offline interpreter. The comple
 
 ```mermaid
 flowchart LR
-  UI["Compose dashboard"] --> HF["Offline CPU backend"]
-  UI --> QNN["QNN HTP verify backend"]
+  UI["Compose dashboard"] --> Hybrid["Hybrid backend (default)"]
+  UI --> HF["Offline CPU backend"]
+  UI --> QNN["Full-QNN backend"]
   Mic([Mic]) --> HF
+  Mic --> Hybrid
+  Mic --> QNN
   HF --> ASR["sherpa NeMo CTC"] --> MT["ORT MarianMT"] --> TTS["sherpa Kokoro"] --> Speaker([Speaker])
-  QNN --> JNI["OneVoiceNative / C++"] --> HTP["5 QNN contexts on HTP"]
+  Hybrid --> JNI["OneVoiceNative / C++"] --> HTP["QNN ASR + MT contexts"]
+  HTP --> CPUK["whole-utterance CPU Kokoro"] --> Speaker
+  QNN --> JNI6["host tensor glue"] --> HTP6["6 QNN contexts on HTP"] --> Speaker
 ```
 
 Full details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -61,9 +66,10 @@ onevoice-link-native/
 `-- docs/                   Architecture, build, JNI API, QNN integration, NPU deploy
 ```
 
-> **Deploying to a phone:** use `push-hf-models.sh` for the runnable pipeline.
-> The separately compiled QNN `.bin` files are a load/compatibility proof only;
-> see [`docs/NPU_DEPLOY.md`](docs/NPU_DEPLOY.md) for that verify flow.
+> **Deploying to a phone:** Hybrid needs the QNN ASR/MT artifacts plus a Kokoro
+> CPU model; `push-npu-models.sh` stages the complete VI→EN bundle. Use
+> `push-hf-models.sh` for the bidirectional CPU reference path. See
+> [`docs/NPU_DEPLOY.md`](docs/NPU_DEPLOY.md).
 
 ---
 
@@ -88,9 +94,9 @@ onevoice-link-native/
    ```bash
    ./gradlew :app:installDebug
    cd ..
-   tools/models/push-hf-models.sh vi-en R5CW72TP4EP
+   tools/models/push-npu-models.sh vi-en R5CW72TP4EP
    ```
-   Grant microphone permission, leave **Offline CPU** selected, tap **Load Offline Models**, then **Start Translating**.
+   Grant microphone permission, leave **Hybrid** selected, tap **Load**, then **Start Translating**.
 
 See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags, and troubleshooting.
 
@@ -113,9 +119,10 @@ See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags,
 ## Project status
 
 - ✅ **Builds green** — `./gradlew :app:assembleDebug` produces a signed-debug APK for `arm64-v8a`.
-- ✅ **Runnable offline S2ST** — VI→EN was exercised on the connected SM8550 phone through transcript, translation, Kokoro waveform and replay.
-- ✅ **QNN bring-up** — unsigned-PD FastRPC, backend/device creation, all five contexts and graph retrieval are verified on SM8550/v73.
-- 🚧 **QNN execution** — `graphExecute` host glue is not implemented and the delivered Kokoro QNN split lacks learned F0/N, exact HAR and overlap-add artifacts. The UI labels this path verify-only.
+- ✅ **Runnable offline S2ST** — Hybrid VI→EN and CPU VI→EN / EN→VI produce transcript, translation, Kokoro waveform and replay entirely on device.
+- ✅ **QNN execution** — unsigned-PD FastRPC and `graphExecute` are working on SM8550/v73. Full QNN runs ASR, MT, Kokoro encoder, W8A8 prosody and decoder as six HTP contexts; its frontend uses exact eSpeak tokenization through a tiny bridge model.
+- ✅ **Hybrid default** — QNN ASR/MT feed whole-utterance CPU Kokoro, avoiding the audible seams of the fixed 25-frame QNN decoder.
+- 🚧 **Full-QNN TTS quality** — for the same test sentence, synthesis took about 1.2 s over three QNN buckets versus about 2.7 s in Hybrid. Playback delivered all frames, but QNN bucket seams remain less smooth than continuous CPU Kokoro.
 
 See the roadmap notes in [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md#status--roadmap).
 

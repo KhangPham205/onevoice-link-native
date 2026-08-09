@@ -68,15 +68,15 @@ fun DashboardScreen(
         onDispose { controller.shutdown() }
     }
 
-    val npuEngine = backends[BackendKind.QNN] as? NpuEngine
-    val unavailable = if (controller.backendKind == BackendKind.QNN) {
+    val npuEngine = backends[controller.backendKind] as? NpuEngine
+    val unavailable = if (controller.backendKind != BackendKind.HF) {
         TranslationDirection.entries
             .filter { npuEngine?.directionSpec(it)?.available == false }
             .toSet()
     } else {
         emptySet()
     }
-    val unavailableReason = if (controller.backendKind == BackendKind.QNN) {
+    val unavailableReason = if (controller.backendKind != BackendKind.HF) {
         npuEngine?.directionSpec(controller.direction)
             ?.takeIf { !it.available }
             ?.unavailableReason
@@ -172,14 +172,16 @@ fun DashboardContent(
                 unavailableReason = state.directionUnavailableReason,
             )
             if (state.isQnn) {
-                // Preserve the detailed per-context verification UI for QNN.
+                // Keep per-context proof visible while the same backend runs
+                // the live pipeline below it.
                 ModelCascadeCard(
                     stages = state.stages,
                     targetSoc = state.targetSoc,
                     hexagon = state.hexagon,
                     modelRootPath = state.modelRootPath,
                 )
-            } else {
+            }
+            if (state.showTranslationCard) {
                 TranslationCard(
                     transcript = state.transcript,
                     translation = state.translation,
@@ -197,8 +199,11 @@ fun DashboardContent(
             }
             Text(
                 text = stringResource(
-                    if (state.isQnn) R.string.scope_notice_qnn
-                    else R.string.scope_notice_offline,
+                    when {
+                        state.isHybrid -> R.string.scope_notice_hybrid
+                        state.isQnn -> R.string.scope_notice_qnn
+                        else -> R.string.scope_notice_offline
+                    },
                 ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

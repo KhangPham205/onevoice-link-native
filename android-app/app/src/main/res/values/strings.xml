@@ -14,13 +14,16 @@
     <!-- Status messages -->
     <string name="msg_idle">Idle — load the selected models to begin.</string>
     <string name="msg_idle_offline">Offline CPU selected — load ASR, translation, and speech models to begin.</string>
-    <string name="msg_idle_qnn">QNN HTP selected — load and verify the context binaries.</string>
+    <string name="msg_idle_qnn">QNN HTP selected — load the VI → EN NPU speech pipeline.</string>
+    <string name="msg_idle_hybrid">Hybrid selected — load QNN ASR/translation and continuous CPU speech.</string>
     <string name="msg_initializing">Loading the selected models…</string>
     <string name="msg_initializing_offline">Loading the complete offline ASR → MT → TTS pipeline…</string>
-    <string name="msg_initializing_qnn">Bringing up HTP and verifying the QNN cascade…</string>
+    <string name="msg_initializing_qnn">Bringing up HTP and loading the QNN speech cascade…</string>
+    <string name="msg_initializing_hybrid">Loading QNN ASR/translation and whole-utterance Kokoro…</string>
     <string name="msg_initialized">Models are ready.</string>
     <string name="msg_initialized_offline">Offline speech translation is ready.</string>
-    <string name="msg_initialized_qnn">All QNN contexts loaded and graph contracts verified.</string>
+    <string name="msg_initialized_qnn">QNN ASR → MT → TTS is ready on Hexagon HTP.</string>
+    <string name="msg_initialized_hybrid">Hybrid is ready: ASR/translation on HTP, continuous speech on CPU.</string>
     <string name="msg_init_failed">Model loading failed.</string>
     <string name="msg_native_error">Native error: %1$s</string>
     <string name="msg_starting">Opening the microphone and starting the offline pipeline…</string>
@@ -37,7 +40,7 @@
     <!-- Actions -->
     <string name="action_initialize">Load Models</string>
     <string name="action_load_offline">Load Offline Models</string>
-    <string name="action_verify_qnn">Verify QNN Cascade</string>
+    <string name="action_verify_qnn">Load NPU Pipeline</string>
     <string name="action_start_translating">Start Translating</string>
     <string name="action_stop_translating">Stop Translating</string>
     <string name="action_grant">Grant</string>
@@ -50,8 +53,9 @@
 
     <!-- Engine backend selector -->
     <string name="backend_selector_overline">ENGINE BACKEND</string>
-    <string name="backend_hf">Offline CPU</string>
-    <string name="backend_qnn">QNN HTP · verify</string>
+    <string name="backend_hf">CPU</string>
+    <string name="backend_qnn">NPU</string>
+    <string name="backend_hybrid">Hybrid</string>
 
     <!-- Conversation direction -->
     <string name="direction_overline">DIRECTION</string>
@@ -79,7 +83,8 @@
 
     <!-- Scope banners: keep the capability boundary explicit per backend -->
     <string name="scope_notice_offline">Runnable offline path: audio stays on the phone and is processed by the CPU ASR → MT → TTS pipeline.</string>
-    <string name="scope_notice_qnn">QNN verify-only path: context binaries are placed on the HTP and their graph contracts are checked. This backend does not execute speech translation yet.</string>
+    <string name="scope_notice_qnn">NPU path: all learned ASR, translation, prosody, and speech graphs execute as QNN context binaries on Hexagon HTP. Audio/VAD and deterministic tensor transforms stay on-device on the CPU.</string>
+    <string name="scope_notice_hybrid">Hybrid path: ASR and translation execute as QNN contexts on Hexagon HTP; Kokoro renders the complete translated sentence on CPU to avoid fixed-window decoder seams.</string>
 
     <!-- Accessibility -->
     <string name="a11y_engine_status">Engine status: %1$s</string>

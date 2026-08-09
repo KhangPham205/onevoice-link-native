@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-On-device speech-to-speech translation (Vietnamese ↔ English) for Snapdragon phones. The app has two explicit backends:
+On-device speech-to-speech translation (Vietnamese ↔ English) for Snapdragon phones. The app has three explicit backends:
 
-- **Offline CPU** is the runnable speech-to-speech path: Kotlin `AudioRecord` + bounded VAD → sherpa-onnx ASR → ONNX Runtime MarianMT → sherpa-onnx Kokoro TTS → `AudioTrack`.
-- **QNN HTP** loads and verifies Qualcomm context binaries on Hexagon. It is not presented as a runnable speech pipeline because the delivered QNN TTS split is not a closed artifact set.
+- **Hybrid (default)** is the production VI→EN path: QNN ASR + MarianMT execute on Hexagon HTP, then sherpa-onnx Kokoro renders the translated sentence as one continuous CPU utterance.
+- **Offline CPU** is the bidirectional reference path: Kotlin `AudioRecord` + bounded VAD → sherpa-onnx ASR → ONNX Runtime MarianMT → sherpa-onnx Kokoro TTS → `AudioTrack`.
+- **Full QNN** is the six-stage VI→EN path. ASR, MT and Kokoro encoder/prosody/decoder execute from context `.bin` files on HTP. Its fixed 25-frame TTS decoder requires host bucketing and can produce audible seams, so it is retained for NPU validation and optimization rather than used as the default listening path.
 
 Target hardware is fixed: **arm64-v8a, Snapdragon 8 Gen 2** (`SM8550` / `kalama` / Hexagon **v73**, `qnnSocModel` 43). No other ABI is built.
 
@@ -24,7 +25,7 @@ cd android-app
 Model binaries are **not** in the APK — push them separately (needs a debuggable build for `run-as`):
 
 ```bash
-tools/models/push-npu-models.sh all    # or: vi-en / en-vi   (~2 GB, resumable)
+tools/models/push-npu-models.sh vi-en R5CW72TP4EP  # contexts + frontend assets, resumable
 tools/models/push-hf-models.sh vi-en R5CW72TP4EP  # complete runnable direction (~1.1 GB)
 adb logcat -s OneVoiceNpu:* OneVoiceQNN:* OneVoiceCore:* adsprpc:V
 ```
@@ -49,11 +50,11 @@ Gradle properties that change runtime behavior:
 
 Read `docs/ARCHITECTURE.md` for the threading model. The essentials:
 
-**Three threads, no locks between them.** Oboe capture callback → lock-free SPSC ring → AI worker thread → QNN/HTP → output ring → Oboe playback callback. `SpscRingBuffer` (`native-core/include/ring_buffer.h`) uses power-of-two masking, `alignas(64)` head/tail to avoid false sharing, and drop-newest overflow. Audio latency (256-frame callback) is deliberately decoupled from model latency (1 s chunk) so a slow inference degrades to a gap, not a torn stream.
+**Live audio is bounded.** All three backends use `AudioRecord` and `AudioTrack` from a capture and inference worker. QNN and Hybrid capture use 20 ms VAD frames, 300 ms pre-roll, one-second end hangover, a 10-second static ASR window, 500 ms overlap at forced window boundaries, and a queue of two utterances. Learned inference never runs on the audio read loop.
 
-**JNI is confined to one file.** `native-core/src/main_jni.cpp` is the only place JNI is touched; it owns engine state and spawns the worker. `core/OneVoiceNative.kt` is the Kotlin mirror — changing arity/order on either side breaks the other silently.
+**JNI is confined to one file.** `native-core/src/main_jni.cpp` binds Kotlin direct buffers to the generic `QnnRuntime::executeGraph`, runs the native NeMo fbank frontend, and builds Kokoro HAR tensors. `core/OneVoiceNative.kt` is the Kotlin mirror — changing arity/order on either side breaks the other silently. The old Oboe `executeCascade()` worker is not used by the live QNN backend.
 
-**The cascade is N separate context binaries, not one graph.** ASR → MT encoder/decoder → TTS encoder/decoder, each an independently compiled `.bin` with its own AI Hub-generated graph name. `QnnRuntime` therefore creates the backend/device **once** and one context **per stage** (`native-core/src/qnn_runtime.cpp`). Loading each stage is a 3-step proof, reported separately so failures are diagnosable:
+**The cascade is six separate context binaries, not one graph.** ASR → MT encoder/decoder → TTS encoder → W8A8 prosody → TTS decoder, each an independently compiled `.bin` with its own graph name. `QnnRuntime` therefore creates the backend/device **once** and one context **per stage** (`native-core/src/qnn_runtime.cpp`). Loading each stage is a 3-step proof, reported separately so failures are diagnosable:
 
 1. `QnnSystemContext_getBinaryInfo` — parse blob, read graph name + I/O contract + `socModel`, no hardware.
 2. `contextCreateFromBinary` — place graphs on the HTP (fails on wrong Hexagon arch or DSP-access denial).
@@ -67,14 +68,17 @@ Read `docs/ARCHITECTURE.md` for the threading model. The essentials:
 
 **Models live in internal `filesDir`, not external storage.** On Android 11+ (verified on Android 16 / One UI) an app cannot see files under its own `Android/data/<pkg>/files/` created by another uid — `adb shell` lists them, the path matches byte-for-byte, and the app still gets `exists() == false`; chowning does not help. `NpuEngine.candidateRoots` checks both and uses whichever actually holds models.
 
-**The complete offline path is Kotlin/native-library orchestration, not the C++ QNN worker.** `HfEngineBackend` loads only the selected direction to bound phone RAM. Its capture queue, waveform buffers, playback buffer and ORT sessions are bounded; changing direction/backend releases the current bundle before another is loaded. The dashboard defaults to this backend and exposes transcript, translation and replay only after TTS publishes a waveform.
+**The complete offline path is Kotlin/native-library orchestration, not the C++ QNN worker.** `HfEngineBackend` loads only the selected direction to bound phone RAM. Its capture queue, waveform buffers, playback buffer and ORT sessions are bounded; changing direction/backend releases the current bundle before another is loaded. The dashboard defaults to Hybrid; every backend exposes transcript, translation and replay only after TTS publishes a waveform.
 
 ## Current status — read before debugging inference
 
 Keep the capability boundary explicit when debugging:
 
-- **The Offline CPU backend is end-to-end and is the default.** On 2026-08-08 it was verified on `R5CW72TP4EP`: both directions initialized; VI→EN microphone capture produced a Vietnamese transcript, Marian produced English text, Kokoro published a replayable waveform, and the process remained alive at about 1.57 GB PSS (EN→VI ready state was about 764 MB PSS). Models live under `<filesDir>/models/hf`; stage each direction with `tools/models/push-hf-models.sh`.
-- **QNN `executeCascade()` still returns `false` on purpose.** Besides missing tensor-execution/ASR/MT host glue, the delivered Kokoro QNN pair omits the learned `F0Ntrain` prosody network, exact HAR generator/state and overlap-add contract. The five `.bin` files therefore cannot form a truthful end-to-end TTS cascade. The QNN UI says **verify only** and never opens the fake “Capturing audio” state.
+- **Hybrid VI→EN is end-to-end and is the default.** It loads only the QNN ASR and Marian encoder/decoder contexts, then runs the existing Kokoro CPU model once for the complete translated sentence. This preserves the NPU acceleration where the supplied graph contracts are continuous while avoiding fixed-window QNN TTS seams.
+- **The Offline CPU backend is end-to-end.** On 2026-08-08 it was verified on `R5CW72TP4EP`: both directions initialized; VI→EN microphone capture produced a Vietnamese transcript, Marian produced English text, Kokoro published a replayable waveform, and the process remained alive at about 1.57 GB PSS (EN→VI ready state was about 764 MB PSS). Models live under `<filesDir>/models/hf`; stage each direction with `tools/models/push-hf-models.sh`.
+- **Full-QNN VI→EN is end-to-end but its bucketed TTS is not CPU-quality.** `QnnRuntime::executeGraph` retains binary tensor metadata and binds direct RAW buffers; the app implements NeMo fbank/CTC, Marian SentencePiece + KV-cache decode, Kokoro alignment/style, a generated W8A8 prosody context, phase-continuous HAR, bucket stitching and 24 kHz playback. On-device evidence for the same sentence measured about 1.2 s for full-QNN synthesis across three decoder buckets versus about 2.7 s for Hybrid whole-utterance CPU Kokoro. `AudioTrack` delivered every requested frame in both cases, so the remaining Full-QNN stutter is a synthesis/bucket-boundary quality limitation, not playback underrun or truncation.
+- **QNN EN→VI remains disabled** because no deployable English ASR context binary exists. Do not silently fall back to CPU or claim bidirectional NPU support.
+- **Full-QNN Kokoro uses exact eSpeak phonemization.** A tiny `tts_frontend.onnx` bridge lets sherpa-onnx perform the normal eSpeak/Kokoro frontend and returns the resulting token IDs without loading the 345 MB unified Kokoro CPU model. Hybrid instead loads that CPU model intentionally because it owns whole-utterance synthesis.
 - **The former `contextCreateFromBinary` `0x36b1` failure is resolved.** `0x36b1`
   is `QNN_DEVICE_ERROR_INVALID_CONFIG`; it did not prove a signature-policy
   failure. The real log chain was `libcdsprpc.so not found` → FastRPC remote

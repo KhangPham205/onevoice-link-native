@@ -45,11 +45,15 @@ google-services.json
 # tools/models/stage-npu-models.sh, so it is regenerable and also ignored.
 /onevoice-npu-bins/
 /models-npu/
+# Locally generated QNN stages (for example the Kokoro prosody context). The
+# scripts and manifest contract are tracked; licensed/generated binaries are not.
+/models-npu-generated/
 
 # HuggingFace source + converted models for the CPU reference pipeline (multi-GB).
 /models-src/
 /models-hf/
 # Python conversion tooling
+/tools/models/__pycache__/
 /tools/models/.venv/
 /tools/models/.pip-cache/
 # Prebuilt native libs dropped in for NDK-less UI preview builds.

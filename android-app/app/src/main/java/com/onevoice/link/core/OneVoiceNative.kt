@@ -1,14 +1,15 @@
 package com.onevoice.link.core
 
 import org.json.JSONObject
+import java.nio.ByteBuffer
 
 /**
  * Kotlin ↔ C++ bridge for the OneVoice realtime speech-to-speech core.
  *
  * Every `external` function below maps 1:1 to a JNI entry point in
  * `native-core/src/main_jni.cpp` (symbol `Java_com_onevoice_link_core_OneVoiceNative_*`).
- * The audio → AI → audio pipeline runs on native threads; the JVM only drives
- * lifecycle calls, so ART GC pauses never touch the hot path.
+ * Kotlin owns bounded AudioRecord/AudioTrack and pipeline orchestration. JNI
+ * supplies generic direct-buffer graph execution and native signal transforms.
  *
  * IMPORTANT — model loading is per-stage, not one call. The deployed pipeline is
  * a cascade of independently-compiled QNN context binaries (ASR, MT enc/dec, TTS
@@ -35,8 +36,8 @@ object OneVoiceNative {
     // ---- Raw JNI ABI (do not change arity/order without the C++ side) --------
 
     /**
-     * Opens the audio streams and brings up the QNN backend + device. Loads no
-     * models — call [loadModel] per cascade stage afterwards.
+     * Brings up the QNN backend + device. Loads no models and opens no audio
+     * streams — call [loadModel] per cascade stage afterwards.
      *
      * @param backendPath absolute path to `libQnnHtp.so`
      * @param systemPath  absolute path to `libQnnSystem.so` (binary introspection)
@@ -56,16 +57,33 @@ object OneVoiceNative {
     /** How many contexts are currently resident on the HTP. */
     external fun nativeLoadedModelCount(): Int
 
+    /** Executes a loaded graph with direct buffers; null means success. */
+    external fun nativeExecuteGraph(
+        stage: String,
+        inputs: Array<ByteBuffer>,
+        outputs: Array<ByteBuffer>,
+    ): String?
+
+    /** NeMo-compatible 16 kHz PCM float -> direct [1,1001,80] FLOAT32. */
+    external fun nativeExtractAsrFeatures(samples: FloatArray, output: ByteBuffer): String?
+
+    /** Kokoro F0 [50] -> harmonic STFT [22,3001], both direct FLOAT32. */
+    external fun nativeBuildKokoroHar(
+        f0: ByteBuffer,
+        har: ByteBuffer,
+        resetPhase: Boolean,
+    ): String?
+
     /** Frees every loaded context; backend/device stay up for a fast reload. */
     external fun nativeReleaseModels()
 
-    /** Spawns the AI worker thread and starts full-duplex audio. */
+    /** Legacy ABI; live audio is owned by [NpuEngine] and this returns false. */
     external fun nativeStartEngine(): Boolean
 
-    /** Halts the worker and stops audio; the engine stays initialized. */
+    /** Legacy no-op retained for ABI compatibility. */
     external fun nativeStopEngine()
 
-    /** Fully tears the engine down (worker joined, audio + QNN released). */
+    /** Fully tears the native QNN runtime down. */
     external fun nativeDestroyEngine()
 
     // ---- Convenience layer ---------------------------------------------------

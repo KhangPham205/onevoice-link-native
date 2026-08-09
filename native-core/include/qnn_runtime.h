@@ -63,6 +63,12 @@ struct ModelLoadResult {
     std::string             error;          // empty when ok
 };
 
+/** A caller-owned raw tensor buffer used for one graph execution. */
+struct GraphBuffer {
+    void*       data = nullptr;
+    std::size_t sizeBytes = 0;
+};
+
 class QnnRuntime {
 public:
     QnnRuntime();
@@ -101,17 +107,19 @@ public:
     std::size_t modelCount() const noexcept;
 
     /**
-     * Run the cascade over one audio chunk.
-     *
-     * NOT IMPLEMENTED — deliberately. Executing the cascade needs the host-glue
-     * the model team has not delivered for Android yet: 80-mel fbank + CTC
-     * greedy collapse (ASR), SentencePiece plus an autoregressive decode loop
-     * driving the 27-input/13-output decoder KV-cache (MT), and G2P + alignment
-     * scatter + F0/har synthesis + overlap-add (TTS). See HANDOFF.md §3-§5.
-     *
-     * Until that lands this returns false, so the audio worker drops the chunk
-     * rather than pushing fabricated silence into the playback ring and making
-     * the pipeline look functional when it is not.
+     * Execute one loaded graph with RAW client buffers in binary-declared order.
+     * Tensor IDs, types, dimensions and quantization metadata come from the
+     * context binary captured by loadModel(); callers only own the bytes.
+     */
+    bool executeGraph(const std::string& stage,
+                      const std::vector<GraphBuffer>& inputs,
+                      const std::vector<GraphBuffer>& outputs,
+                      std::string& error);
+
+    /**
+     * Legacy single-call ABI retained for older callers. The live pipeline is
+     * orchestrated stage-by-stage by NpuPipeline through executeGraph(), so
+     * this deliberately returns false.
      */
     bool executeCascade(const int16_t* input, std::size_t sampleCount,
                         std::vector<int16_t>& output);

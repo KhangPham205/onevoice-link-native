@@ -172,5 +172,6 @@ firmware/debug fuse không cho phép test-signing.
 - Qualcomm Hexagon SDK local:
   `docs/software/system_integration.html` và `docs/tools/sign.html`
 
-> Phạm vi hiện đã đạt là **load và verify model contexts**. Pipeline inference
-> hoàn chỉnh vẫn chưa có host glue; `executeCascade()` còn trả `false` có chủ ý.
+> Sau sự cố này, pipeline VI → EN đã được nối đầy đủ. Luồng live dùng generic
+> `executeGraph()` cho sáu context QNN; `executeCascade()` cũ chỉ còn là ABI
+> legacy và vẫn trả `false` có chủ ý.

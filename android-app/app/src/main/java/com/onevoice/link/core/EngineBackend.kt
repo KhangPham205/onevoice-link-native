@@ -3,10 +3,10 @@ package com.onevoice.link.core
 /**
  * Common lifecycle for an offline speech-to-speech engine.
  *
- * [NpuEngine] currently verifies the five QNN contexts but cannot execute a
- * closed cascade because the delivered Kokoro split is missing its learned
- * prosody stage. [com.onevoice.link.hf.HfEngineBackend] is the complete,
- * runnable fallback and emits intermediate text through [PipelineListener].
+ * [NpuEngine] provides both the six-stage QNN cascade and the hybrid QNN
+ * ASR/MT + whole-utterance CPU TTS path. [com.onevoice.link.hf.HfEngineBackend]
+ * is the CPU reference backend. All emit intermediate text through
+ * [PipelineListener].
  */
 interface EngineBackend {
     val displayName: String

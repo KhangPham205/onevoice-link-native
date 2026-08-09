@@ -82,6 +82,8 @@ data class StageSpec(
     val file: String,
     val graph: String,
     val sizeBytes: Long,
+    val inputs: List<TensorSpec> = emptyList(),
+    val outputs: List<TensorSpec> = emptyList(),
 ) {
     fun resolve(root: File): File = File(root, file)
 
@@ -92,7 +94,22 @@ data class StageSpec(
             file = o.getString("file"),
             graph = o.getString("graph"),
             sizeBytes = o.optLong("sizeBytes"),
+            inputs = tensors(o, "inputs"),
+            outputs = tensors(o, "outputs"),
         )
+
+        private fun tensors(o: JSONObject, key: String): List<TensorSpec> {
+            val array = o.optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).map { index ->
+                val tensor = array.getJSONObject(index)
+                val dims = tensor.getJSONArray("dims")
+                TensorSpec(
+                    name = tensor.getString("name"),
+                    dtype = tensor.getString("dtype"),
+                    dims = (0 until dims.length()).map(dims::getInt),
+                )
+            }
+        }
     }
 }
 

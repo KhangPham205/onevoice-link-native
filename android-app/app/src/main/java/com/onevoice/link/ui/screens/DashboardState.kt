@@ -21,7 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Lifecycle stages shared by the runnable CPU path and QNN verification path. */
+/** Lifecycle stages shared by the CPU and QNN live paths. */
 enum class EngineStage(@field:StringRes val labelRes: Int) {
     NOT_INITIALIZED(R.string.stage_not_initialized),
     INITIALIZED(R.string.stage_initialized),
@@ -33,7 +33,10 @@ enum class BackendKind(@field:StringRes val labelRes: Int) {
     /** Complete offline ASR -> MT -> TTS pipeline backed by ONNX Runtime. */
     HF(R.string.backend_hf),
 
-    /** Native QNN/HTP context loading and graph-contract verification only. */
+    /** QNN ASR/MT with CPU Kokoro rendering one continuous utterance. */
+    HYBRID(R.string.backend_hybrid),
+
+    /** Native QNN/HTP learned stages with bounded CPU audio/tensor host glue. */
     QNN(R.string.backend_qnn),
 }
 
@@ -75,7 +78,8 @@ data class DashboardUiState(
     val modelRootPath: String = "",
 ) {
     val running: Boolean get() = stage == EngineStage.RUNNING
-    val isQnn: Boolean get() = selectedBackend == BackendKind.QNN
+    val isQnn: Boolean get() = selectedBackend != BackendKind.HF
+    val isHybrid: Boolean get() = selectedBackend == BackendKind.HYBRID
 
     val canInitialize: Boolean get() =
         !busy && stage == EngineStage.NOT_INITIALIZED &&
@@ -387,13 +391,19 @@ class EngineController(
     )
 
     private fun initializingMessage(): UiMessage = UiMessage(
-        if (backendKind == BackendKind.QNN) R.string.msg_initializing_qnn
-        else R.string.msg_initializing_offline,
+        when (backendKind) {
+            BackendKind.HF -> R.string.msg_initializing_offline
+            BackendKind.QNN -> R.string.msg_initializing_qnn
+            BackendKind.HYBRID -> R.string.msg_initializing_hybrid
+        },
     )
 
     private fun initializedMessage(): UiMessage = UiMessage(
-        if (backendKind == BackendKind.QNN) R.string.msg_initialized_qnn
-        else R.string.msg_initialized_offline,
+        when (backendKind) {
+            BackendKind.HF -> R.string.msg_initialized_offline
+            BackendKind.QNN -> R.string.msg_initialized_qnn
+            BackendKind.HYBRID -> R.string.msg_initialized_hybrid
+        },
     )
 
     /** Shared envelope: busy -> progress message -> operation -> not busy. */
@@ -414,8 +424,11 @@ class EngineController(
 
     private companion object {
         fun idleMessage(kind: BackendKind): UiMessage = UiMessage(
-            if (kind == BackendKind.QNN) R.string.msg_idle_qnn
-            else R.string.msg_idle_offline,
+            when (kind) {
+                BackendKind.HF -> R.string.msg_idle_offline
+                BackendKind.QNN -> R.string.msg_idle_qnn
+                BackendKind.HYBRID -> R.string.msg_idle_hybrid
+            },
         )
     }
 }

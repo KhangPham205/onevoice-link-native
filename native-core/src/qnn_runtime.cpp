@@ -14,9 +14,13 @@
 #include <android/log.h>
 #include <dlfcn.h>  // dlopen / dlsym
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
+#include <mutex>
 #include <vector>
 
 #define LOG_TAG "OneVoiceQNN"
@@ -157,6 +161,166 @@ TensorInfo toTensorInfo(const Qnn_Tensor_t& t) {
     for (uint32_t i = 0; i < rank && dims; ++i) out.dims.push_back(dims[i]);
     return out;
 }
+
+struct OwnedTensor {
+    Qnn_TensorVersion_t version = QNN_TENSOR_VERSION_1;
+    uint32_t id = 0;
+    std::string name;
+    Qnn_TensorType_t type = QNN_TENSOR_TYPE_UNDEFINED;
+    Qnn_TensorDataFormat_t dataFormat = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
+    Qnn_DataType_t dataType = QNN_DATATYPE_UNDEFINED;
+    Qnn_QuantizeParams_t quantizeParams = QNN_QUANTIZE_PARAMS_INIT;
+    std::vector<Qnn_ScaleOffset_t> axisScaleOffsets;
+    std::vector<uint32_t> dims;
+    std::vector<uint8_t> dynamicDims;
+    Qnn_SparseParams_t sparseParams = QNN_SPARSE_PARAMS_INIT;
+    uint8_t isProduced = 0;
+};
+
+bool copyTensor(const Qnn_Tensor_t& src, OwnedTensor& dst, std::string& error) {
+    const char* name = nullptr;
+    const uint32_t* dims = nullptr;
+    const uint8_t* dynamicDims = nullptr;
+    uint32_t rank = 0;
+
+    dst.version = src.version;
+    if (src.version == QNN_TENSOR_VERSION_1) {
+        dst.id = src.v1.id;
+        name = src.v1.name;
+        dst.type = src.v1.type;
+        dst.dataFormat = src.v1.dataFormat;
+        dst.dataType = src.v1.dataType;
+        dst.quantizeParams = src.v1.quantizeParams;
+        rank = src.v1.rank;
+        dims = src.v1.dimensions;
+    } else if (src.version == QNN_TENSOR_VERSION_2) {
+        dst.id = src.v2.id;
+        name = src.v2.name;
+        dst.type = src.v2.type;
+        dst.dataFormat = src.v2.dataFormat;
+        dst.dataType = src.v2.dataType;
+        dst.quantizeParams = src.v2.quantizeParams;
+        rank = src.v2.rank;
+        dims = src.v2.dimensions;
+        dynamicDims = src.v2.isDynamicDimensions;
+        dst.sparseParams = src.v2.sparseParams;
+        dst.isProduced = src.v2.isProduced;
+    } else {
+        error = "unsupported QNN tensor metadata version";
+        return false;
+    }
+
+    dst.name = name ? name : "";
+    if (rank > 0 && !dims) {
+        error = "tensor " + dst.name + " has rank but no dimensions";
+        return false;
+    }
+    if (dims) dst.dims.assign(dims, dims + rank);
+    if (dynamicDims) dst.dynamicDims.assign(dynamicDims, dynamicDims + rank);
+
+    const auto encoding = dst.quantizeParams.quantizationEncoding;
+    if (encoding == QNN_QUANTIZATION_ENCODING_AXIS_SCALE_OFFSET) {
+        const auto& axis = dst.quantizeParams.axisScaleOffsetEncoding;
+        if (axis.numScaleOffsets > 0 && !axis.scaleOffset) {
+            error = "tensor " + dst.name + " has invalid axis quantization metadata";
+            return false;
+        }
+        if (axis.scaleOffset) {
+            dst.axisScaleOffsets.assign(axis.scaleOffset,
+                                        axis.scaleOffset + axis.numScaleOffsets);
+        }
+    } else if (encoding != QNN_QUANTIZATION_ENCODING_UNDEFINED &&
+               encoding != QNN_QUANTIZATION_ENCODING_SCALE_OFFSET) {
+        // The current cascade exposes FLOAT32/INT32 app tensors. Reject future
+        // pointer-bearing encodings instead of retaining pointers owned by the
+        // soon-to-be-freed QnnSystemContext.
+        error = "tensor " + dst.name + " uses unsupported external quantization encoding";
+        return false;
+    }
+    return true;
+}
+
+std::size_t elementSize(Qnn_DataType_t type) {
+    switch (type) {
+        case QNN_DATATYPE_BOOL_8:
+        case QNN_DATATYPE_INT_8:
+        case QNN_DATATYPE_UINT_8:
+        case QNN_DATATYPE_SFIXED_POINT_8:
+        case QNN_DATATYPE_UFIXED_POINT_8:
+            return 1;
+        case QNN_DATATYPE_FLOAT_16:
+        case QNN_DATATYPE_INT_16:
+        case QNN_DATATYPE_UINT_16:
+        case QNN_DATATYPE_SFIXED_POINT_16:
+        case QNN_DATATYPE_UFIXED_POINT_16:
+            return 2;
+        case QNN_DATATYPE_FLOAT_32:
+        case QNN_DATATYPE_INT_32:
+        case QNN_DATATYPE_UINT_32:
+        case QNN_DATATYPE_SFIXED_POINT_32:
+        case QNN_DATATYPE_UFIXED_POINT_32:
+            return 4;
+        case QNN_DATATYPE_FLOAT_64:
+        case QNN_DATATYPE_INT_64:
+        case QNN_DATATYPE_UINT_64:
+            return 8;
+        default:
+            return 0;
+    }
+}
+
+bool tensorBytes(const OwnedTensor& tensor, std::size_t& bytes) {
+    bytes = elementSize(tensor.dataType);
+    if (bytes == 0) return false;
+    for (const uint32_t dim : tensor.dims) {
+        if (dim == 0 || bytes > std::numeric_limits<std::size_t>::max() / dim) return false;
+        bytes *= dim;
+    }
+    return true;
+}
+
+Qnn_Tensor_t executionTensor(OwnedTensor& src, const GraphBuffer& buffer) {
+    Qnn_Tensor_t out = QNN_TENSOR_INIT;
+    Qnn_ClientBuffer_t client = QNN_CLIENT_BUFFER_INIT;
+    client.data = buffer.data;
+    client.dataSize = buffer.sizeBytes;
+
+    if (src.quantizeParams.quantizationEncoding ==
+        QNN_QUANTIZATION_ENCODING_AXIS_SCALE_OFFSET) {
+        src.quantizeParams.axisScaleOffsetEncoding.scaleOffset =
+            src.axisScaleOffsets.empty() ? nullptr : src.axisScaleOffsets.data();
+    }
+
+    out.version = src.version;
+    if (src.version == QNN_TENSOR_VERSION_2) {
+        out.v2.id = src.id;
+        out.v2.name = src.name.c_str();
+        out.v2.type = src.type;
+        out.v2.dataFormat = src.dataFormat;
+        out.v2.dataType = src.dataType;
+        out.v2.quantizeParams = src.quantizeParams;
+        out.v2.rank = static_cast<uint32_t>(src.dims.size());
+        out.v2.dimensions = src.dims.empty() ? nullptr : src.dims.data();
+        out.v2.memType = QNN_TENSORMEMTYPE_RAW;
+        out.v2.clientBuf = client;
+        out.v2.isDynamicDimensions =
+            src.dynamicDims.empty() ? nullptr : src.dynamicDims.data();
+        out.v2.sparseParams = src.sparseParams;
+        out.v2.isProduced = src.isProduced;
+    } else {
+        out.v1.id = src.id;
+        out.v1.name = src.name.c_str();
+        out.v1.type = src.type;
+        out.v1.dataFormat = src.dataFormat;
+        out.v1.dataType = src.dataType;
+        out.v1.quantizeParams = src.quantizeParams;
+        out.v1.rank = static_cast<uint32_t>(src.dims.size());
+        out.v1.dimensions = src.dims.empty() ? nullptr : src.dims.data();
+        out.v1.memType = QNN_TENSORMEMTYPE_RAW;
+        out.v1.clientBuf = client;
+    }
+    return out;
+}
 #endif  // ONEVOICE_HAS_QNN
 
 }  // namespace
@@ -183,8 +347,11 @@ struct QnnRuntime::State {
         std::string         stage;
         Qnn_ContextHandle_t context = nullptr;
         Qnn_GraphHandle_t   graph   = nullptr;
+        std::vector<OwnedTensor> inputs;
+        std::vector<OwnedTensor> outputs;
     };
     std::vector<Loaded> models;
+    std::mutex executionMutex;
 #else
     char placeholder;
 #endif
@@ -374,6 +541,9 @@ ModelLoadResult QnnRuntime::loadModel(const ModelSpec& spec) {
     }
     r.sizeBytes = blob.size();
 
+    std::vector<OwnedTensor> ownedInputs;
+    std::vector<OwnedTensor> ownedOutputs;
+
     // ---- Step 1: parse the blob (no hardware involved) ---------------------
     // Also the only place the .bin tells us which SoC it was compiled for, so a
     // wrong-chip artifact is named as such instead of failing opaquely later.
@@ -432,16 +602,38 @@ ModelLoadResult QnnRuntime::loadModel(const ModelSpec& spec) {
                         r.graphName = found;
                         r.inputs.clear();
                         r.outputs.clear();
-                        for (uint32_t k = 0; k < nIn && in; ++k)
+                        ownedInputs.clear();
+                        ownedOutputs.clear();
+                        std::string tensorError;
+                        for (uint32_t k = 0; k < nIn && in; ++k) {
                             r.inputs.push_back(toTensorInfo(in[k]));
-                        for (uint32_t k = 0; k < nOut && out; ++k)
-                            r.outputs.push_back(toTensorInfo(out[k]));
+                            ownedInputs.emplace_back();
+                            if (!copyTensor(in[k], ownedInputs.back(), tensorError)) break;
+                        }
+                        if (tensorError.empty()) {
+                            for (uint32_t k = 0; k < nOut && out; ++k) {
+                                r.outputs.push_back(toTensorInfo(out[k]));
+                                ownedOutputs.emplace_back();
+                                if (!copyTensor(out[k], ownedOutputs.back(), tensorError)) break;
+                            }
+                        }
+                        if (!tensorError.empty()) {
+                            r.error = tensorError;
+                            ownedInputs.clear();
+                            ownedOutputs.clear();
+                        }
                     }
                     if (wanted) break;
                 }
             }
             sys.systemContextFree(sysCtx);
         }
+    }
+
+    if (!r.error.empty()) return r;
+    if (ownedInputs.empty() || ownedOutputs.empty()) {
+        r.error = "context binary did not expose executable tensor metadata";
+        return r;
     }
 
     // ---- Step 2: place the graphs on the HTP -------------------------------
@@ -491,7 +683,11 @@ ModelLoadResult QnnRuntime::loadModel(const ModelSpec& spec) {
         return r;
     }
 
-    state_->models.push_back({spec.stage, context, graph});
+    {
+        std::lock_guard<std::mutex> lock(state_->executionMutex);
+        state_->models.push_back(
+            {spec.stage, context, graph, std::move(ownedInputs), std::move(ownedOutputs)});
+    }
     r.ok        = true;
     r.graphName = spec.graphName;
     r.loadMs    = msSince(t0);
@@ -507,9 +703,85 @@ ModelLoadResult QnnRuntime::loadModel(const ModelSpec& spec) {
 #endif
 }
 
+bool QnnRuntime::executeGraph(const std::string& stage,
+                              const std::vector<GraphBuffer>& inputs,
+                              const std::vector<GraphBuffer>& outputs,
+                              std::string& error) {
+    error.clear();
+#if ONEVOICE_HAS_QNN
+    if (!ready_.load(std::memory_order_acquire) || !state_ || !state_->api) {
+        error = "QNN runtime is not initialized";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(state_->executionMutex);
+    auto it = std::find_if(state_->models.begin(), state_->models.end(),
+                           [&](const State::Loaded& loaded) { return loaded.stage == stage; });
+    if (it == state_->models.end()) {
+        error = "QNN stage is not loaded: " + stage;
+        return false;
+    }
+    if (inputs.size() != it->inputs.size() || outputs.size() != it->outputs.size()) {
+        error = "tensor count mismatch for " + stage + ": got " +
+                std::to_string(inputs.size()) + "/" + std::to_string(outputs.size()) +
+                ", expected " + std::to_string(it->inputs.size()) + "/" +
+                std::to_string(it->outputs.size());
+        return false;
+    }
+
+    std::vector<Qnn_Tensor_t> qnnInputs;
+    std::vector<Qnn_Tensor_t> qnnOutputs;
+    qnnInputs.reserve(inputs.size());
+    qnnOutputs.reserve(outputs.size());
+    auto bind = [&](std::vector<OwnedTensor>& metadata,
+                    const std::vector<GraphBuffer>& buffers,
+                    std::vector<Qnn_Tensor_t>& tensors,
+                    const char* kind) -> bool {
+        for (std::size_t i = 0; i < metadata.size(); ++i) {
+            std::size_t expected = 0;
+            if (!tensorBytes(metadata[i], expected)) {
+                error = std::string("unsupported ") + kind + " tensor type/shape: " +
+                        metadata[i].name;
+                return false;
+            }
+            if (!buffers[i].data || buffers[i].sizeBytes < expected) {
+                error = std::string(kind) + " buffer " + metadata[i].name + " has " +
+                        std::to_string(buffers[i].sizeBytes) + " bytes, needs " +
+                        std::to_string(expected);
+                return false;
+            }
+            GraphBuffer exact{buffers[i].data, expected};
+            tensors.push_back(executionTensor(metadata[i], exact));
+        }
+        return true;
+    };
+    if (!bind(it->inputs, inputs, qnnInputs, "input") ||
+        !bind(it->outputs, outputs, qnnOutputs, "output")) return false;
+
+    const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
+    const Qnn_ErrorHandle_t executeError = qnn.graphExecute(
+        it->graph,
+        qnnInputs.data(), static_cast<uint32_t>(qnnInputs.size()),
+        qnnOutputs.data(), static_cast<uint32_t>(qnnOutputs.size()),
+        /*profile=*/nullptr, /*signal=*/nullptr);
+    if (executeError != QNN_SUCCESS) {
+        char code[32];
+        snprintf(code, sizeof(code), "0x%llx",
+                 static_cast<unsigned long long>(executeError));
+        error = "graphExecute(" + stage + ") failed (" + code + ")";
+        return false;
+    }
+    return true;
+#else
+    (void)stage; (void)inputs; (void)outputs;
+    error = "built without the QNN SDK";
+    return false;
+#endif
+}
+
 void QnnRuntime::releaseModels() {
 #if ONEVOICE_HAS_QNN
     if (!state_ || !state_->api) return;
+    std::lock_guard<std::mutex> lock(state_->executionMutex);
     const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
     for (auto& m : state_->models) {
         if (m.context) qnn.contextFree(m.context, /*profile=*/nullptr);
@@ -523,8 +795,8 @@ bool QnnRuntime::executeCascade(const int16_t* input, std::size_t sampleCount,
     (void)input;
     (void)sampleCount;
     output.clear();
-    // See the header: the host-glue that would drive these graphs does not
-    // exist for Android yet. Returning false keeps the failure honest.
+    // The live Kotlin pipeline uses executeGraph() stage-by-stage. Keep this
+    // obsolete single-call ABI honest instead of pretending to run it.
     return false;
 }
 

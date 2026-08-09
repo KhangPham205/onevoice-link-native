@@ -82,6 +82,8 @@ add_library(onevoice_core SHARED
     src/audio_engine.cpp
     src/ring_buffer.cpp
     src/qnn_runtime.cpp
+    src/asr_frontend.cpp
+    src/kokoro_audio.cpp
 )
 
 target_include_directories(onevoice_core PRIVATE

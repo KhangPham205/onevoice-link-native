@@ -77,11 +77,11 @@ private fun base(
     micPermanentlyDenied = micPermanentlyDenied,
     selectedBackend = backend,
     backendDisplayName = if (backend == BackendKind.QNN) {
-        "QNN / Hexagon HTP · context verification"
+        "QNN / Hexagon HTP · live ASR → MT → TTS"
     } else {
         "Offline CPU · complete ASR → MT → TTS"
     },
-    supportsLiveTranslation = backend == BackendKind.HF,
+    supportsLiveTranslation = true,
     transcript = transcript,
     translation = translation,
     replayAvailable = !translation.isNullOrBlank(),

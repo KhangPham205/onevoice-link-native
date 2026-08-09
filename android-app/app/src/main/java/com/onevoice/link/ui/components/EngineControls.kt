@@ -28,8 +28,7 @@ import com.onevoice.link.ui.theme.Spacing
 private val ControlButtonHeight = 56.dp
 
 /**
- * Backend-aware actions. QNN exposes verification only; the runnable offline
- * backend additionally exposes start/stop translation.
+ * Backend-aware model load and live translation actions.
  */
 @Composable
 fun EngineControls(

@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.NpuEngine
+import com.onevoice.link.core.NpuTtsMode
 import com.onevoice.link.hf.HfEngineBackend
 import com.onevoice.link.ui.screens.BackendKind
 import com.onevoice.link.ui.screens.DashboardScreen
@@ -48,11 +49,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         micGranted = hasMicPermission()
 
-        // Default to the complete offline path. QNN remains available as an
-        // explicit load-and-verify backend until its Android host glue exists.
+        // Keep the reference CPU path and the all-QNN path available. Hybrid is
+        // the default because whole-utterance Kokoro avoids fixed-window QNN
+        // decoder seams while ASR and translation still execute on HTP.
         backends = mapOf(
             BackendKind.HF to HfEngineBackend(applicationContext),
             BackendKind.QNN to NpuEngine(applicationContext),
+            BackendKind.HYBRID to NpuEngine(
+                applicationContext,
+                NpuTtsMode.CPU_WHOLE_UTTERANCE,
+            ),
         )
 
         enableEdgeToEdge()
@@ -62,7 +68,7 @@ class MainActivity : ComponentActivity() {
                     micGranted = micGranted,
                     micPermanentlyDenied = micPermanentlyDenied,
                     backends = backends,
-                    defaultBackend = BackendKind.HF,
+                    defaultBackend = BackendKind.HYBRID,
                     onRequestMic = {
                         requestMic.launch(Manifest.permission.RECORD_AUDIO)
                     },

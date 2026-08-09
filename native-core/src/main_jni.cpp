@@ -1,15 +1,10 @@
 // ============================================================================
-// main_jni.cpp — JNI boundary + the pure-C++ realtime pipeline
+// main_jni.cpp — JNI boundary for QNN execution and native audio transforms
 // ----------------------------------------------------------------------------
 // This is the ONLY file that touches JNI. The entire audio->AI->audio cascade
-// runs in native threads so ART garbage-collection pauses can never tear the
-// pipeline or cause latency spikes — the JVM is not on the hot path at all.
-//
-// Threads at runtime:
-//   1. Oboe capture callback  (framework RT thread) -> input ring (producer)
-//   2. AI worker thread       (this file, spawned here) -> drains input ring,
-//      runs the QNN cascade, fills output ring
-//   3. Oboe playback callback (framework RT thread) -> output ring (consumer)
+// is orchestrated by NpuPipeline on a bounded Kotlin worker. This file exposes
+// direct-buffer graph execution plus the native NeMo fbank and Kokoro HAR
+// transforms; Android AudioRecord/AudioTrack live on the Kotlin side.
 //
 // Model loading is a separate, per-stage call: the pipeline is a cascade of
 // independently-compiled context binaries, so the dashboard loads them one at a
@@ -19,15 +14,13 @@
 #include <jni.h>
 
 #include <android/log.h>
-#include <atomic>
-#include <chrono>
 #include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "audio_engine.h"
 #include "qnn_runtime.h"
+#include "asr_frontend.h"
+#include "kokoro_audio.h"
 
 #define LOG_TAG "OneVoiceCore"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -36,67 +29,12 @@
 
 namespace {
 
-// Aggregated native engine state. A single instance is plenty for one
-// conversation session; the Kotlin side serializes lifecycle calls.
+// Aggregated native QNN state. A single instance is plenty for one conversation
+// session; the Kotlin side serializes lifecycle calls.
 struct Engine {
-    std::unique_ptr<onevoice::AudioEngine> audio;
     std::unique_ptr<onevoice::QnnRuntime>  qnn;
-    std::thread                            worker;
-    std::atomic<bool>                      running{false};
 };
 std::unique_ptr<Engine> g_engine;
-
-// Fixed chunk the ASR window consumes per pass (1 s @ 16 kHz).
-constexpr std::size_t kChunkSamples = 16000;
-
-// ------------------------------------------------------------------------
-// workerLoop() — the AI cascade. Runs entirely in C++, never touches the JVM.
-// ------------------------------------------------------------------------
-void workerLoop(Engine* e) {
-    LOGI("AI worker thread started");
-    std::vector<int16_t> inChunk(kChunkSamples);
-    std::vector<int16_t> outChunk;
-    // executeCascade() is not implemented yet (no Android host-glue), so it
-    // fails on every chunk. Log the first one and then stay quiet instead of
-    // filling logcat at 1 Hz for the whole session.
-    bool loggedExecuteFailure = false;
-
-    while (e->running.load(std::memory_order_acquire)) {
-        // ---- Drain a full 1 s chunk from the capture ring. ----
-        // The SPSC read is non-blocking; when starved, yield + micro-sleep so we
-        // don't burn a whole core. A condition_variable would add a mutex on the
-        // hot path, so we deliberately keep the ring lock-free.
-        std::size_t got = 0;
-        while (got < kChunkSamples && e->running.load(std::memory_order_acquire)) {
-            got += e->audio->inputBuffer().read(inChunk.data() + got,
-                                                kChunkSamples - got);
-            if (got < kChunkSamples)
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-        }
-        if (!e->running.load(std::memory_order_acquire)) break;
-
-        // ---- Run the S2ST cascade on the Hexagon HTP. ----
-        if (!e->qnn->executeCascade(inChunk.data(), got, outChunk)) {
-            if (!loggedExecuteFailure) {
-                LOGW("cascade execute unavailable — audio captured but not "
-                     "translated (host-glue not implemented; see HANDOFF.md)");
-                loggedExecuteFailure = true;
-            }
-            continue;
-        }
-
-        // ---- Push synthesized speech to the playback ring. ----
-        // Backpressure: if playback falls behind (rare), yield until room opens.
-        std::size_t put = 0;
-        while (put < outChunk.size() && e->running.load(std::memory_order_acquire)) {
-            put += e->audio->outputBuffer().write(outChunk.data() + put,
-                                                  outChunk.size() - put);
-            if (put < outChunk.size())
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-        }
-    }
-    LOGI("AI worker thread exiting");
-}
 
 // Helper: copy a jstring to a std::string (null-safe).
 std::string jstr(JNIEnv* env, jstring s) {
@@ -186,7 +124,9 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* /*vm*/, void* /*reserved*/) {
 }
 
 // ---- nativeInitRuntime(backendPath, systemPath, adspPath, signedPd) --------
-// Opens the audio streams and brings up the QNN backend + device. Loads NO
+// Brings up the QNN backend + device. Audio capture/playback is owned by the
+// Kotlin NPU pipeline so opening an Oboe input here would reserve the mic twice.
+// Loads NO
 // models: the cascade stages are loaded individually by nativeLoadModel so the
 // dashboard can report each one.
 JNIEXPORT jboolean JNICALL
@@ -197,12 +137,6 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeInitRuntime(
     if (g_engine) return JNI_TRUE;  // already initialized
 
     auto e = std::make_unique<Engine>();
-    e->audio = std::make_unique<onevoice::AudioEngine>();
-    if (e->audio->init() != 0) {
-        LOGE("AudioEngine init failed");
-        return JNI_FALSE;
-    }
-
     e->qnn = std::make_unique<onevoice::QnnRuntime>();
     if (!e->qnn->initBackend(jstr(env, backendPath), jstr(env, systemPath),
                              jstr(env, adspLibraryPath),
@@ -212,8 +146,97 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeInitRuntime(
     }
 
     g_engine = std::move(e);
-    LOGI("Runtime initialized (audio + QNN backend ready)");
+    LOGI("Runtime initialized (QNN backend ready)");
     return JNI_TRUE;
+}
+
+// ---- nativeExecuteGraph(stage, directInputs, directOutputs) : String? -----
+// Returns null on success and a diagnostic string on failure.
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeExecuteGraph(
+        JNIEnv* env, jclass /*clazz*/, jstring stage,
+        jobjectArray inputBuffers, jobjectArray outputBuffers) {
+    if (!g_engine || !g_engine->qnn) {
+        return env->NewStringUTF("runtime not initialized");
+    }
+    const jsize inputCount = inputBuffers ? env->GetArrayLength(inputBuffers) : 0;
+    const jsize outputCount = outputBuffers ? env->GetArrayLength(outputBuffers) : 0;
+    std::vector<onevoice::GraphBuffer> inputs;
+    std::vector<onevoice::GraphBuffer> outputs;
+    inputs.reserve(static_cast<std::size_t>(inputCount));
+    outputs.reserve(static_cast<std::size_t>(outputCount));
+
+    auto collect = [&](jobjectArray array, jsize count,
+                       std::vector<onevoice::GraphBuffer>& destination,
+                       const char* kind) -> jstring {
+        for (jsize i = 0; i < count; ++i) {
+            jobject buffer = env->GetObjectArrayElement(array, i);
+            void* address = buffer ? env->GetDirectBufferAddress(buffer) : nullptr;
+            const jlong capacity = buffer ? env->GetDirectBufferCapacity(buffer) : -1;
+            if (buffer) env->DeleteLocalRef(buffer);
+            if (!address || capacity < 0) {
+                const std::string message = std::string(kind) + " buffer " +
+                    std::to_string(i) + " is not a direct ByteBuffer";
+                return env->NewStringUTF(message.c_str());
+            }
+            destination.push_back(
+                {address, static_cast<std::size_t>(capacity)});
+        }
+        return nullptr;
+    };
+    if (jstring error = collect(inputBuffers, inputCount, inputs, "input")) return error;
+    if (jstring error = collect(outputBuffers, outputCount, outputs, "output")) return error;
+
+    std::string error;
+    if (!g_engine->qnn->executeGraph(jstr(env, stage), inputs, outputs, error)) {
+        return env->NewStringUTF(error.c_str());
+    }
+    return nullptr;
+}
+
+// ---- nativeExtractAsrFeatures(samples, directOutput) : String? ------------
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeExtractAsrFeatures(
+        JNIEnv* env, jclass /*clazz*/, jfloatArray samples, jobject outputBuffer) {
+    if (!samples || !outputBuffer) return env->NewStringUTF("null ASR frontend buffer");
+    const jsize count = env->GetArrayLength(samples);
+    float* output = static_cast<float*>(env->GetDirectBufferAddress(outputBuffer));
+    const jlong capacity = env->GetDirectBufferCapacity(outputBuffer);
+    if (!output || capacity < 0) {
+        return env->NewStringUTF("ASR output is not a direct ByteBuffer");
+    }
+    std::vector<float> waveform(static_cast<std::size_t>(count));
+    env->GetFloatArrayRegion(samples, 0, count, waveform.data());
+    if (env->ExceptionCheck()) return env->NewStringUTF("cannot read ASR samples");
+    std::string error;
+    if (!onevoice::makeParakeetFeatures(
+            waveform.data(), waveform.size(), output,
+            static_cast<std::size_t>(capacity) / sizeof(float), error)) {
+        return env->NewStringUTF(error.c_str());
+    }
+    return nullptr;
+}
+
+// ---- nativeBuildKokoroHar(directF0, directHar) : String? ------------------
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeBuildKokoroHar(
+        JNIEnv* env, jclass /*clazz*/, jobject f0Buffer, jobject harBuffer,
+        jboolean resetPhase) {
+    float* f0 = static_cast<float*>(env->GetDirectBufferAddress(f0Buffer));
+    float* har = static_cast<float*>(env->GetDirectBufferAddress(harBuffer));
+    const jlong f0Bytes = env->GetDirectBufferCapacity(f0Buffer);
+    const jlong harBytes = env->GetDirectBufferCapacity(harBuffer);
+    if (!f0 || !har || f0Bytes < 0 || harBytes < 0) {
+        return env->NewStringUTF("Kokoro F0/HAR buffers must be direct ByteBuffers");
+    }
+    std::string error;
+    if (!onevoice::makeKokoroHarmonics(
+            f0, static_cast<std::size_t>(f0Bytes) / sizeof(float),
+            har, static_cast<std::size_t>(harBytes) / sizeof(float),
+            resetPhase == JNI_TRUE, error)) {
+        return env->NewStringUTF(error.c_str());
+    }
+    return nullptr;
 }
 
 // ---- nativeLoadModel(stage, binPath, graphName) : String (JSON) -----------
@@ -256,41 +279,20 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeReleaseModels(
 // ---- nativeStartEngine() : boolean ----------------------------------------
 JNIEXPORT jboolean JNICALL
 Java_com_onevoice_link_core_OneVoiceNative_nativeStartEngine(JNIEnv* /*env*/, jclass /*clazz*/) {
-    if (!g_engine) return JNI_FALSE;
-    // Idempotent: a second start while running would move-assign a new thread
-    // onto the still-joinable worker, which calls std::terminate().
-    if (g_engine->running.load(std::memory_order_acquire)) return JNI_TRUE;
-    g_engine->running.store(true, std::memory_order_release);
-    g_engine->worker = std::thread(workerLoop, g_engine.get());
-    if (g_engine->audio->start() != 0) {
-        LOGE("AudioEngine start failed");
-        g_engine->running.store(false, std::memory_order_release);
-        if (g_engine->worker.joinable()) g_engine->worker.join();
-        return JNI_FALSE;
-    }
-    LOGI("Engine started");
-    return JNI_TRUE;
+    LOGW("nativeStartEngine is obsolete; NpuEngine owns bounded AudioRecord/AudioTrack workers");
+    return JNI_FALSE;
 }
 
 // ---- nativeStopEngine() : void --------------------------------------------
 JNIEXPORT void JNICALL
 Java_com_onevoice_link_core_OneVoiceNative_nativeStopEngine(JNIEnv* /*env*/, jclass /*clazz*/) {
-    if (!g_engine) return;
-    g_engine->running.store(false, std::memory_order_release);
-    if (g_engine->worker.joinable()) g_engine->worker.join();
-    g_engine->audio->stop();
-    LOGI("Engine stopped");
+    LOGI("nativeStopEngine: no native audio worker is active");
 }
 
 // ---- nativeDestroyEngine() : void -----------------------------------------
 JNIEXPORT void JNICALL
 Java_com_onevoice_link_core_OneVoiceNative_nativeDestroyEngine(JNIEnv* /*env*/, jclass /*clazz*/) {
     if (!g_engine) return;
-    if (g_engine->running.load(std::memory_order_acquire)) {
-        g_engine->running.store(false, std::memory_order_release);
-        if (g_engine->worker.joinable()) g_engine->worker.join();
-    }
-    g_engine->audio->stop();
     g_engine->qnn->shutdown();
     g_engine.reset();
     LOGI("Engine destroyed");

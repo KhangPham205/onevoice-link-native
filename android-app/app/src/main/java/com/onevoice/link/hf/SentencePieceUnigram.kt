@@ -10,7 +10,7 @@ import java.text.Normalizer
  * needs piece text, score and type from ModelProto. It intentionally has no JNI
  * dependency and runs once per short VAD-delimited utterance.
  */
-internal class SentencePieceUnigram private constructor(
+class SentencePieceUnigram private constructor(
     private val pieces: HashMap<String, Float>,
     private val maxPieceLen: Int,
 ) {

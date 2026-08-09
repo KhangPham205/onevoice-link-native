@@ -1,208 +1,126 @@
-# Deploying the NPU cascade to a device
+# Deploy and run the QNN speech pipeline
 
-How to get the QNN context binaries onto a Snapdragon 8 Gen 2 phone and confirm
-they load on the Hexagon HTP. This is the **load-and-verify** path: it proves the
-artifacts match the chip. It does not translate speech — see
-[§ What this does not do](#what-this-does-not-do).
+This guide deploys the live VI → EN pipelines to an SM8550 / Hexagon v73 phone.
+Hybrid (the default) executes QNN ASR/MT on HTP and whole-utterance Kokoro on
+CPU. Full QNN executes all six learned stages from context binaries on HTP.
 
----
+## Prerequisites
 
-## 0. Prerequisites
-
-| Thing | Requirement |
+| Item | Requirement |
 |---|---|
-| Phone | Snapdragon 8 Gen 2 — `ro.soc.model` = `SM8550`, `ro.board.platform` = `kalama`, Hexagon **v73** |
-| Build | the **debug** APK (the push script needs `run-as`) |
-| Binaries | `onevoice-npu-bins/` at the repo root (~5.9 GB, delivered out of band, git-ignored) |
-| SDK | QAIRT vendored at `native-core/third_party/qnn_sdk` (2.47.0 here; the `.bin` were built with 2.45.0) |
-| Toolchain | Android NDK `27.2.12479018` + CMake `3.22.1` |
+| Device | `ro.soc.model=SM8550`, `ro.board.platform=kalama` |
+| APK | debuggable build; the deploy script uses `run-as` |
+| Contexts | `onevoice-npu-bins/` plus generated prosody context |
+| QAIRT | headers/runtime under `native-core/third_party/qnn_sdk` |
+| Toolchain | JDK 21, NDK `27.2.12479018`, CMake `3.22.1` |
 
-Verify the chip before anything else — a `.bin` compiled for another Hexagon
-generation cannot load, and finding that out after pushing 2 GB is a waste:
+Always pass the ADB serial. `R5CW72TP4EP` is the transport serial, not a
+Hexagon signing serial.
 
 ```bash
-adb shell getprop ro.soc.model      # expect SM8550
-adb shell getprop ro.board.platform # expect kalama
+ADB=/home/khangpt4/Android/Sdk/platform-tools/adb
+$ADB -s R5CW72TP4EP shell getprop ro.soc.model
+$ADB -s R5CW72TP4EP shell getprop ro.board.platform
 ```
 
-`push-npu-models.sh` runs this check itself and refuses to continue on a
-mismatch (override with `FORCE=1` only if you know why).
-
----
-
-## 1. Build and install
+## Build, install, and stage models
 
 ```bash
 cd android-app
-./gradlew :app:assembleDebug
-adb install -r -t app/build/outputs/apk/debug/app-debug.apk
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+  ./gradlew --no-daemon --no-parallel --max-workers=1 :app:assembleDebug
+/home/khangpt4/Android/Sdk/platform-tools/adb -s R5CW72TP4EP \
+  install -r -t app/build/outputs/apk/debug/app-debug.apk
+cd ..
+tools/models/push-npu-models.sh vi-en R5CW72TP4EP
 ```
 
-If Gradle picks a JRE without `jlink` (the VS Code Java extension ships one),
-point it at a real JDK:
+The script copies into internal app storage:
 
-```bash
-JAVA_HOME=/path/to/jdk-21 ./gradlew --no-daemon :app:assembleDebug
+```text
+/data/user/0/com.onevoice.link/files/models/npu/vi-en/
 ```
 
----
+It stages the six `.bin` contexts, ASR/MT/TTS tokenizers, exact eSpeak frontend
+data and bridge, Kokoro voice table, and the CPU TTS artifact needed by Hybrid.
+Large files pass through one temporary file and that staging copy is deleted
+immediately; existing same-sized files are skipped.
 
-## 2. Push the model cascade
+## Live stage contract
 
-```bash
-tools/models/push-npu-models.sh all     # or: vi-en / en-vi
-```
-
-Roughly 2 GB, a couple of minutes. Re-running skips files already present with a
-matching size, so it is safe to repeat.
-
-### Why the script does a two-step copy
-
-It pushes to `/data/local/tmp` and then `run-as`-copies into the app's **internal**
-`filesDir`, rather than pushing straight to external storage. That is not
-belt-and-braces; external storage genuinely does not work here:
-
-> On Android 11+ an app cannot see files under its own
-> `Android/data/<pkg>/files/` that a different uid created. Measured on this
-> device (Android 16 / One UI): after `adb push`, `adb shell` lists the `.bin`
-> files, the path is byte-identical to the one the app computes, and the app
-> still gets `exists() == false`. Chowning the whole tree to the app's uid does
-> not help either.
-
-The app looks in both locations (`NpuEngine.candidateRoots`) and uses whichever
-actually holds models, so an external-storage layout still works on devices
-where the OS permits it.
-
----
-
-## 3. Load and verify
-
-Open **OneVoice Link** → tap **Load Model Cascade**. Each stage reports
-separately, because loading is three distinct checks per `.bin`:
-
-1. `QnnSystemContext_getBinaryInfo` — parse the blob, read the graph name, the
-   I/O contract and the `socModel` it was built for. No hardware involved.
-2. `contextCreateFromBinary` — place the graphs on the HTP. **This is the step
-   that fails on the wrong Hexagon arch.**
-3. `graphRetrieve(graphName)` — confirm the graph identity.
-
-Watch it from the host with:
-
-```bash
-adb logcat -s OneVoiceNpu:* OneVoiceQNN:* OneVoiceCore:*
-```
-
-### Graph names are not guessable
-
-Qualcomm AI Hub generates them (`graph_08xlh5ri`, `opus_mt_encoder`,
-`graph_5l17io1h`, …) and they are **not** recorded in the `metadata.json` shipped
-beside each binary. `graphRetrieve` fails on any mismatch, so the app ships
-`assets/npu_manifest.json`, generated from the binaries themselves:
-
-```bash
-python3 tools/models/gen_npu_manifest.py
-```
-
-Regenerate it whenever the model team delivers new `.bin` files.
-
----
-
-## 4. Direction coverage
-
-| Direction | Stages | Status |
-|---|---|---|
-| **VI → EN** | ASR + MT enc/dec + TTS enc/dec | 5 stages, ~1.53 GB — complete |
-| **EN → VI** | MT enc/dec + TTS enc/dec | 4 stages, ~419 MB — **cannot run** |
-
-EN→VI is disabled in the UI: the package ships **Vietnamese ASR only**, so there
-is no English `.bin` to start that cascade (HANDOFF.md §4 says the same). Its
-MT/TTS halves are still pushed and can be load-verified. When an English ASR
-binary arrives, add it to `gen_npu_manifest.py`, regenerate the asset, and flip
-`available` to `true`.
-
----
-
-## Known blocker: the DSP will not open for an app on retail firmware
-
-On a retail **SM-F731B** (SM8550 / Hexagon v73, One UI, Android 16) every stage
-fails at `contextCreateFromBinary` with `0x36b1` = **14001** =
-`QNN_MIN_ERROR_DEVICE + 1` — a *device-domain* error, so the DSP never came up.
-The artifacts are fine; this is a platform policy.
-
-`tools/models/smoke-test-npu.sh` isolates it by running Qualcomm's own
-`qnn-net-run` twice on the same `.bin`, same libs, same unsigned skel, changing
-only the uid:
-
-| Run as | Result |
+| Stage | Main input/output role |
 |---|---|
-| `shell` | `Finished Executing Graphs` — 3 output tensors, sizes matching the contract (`[1,512]`, `[1,512,640]`, `[1,512,512]`) |
-| app uid (`run-as`) | `Device Creation failure` |
+| `asr` | mel `[1,1001,80]` → CTC logits `[1,126,1025]` |
+| `mt_encoder` | IDs/mask `[1,256]` → 12 cross-attention tensors |
+| `mt_decoder` | token + position + KV cache → logits + present cache |
+| `tts_encoder` | token IDs/style → duration, `d`, and `t_en` |
+| `tts_prosody` | aligned `en` + style tail → `F0` and `N` |
+| `tts_decoder` | `F0/N/asr/style/har` → 15,000 waveform samples |
 
-So the chip, the skel, the QAIRT runtime and the binaries all work on this
-phone — an **untrusted app** just cannot open the Hexagon DSP here. Supporting
-evidence:
+Select **Hybrid**, tap **Load**, wait for the ASR and MT context rows, then tap
+**Start Translating**. This is the recommended listening path. Select **NPU**
+to load all six stages and exercise bucketed QNN TTS. The app records 16 kHz
+mono and plays synthesized 24 kHz mono audio. QNN calls are serialized; audio
+capture pauses while output is playing so playback is not recognized again as
+a new utterance.
 
-- `/dev/adsprpc-smd` is `crw-rw-r-- system:system u:object_r:vendor_qdsp_device`
-  — an app uid gets read-only, and `untrusted_app` is not granted that type.
-  SELinux is `Enforcing`; the denials are `dontaudit`'d, so logcat stays silent.
-- The firmware ships `libSnpeHtpV73Skel.so` but no `libQnnHtpV73Skel.so`.
-- Relaxing permissions along the app's skel path (`700`→`711`/`755`/`644`)
-  changes nothing, so it is not a filesystem-permission problem.
+Full-QNN G2P is not a character fallback: the tiny `tts_frontend.onnx` bridge
+uses sherpa-onnx/eSpeak to return the exact Kokoro phoneme IDs, then all learned
+TTS stages execute on HTP. Hybrid loads the unified CPU Kokoro model so it can
+render the translated sentence with uninterrupted decoder context.
 
-Things that were ruled out along the way, all fixed in the code:
+Useful logs:
 
-- `dlopen` by absolute path fails because `useLegacyPackaging = false` keeps the
-  `.so` inside the APK — the runtime now opens by soname first.
-- `deviceCreate` returning `0x36b1` is survivable; `contextCreateFromBinary`
-  accepts a null device.
-- The app cannot see `Android/data/<pkg>/files` content written by another uid,
-  which is why models are staged into internal `filesDir`.
+```bash
+/home/khangpt4/Android/Sdk/platform-tools/adb -s R5CW72TP4EP logcat \
+  -s OneVoiceNpu:* OneVoiceQNN:* OneVoiceCore:*
+```
 
-### Ways forward
+## Automated execution smoke test
 
-1. **Signed Hexagon skel** — the vendored QAIRT SDK only carries
-   `lib/hexagon-v73/unsigned/`. A skel signed for retail devices comes from
-   Qualcomm under license; with it, an ordinary app can open a signed PD.
-2. **A device that permits unsigned PD** — an engineering/`userdebug` build, or
-   a dev board with the DSP unlocked.
-3. **Run through a vendor-provided path** — e.g. ONNX Runtime's QNN EP as
-   HANDOFF.md §6 option B, which some OEM images allow where raw QNN does not.
-4. **Interim demo** — drive `qnn-net-run` from `adb shell` to show the models
-   executing on the NPU, while the app shows load-and-verify status.
+```bash
+cd android-app
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+  ./gradlew --no-daemon --no-parallel --max-workers=1 \
+  :app:assembleDebug :app:assembleDebugAndroidTest
+ADB=/home/khangpt4/Android/Sdk/platform-tools/adb
+$ADB -s R5CW72TP4EP install -r -t app/build/outputs/apk/debug/app-debug.apk
+$ADB -s R5CW72TP4EP install -r -t \
+  app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+$ADB -s R5CW72TP4EP shell am instrument -w \
+  com.onevoice.link.test/androidx.test.runner.AndroidJUnitRunner
+```
 
----
+This test loads all contexts, invokes `graphExecute`, translates a fixed
+sentence, synthesizes it, checks the waveform for finite values, and drains it
+through `AudioTrack`. A context-load-only result is not considered sufficient.
+For the same device sentence, Full QNN took about 1.2 seconds over three decoder
+buckets; Hybrid whole-utterance CPU Kokoro took about 2.7 seconds. Both delivered
+every PCM frame, so audible Full-QNN stutter is not an `AudioTrack` underrun.
 
-## What this does not do
+## Direction coverage
 
-`QnnRuntime::executeCascade()` returns `false` and the audio worker drops every
-chunk. Running the pipeline needs host-glue that does not exist for Android yet:
-
-- **ASR** — 80-mel fbank (16 kHz, win 400, hop 160, n_fft 512, preemph 0.97) then
-  CTC greedy: argmax → collapse repeats → drop blank (id 1024) → detokenize.
-- **MT** — SentencePiece, plus a hand-written autoregressive decode loop driving
-  a 27-input / 13-output decoder and threading `present_self` → `past_self` each
-  token until EOS.
-- **TTS** — G2P, alignment scatter to `asr[1,512,25]`, F0/N, `compute_har` →
-  `har[1,22,3001]`, style vector from a voicepack, then bucketed decoder calls
-  and overlap-add.
-
-Reference implementations exist only in Python on the model side (HANDOFF.md
-§3–§5, §8). `Start Capture` therefore opens the microphone and produces no audio
-output — deliberately, rather than emitting silence that looks like a working
-pipeline.
-
----
+| Direction | Status |
+|---|---|
+| VI → EN Hybrid | Complete; default and recommended for smooth speech |
+| VI → EN Full QNN | Complete six-stage execution; bucketed TTS quality-limited |
+| EN → VI | Disabled: English ASR QNN context is not available |
 
 ## Troubleshooting
 
-Postmortem cho sự cố `0x36b1` đã khắc phục:
-[FastRPC và Android linker policy](incidents/2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md).
-
-| Symptom | Cause |
+| Symptom | Action |
 |---|---|
-| `dlopen ... libQnnHtp.so not found` | `useLegacyPackaging = false` keeps the `.so` inside the APK, so absolute-path `dlopen` fails. The runtime opens by soname first — make sure you are on a current build. |
-| `libcdsprpc.so ... not found` | App target API 31+ is missing `<uses-native-library android:name="libcdsprpc.so">`; the vendor FastRPC library is outside the app linker namespace by default. |
-| `deviceCreate/contextCreateFromBinary failed (0x36b1)` | `QNN_DEVICE_ERROR_INVALID_CONFIG`. Inspect the preceding QNN/FastRPC lines; it can be a transport, PD config, skel lookup or version issue and does **not** alone prove that signing is required. |
-| non-device-domain `contextCreateFromBinary failed` | Check Hexagon arch (for example an `8elite` binary on an 8 Gen 2) and whether the QAIRT runtime is older than the binary. |
-| `graphRetrieve("…") failed; binary contains "…"` | Stale manifest — rerun `gen_npu_manifest.py`. |
-| every stage `file not on device` | Models were pushed to external storage; see § 2. |
+| `libcdsprpc.so not found` | Confirm merged manifest contains `<uses-native-library android:name="libcdsprpc.so">`. |
+| `0x36b1` | Read preceding FastRPC/QNN logs. The code means invalid device config; it does not by itself prove a signature failure. |
+| every stage missing | Run the push script after installing the debug APK; it uses internal `filesDir`. |
+| graph name mismatch | Regenerate `assets/npu_manifest.json` from the delivered binaries. |
+| initial/final words missing | Preserve 300 ms pre-roll and one-second VAD hangover. |
+| Full-QNN output still stutters with no underrun | Expected limitation of the fixed 25-frame decoder contract; use Hybrid for whole-utterance Kokoro. |
+| hard click at a Full-QNN bucket boundary | Preserve HAR phase/RNG continuity and overlap/crossfade stitching. |
+| output stops near five seconds | Do not restore the former 200-frame TTS limit; current cap is 750 frames. |
+
+The resolved `0x36b1` incident is documented in
+[2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md](incidents/2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md).
+The production phone uses an unsigned process domain successfully once the
+public vendor `libcdsprpc.so` is exposed to the app linker namespace. A TestSig
+does not bypass retail OEM trust policy.

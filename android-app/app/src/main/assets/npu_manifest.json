@@ -648,6 +648,52 @@
           ]
         },
         {
+          "stage": "tts_prosody",
+          "label": "TTS prosody · Kokoro W8A8",
+          "file": "vi-en/tts_prosody.bin",
+          "graph": "onevoice_kokoro_en_prosody_w8a8",
+          "sizeBytes": 10432512,
+          "inputs": [
+            {
+              "name": "en",
+              "dtype": "FLOAT_32",
+              "dims": [
+                1,
+                25,
+                640
+              ]
+            },
+            {
+              "name": "style_tail",
+              "dtype": "FLOAT_32",
+              "dims": [
+                1,
+                128
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "name": "F0",
+              "dtype": "FLOAT_32",
+              "dims": [
+                1,
+                50,
+                1
+              ]
+            },
+            {
+              "name": "N",
+              "dtype": "FLOAT_32",
+              "dims": [
+                1,
+                50,
+                1
+              ]
+            }
+          ]
+        },
+        {
           "stage": "tts_decoder",
           "label": "TTS decoder · Kokoro",
           "file": "vi-en/tts_decoder.bin",

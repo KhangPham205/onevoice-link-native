@@ -17,7 +17,7 @@ import com.onevoice.link.ui.screens.BackendKind
 import com.onevoice.link.ui.theme.OverlineMono
 import com.onevoice.link.ui.theme.Spacing
 
-/** Selects the complete offline pipeline or QNN context verification. */
+/** Selects the CPU reference, full-QNN, or hybrid pipeline. */
 @Composable
 fun BackendSelector(
     selected: BackendKind,

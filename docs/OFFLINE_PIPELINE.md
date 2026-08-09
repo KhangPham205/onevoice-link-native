@@ -1,112 +1,145 @@
-# Offline Pipeline: CPU/HF and QNN Status
+# Offline speech-to-speech pipelines
 
-OneVoice currently contains two materially different inference paths. Do not
-treat a successful QNN context load as proof that speech-to-speech execution is
-implemented.
+OneVoice has three fully offline modes. **Hybrid** is the default VI → EN path;
+**Offline CPU** is the bidirectional reference; **Full QNN** keeps all six
+learned VI → EN stages on Hexagon HTP for validation and optimization.
 
-| Path | Current capability | Model root |
-|---|---|---|
-| CPU/HF (`HfEngineBackend`) | Complete ASR -> MT -> TTS implementation | `<filesDir>/models/hf` |
-| QNN/HTP (`NpuEngine` + native core) | Load and verify QNN contexts only | `<filesDir>/models/npu` |
+| Backend | Direction | Learned inference | Status |
+|---|---|---|---|
+| Hybrid (default) | VI → EN | QNN ASR + MT; whole-utterance CPU Kokoro | Live, recommended |
+| Offline CPU | VI → EN, EN → VI | sherpa-onnx + ONNX Runtime | Live reference |
+| Full QNN | VI → EN | Six QNN graphs on HTP | Live, TTS quality-limited |
+| Hybrid / Full QNN | EN → VI | Missing English ASR context | Disabled |
 
-The dashboard exposes both backends and defaults to **Offline CPU**. Select QNN
-only when loading and verifying the device-specific context binaries; the QNN
-choice does not yet support live translation.
+## Hybrid live data flow
 
-## CPU/HF data flow
+```text
+AudioRecord + bounded VAD
+  -> native NeMo-compatible frontend -> QNN ASR
+  -> SentencePiece -> QNN Marian encoder/decoder
+  -> translated sentence -> sherpa-onnx Kokoro once for the whole utterance
+  -> one bounded 24 kHz waveform -> AudioTrack
+```
 
-The offline fallback runs entirely on the phone without a network connection:
+Hybrid deliberately combines the two execution mechanisms. ASR and MT use the
+continuous QNN graph contracts supplied for those stages. Kokoro stays on CPU
+because the unified model sees the complete phoneme sequence and generates one
+continuous waveform, preserving prosody and decoder state across the sentence.
+
+## QNN live data flow
 
 ```text
 AudioRecord, 16 kHz mono
-  -> bounded energy-VAD segments
-  -> sherpa-onnx NeMo CTC ASR
-  -> ONNX Runtime MarianMT greedy decoding
-  -> sherpa-onnx Kokoro TTS
-  -> AudioTrack
+  -> 20 ms frames, 300 ms pre-roll, energy VAD, 1 s silence hangover
+  -> native NeMo-compatible 80-mel frontend
+  -> QNN ASR -> CTC collapse/detokenize
+  -> SentencePiece -> QNN Marian encoder
+  -> QNN Marian decoder loop with persistent KV cache
+  -> exact eSpeak/Kokoro token IDs via the tiny frontend bridge -> QNN encoder
+  -> duration/alignment host math -> QNN learned prosody
+  -> native harmonic source/STFT -> QNN decoder in 25-frame buckets
+  -> phase-continuous HAR + overlap/crossfade stitching -> AudioTrack, 24 kHz mono
 ```
 
-Only one direction is kept resident to avoid loading both ASR and TTS weight
-sets at once on an 8 GB phone:
+The following learned stages run on HTP:
 
-| Direction | ASR | MT | TTS |
-|---|---|---|---|
-| `vi-en` | `asr-vi` | `mt-vi-en` | `tts-en` |
-| `en-vi` | `asr-en` | `mt-en-vi` | `tts-vi` |
+| Stage | Graph |
+|---|---|
+| Vietnamese ASR | `graph_08xlh5ri` |
+| Marian encoder | `opus_mt_encoder` |
+| Marian autoregressive decoder | `opus_mt_decoder` |
+| Kokoro encoder | `graph_5l17io1h` |
+| Kokoro learned prosody | `onevoice_kokoro_en_prosody_w8a8` |
+| Kokoro waveform decoder | `graph_93073co3` |
 
-Both directions also need the shared `espeak-ng-data` directory. The local
-source layout is `models-hf/<component>`. `MarianTranslator` currently performs
-greedy, no-KV-cache decoding and caps conversational output at 128 tokens.
+Small deterministic transforms remain on CPU: audio framing/VAD, mel features,
+tokenization, CTC collapse, MT argmax/cache placement, alignment, harmonic STFT,
+bucket stitching, and audio I/O. This does not make the backend a CPU model
+path; all neural-network inference is performed by the QNN contexts on HTP.
 
-## Stage one direction on a phone
+## Recording and playback boundaries
 
-Install and launch a debuggable APK first, then give the script both the
-direction and the exact ADB serial. There is deliberately no implicit "first
-connected device" fallback.
+The QNN ASR graph has a fixed ten-second input window. Capture therefore uses:
+
+- 20 ms frames and a 300 ms circular pre-roll so initial consonants are kept;
+- an RMS threshold of `0.008`, at least 120 ms of voiced audio, and one second
+  of trailing silence before ending an utterance;
+- a ten-second hard ASR window with 500 ms carry-over when continuous speech
+  must be split.
+
+The Full-QNN TTS path accepts up to 750 alignment frames (30 decoder buckets),
+about 18.75 seconds of 24 kHz audio. Harmonic phase and RNG state continue
+across buckets, and overlap/crossfade stitching reduces hard boundary clicks.
+It cannot recreate the unified Kokoro decoder's whole-utterance temporal
+context, however, so audible rhythm/timbre discontinuities can remain even when
+every PCM frame is delivered. Hybrid avoids that boundary entirely.
+
+These details are load-bearing. Reducing the hangover, removing pre-roll,
+resetting HAR per bucket, or restoring the former 200-frame TTS cap introduces
+additional missing-word or truncation failures. It does not resolve the
+inherent fixed-window quality difference; use Hybrid for smooth output.
+
+## Deploy the QNN artifacts
+
+Build and install a debuggable APK, then target the device explicitly:
 
 ```bash
-tools/models/push-hf-models.sh vi-en R5CW72TP4EP
-# or
-tools/models/push-hf-models.sh en-vi R5CW72TP4EP
+cd android-app
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+  ./gradlew --no-daemon --no-parallel --max-workers=1 :app:assembleDebug
+adb -s R5CW72TP4EP install -r -t app/build/outputs/apk/debug/app-debug.apk
+cd ..
+tools/models/push-npu-models.sh vi-en R5CW72TP4EP
 ```
 
-The script performs these checks before transfer:
+The script stages contexts and frontend assets into the app's internal
+`files/models/npu/vi-en` directory through `run-as`. It skips an existing file
+when the byte size matches and never clears app data.
 
-- the selected ASR, MarianMT, target-language TTS, and espeak artifacts exist
-  locally and are non-empty;
-- the named device is in `device` state;
-- `com.onevoice.link` is installed and `run-as` succeeds;
-- the device provides `tar` and `sha256sum`.
+## Device validation
 
-It streams an uncompressed tar directly into
-`/data/user/0/com.onevoice.link/files/models/hf`. It does not create a second
-multi-hundred-megabyte archive, use `/data/local/tmp`, clear app data, or remove
-the other direction. Existing files with the same names are updated; unrelated
-files remain. After extraction, every transmitted file is checked against its
-host SHA-256 digest.
-
-With the artifacts currently present in `models-hf`, `vi-en` transfers about
-1.08 GiB and `en-vi` about 0.49 GiB, including the shared espeak data. The script
-prints the exact byte count before transfer. Make sure the phone has enough free
-space.
-
-To use a model root outside the repository, set `HF_MODELS_DIR`:
+The instrumented smoke test does more than load contexts: it executes ASR,
+translates a long Vietnamese sentence, synthesizes it, validates finite PCM,
+and sends it through Android `AudioTrack`.
 
 ```bash
-HF_MODELS_DIR=/absolute/path/to/models-hf \
-  tools/models/push-hf-models.sh vi-en R5CW72TP4EP
+cd android-app
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+  ./gradlew --no-daemon --no-parallel --max-workers=1 \
+  :app:assembleDebug :app:assembleDebugAndroidTest
+adb -s R5CW72TP4EP install -r -t app/build/outputs/apk/debug/app-debug.apk
+adb -s R5CW72TP4EP install -r -t \
+  app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s R5CW72TP4EP shell am instrument -w \
+  com.onevoice.link.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-## Why the QNN path is verify-only
+On the target SM8550 device, `AudioTrack` delivered every requested frame in
+both modes. For the same sentence, Full-QNN synthesis took about 1.2 seconds and
+used three decoder buckets; Hybrid whole-utterance CPU Kokoro took about 2.7
+seconds. The faster QNN result remained audibly less smooth, which isolates the
+problem to bucketed synthesis rather than playback loss.
 
-The app can initialize the HTP backend, create one context per `.bin`, and
-retrieve the graph declared by `assets/npu_manifest.json`. The native
-`QnnRuntime::executeCascade()` still returns `false`: tensor binding,
-`graphExecute`, ASR post-processing, Marian autoregressive KV-cache decoding,
-and the TTS bridge are not implemented as an Android cascade.
+## Current limitations
 
-The Kokoro QNN package contains encoder and decoder context binaries, but it is
-not a closed executable TTS artifact set. The decoder requires `F0`, `N`,
-`asr`, `s`, and `har`; the encoder does not produce all of them. The missing
-intermediate prosody/host stage must perform G2P, alignment scatter, F0/N and
-`compute_har`, obtain style vectors from a voicepack, bucket decoder calls, and
-overlap-add the waveform. Those supporting QNN/runtime artifacts are not staged
-by `push-npu-models.sh`. EN -> VI additionally lacks a deployable English ASR
-QNN context. Consequently, **Load Model Cascade** proves compatibility and DSP
-access only; it cannot produce translated audio.
+- EN → VI QNN is disabled because no deployable English ASR `.bin` exists.
+- Full-QNN English Kokoro uses exact eSpeak phonemization. A tiny bridge ONNX
+  model exposes sherpa-onnx's normal Kokoro token IDs without loading the full
+  CPU Kokoro network; learned synthesis still executes in QNN.
+- Full-QNN Kokoro decoding is fixed at 25 alignment frames per context call.
+  Host overlap/crossfade cannot fully reproduce whole-utterance decoder state.
+- The ASR context is statically limited to ten seconds per inference. Long
+  continuous speech is deliberately segmented with overlap, not fed as one
+  unbounded tensor.
 
-## RAM limits on the build laptop
+## Host RAM policy
 
-This repository deliberately bounds Gradle memory in
-`android-app/gradle.properties`:
+Gradle is bounded to a 1 GiB heap, one worker, and no parallel execution.
+Native linking can still need several GiB; avoid concurrent Android Studio or
+Gradle builds. Runtime tensor buffers are persistent and reused. Full QNN does
+not load the 345 MB unified Kokoro ONNX model; Hybrid intentionally loads one
+CPU Kokoro instance and releases it when the backend changes.
 
-- Gradle heap: 1 GiB; metaspace: 512 MiB;
-- one Gradle worker; parallel execution disabled;
-- Kotlin compiles in-process so a separate 2 GiB daemon is not started.
-
-Native LTO linking can still require roughly 3-4 GiB of available system RAM.
-Before a native rebuild, ensure at least 4 GiB is available, avoid concurrent
-Gradle/Android Studio builds, and do not raise worker count or heap limits on a
-memory-constrained laptop. Run the model push separately from the build. The HF
-push itself is streaming and has nearly constant host-memory use; model size
-primarily affects disk space, USB time, and the phone's runtime memory.
+Phân tích đầy đủ về artifact TTS fixed-window, bằng chứng thiết bị và yêu cầu
+re-export dành cho team model nằm tại
+[Sự cố chất lượng TTS QNN](incidents/2026-08-09-qnn-tts-fixed-window-quality.md).
