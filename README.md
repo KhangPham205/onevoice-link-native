@@ -40,7 +40,7 @@ Full details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Repository layout
 
-```
+```text
 onevoice-link-native/
 |-- android-app/            Jetpack Compose app (Kotlin DSL, Gradle version catalog)
 |   `-- app/src/main/
@@ -53,7 +53,7 @@ onevoice-link-native/
 |       |-- assets/npu_manifest.json     stage -> .bin + exact QNN graph name
 |       |-- jniLibs/arm64-v8a/           extra prebuilt libs (QNN staged here by Gradle)
 |       `-- AndroidManifest.xml          RECORD_AUDIO + Bluetooth (P2P) permissions
-|-- native-core/            C++ realtime engine -> libonevoice_core.so
+|-- native-core/            The C++ realtime engine -> libonevoice_core.so
 |   |-- CMakeLists.txt
 |   |-- include/            audio_engine.h, ring_buffer.h, qnn_runtime.h
 |   |-- src/                main_jni.cpp, audio_engine.cpp, ring_buffer.cpp, qnn_runtime.cpp
@@ -75,7 +75,7 @@ onevoice-link-native/
 
 ## Quick start
 
-**Prerequisites:** Android Studio (or CLI) with SDK Platform **36**, NDK **26–29**, CMake **3.22.1**, and a JDK **17+**. Target device: an **arm64-v8a Snapdragon** phone with a Hexagon NPU.
+**Prerequisites:** Android Studio (or CLI) with SDK Platform **36**, NDK **26-29**, CMake **3.22.1**, and a JDK **17+**. Target device: an **arm64-v8a Snapdragon** phone with a Hexagon NPU.
 
 1. **Vendor the QNN SDK.** The Qualcomm AI Runtime SDK is *not* committed (large, license-restricted). Extract it so that these paths exist:
    ```
@@ -107,7 +107,7 @@ See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags,
 | Document | Contents |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Threading model, data flow, latency budget, the lock-free ring buffer. |
-| [docs/BUILD.md](docs/BUILD.md) | Toolchain, QNN vendoring, Gradle↔CMake binding, compiler flags, troubleshooting. |
+| [docs/BUILD.md](docs/BUILD.md) | Toolchain, QNN vendoring, Gradle <-> CMake binding, compiler flags, troubleshooting. |
 | [docs/JNI_API.md](docs/JNI_API.md) | The native ABI contract and the Kotlin bridge (`OneVoiceNative`). |
 | [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md) | QNN SDK layout, packaging `.so` into the APK, and the runtime `dlopen` chain. |
 | [docs/MODEL_HANDOFF.md](docs/MODEL_HANDOFF.md) | Contract for the AI/model team: everything to deliver alongside the `.bin`. |
