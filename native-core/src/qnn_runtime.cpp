@@ -36,9 +36,12 @@
   #include <QnnDevice.h>
   #include <QnnGraph.h>
   #include <QnnInterface.h>
+  #include <QnnProfile.h>
   #include <QnnTensor.h>
   #include <QnnTypes.h>
   #include <HTP/QnnHtpDevice.h>
+  #include <HTP/QnnHtpPerfInfrastructure.h>
+  #include <HTP/QnnHtpProfile.h>
   #include <System/QnnSystemContext.h>
   #include <System/QnnSystemInterface.h>
 #else
@@ -352,6 +355,21 @@ struct QnnRuntime::State {
     };
     std::vector<Loaded> models;
     std::mutex executionMutex;
+
+    // ---- Benchmarking state ----------------------------------------------
+    // One handle reused for every execute. QNN overwrites a handle's events on
+    // the next execute that references it, and the six Hybrid contexts run
+    // strictly sequentially under executionMutex, so the events are drained
+    // immediately after each graphExecute while they still belong to that
+    // stage. Sharing the handle is safe only because of that serialization.
+    Qnn_ProfileHandle_t profile = nullptr;
+    bool profilingEnabled = false;
+    bool profileSchemaLogged = false;
+    std::vector<ProfileSample> profileSamples;
+    std::mutex profileMutex;
+    std::string powerMode = "unset";
+    uint32_t perfPowerConfigId = 0;
+    bool perfInfraReady = false;
 #else
     char placeholder;
 #endif
@@ -703,6 +721,324 @@ ModelLoadResult QnnRuntime::loadModel(const ModelSpec& spec) {
 #endif
 }
 
+#if ONEVOICE_HAS_QNN
+namespace {
+
+uint64_t monotonicUs() {
+    // CLOCK_MONOTONIC, not wall clock: NTP steps and suspend would otherwise
+    // show up as negative or absurd stage latencies.
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
+           static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
+}
+
+const char* profileEventName(uint32_t type) {
+    switch (type) {
+        case QNN_PROFILE_EVENTTYPE_EXECUTE:                return "EXECUTE";
+        case QNN_PROFILE_EVENTTYPE_EXECUTE_QUEUE_WAIT:     return "EXECUTE_QUEUE_WAIT";
+        case QNN_PROFILE_EVENTTYPE_EXECUTE_PREPROCESS:     return "EXECUTE_PREPROCESS";
+        case QNN_PROFILE_EVENTTYPE_EXECUTE_DEVICE:         return "EXECUTE_DEVICE";
+        case QNN_PROFILE_EVENTTYPE_EXECUTE_POSTPROCESS:    return "EXECUTE_POSTPROCESS";
+        case QNN_HTP_PROFILE_EVENTTYPE_GRAPH_EXECUTE_HOST_RPC_TIME_MICROSEC:
+            return "HTP_HOST_RPC_US";
+        case QNN_HTP_PROFILE_EVENTTYPE_GRAPH_EXECUTE_HTP_RPC_TIME_MICROSEC:
+            return "HTP_RPC_US";
+        case QNN_HTP_PROFILE_EVENTTYPE_GRAPH_EXECUTE_ACCEL_TIME_CYCLE:
+            return "HTP_ACCEL_CYCLES";
+        case QNN_HTP_PROFILE_EVENTTYPE_GRAPH_EXECUTE_ACCEL_TIME_MICROSEC:
+            return "HTP_ACCEL_US";
+        case QNN_HTP_PROFILE_EVENTTYPE_GRAPH_EXECUTE_ACCEL_EXCL_WAIT_TIME_MICROSEC:
+            return "HTP_ACCEL_EXCL_WAIT_US";
+        default: return "OTHER";
+    }
+}
+
+const char* profileUnitName(uint32_t unit) {
+    switch (unit) {
+        case QNN_PROFILE_EVENTUNIT_MICROSEC: return "us";
+        case QNN_PROFILE_EVENTUNIT_BYTES:    return "bytes";
+        case QNN_PROFILE_EVENTUNIT_CYCLES:   return "cycles";
+        case QNN_PROFILE_EVENTUNIT_COUNT:    return "count";
+        case QNN_PROFILE_EVENTUNIT_OBJECT:   return "object";
+        case QNN_PROFILE_EVENTUNIT_NONE:     return "none";
+        default: return "?";
+    }
+}
+
+}  // namespace
+#endif
+
+#if ONEVOICE_HAS_QNN
+/**
+ * Fold one event (and its sub-events) into the sample being built.
+ *
+ * The interesting numbers are nested: EXECUTE (400) is the top-level event and
+ * the accelerator time hangs off it as a sub-event, so a flat pass over
+ * getEvents() alone reports nothing useful. Both the generic
+ * EXECUTE_DEVICE (407) and the HTP-specific ACCEL_TIME_MICROSEC (3004) are
+ * accepted because which one a given backend build emits is not guaranteed;
+ * 3004 wins when both are present since it is the vendor's own measurement.
+ *
+ * `logSchema` dumps identifier/type/unit once per process so the raw contract
+ * can be checked against the header instead of trusted.
+ */
+void QnnRuntime::foldProfileEvent(uint64_t eventId, ProfileSample& sample,
+                                  bool logSchema, int depth) {
+    const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
+    QnnProfile_EventData_t data = QNN_PROFILE_EVENT_DATA_INIT;
+    if (qnn.profileGetEventData(eventId, &data) != QNN_SUCCESS) return;
+
+    if (logSchema) {
+        LOGI("profile[%d] type=%u(%s) unit=%u(%s) value=%llu id=%s",
+             depth, data.type, profileEventName(data.type),
+             data.unit, profileUnitName(data.unit),
+             static_cast<unsigned long long>(data.value),
+             data.identifier ? data.identifier : "(null)");
+    }
+
+    // Only microsecond events are folded into timing fields; cycle counts need
+    // a clock rate that DVFS makes unknowable from here.
+    if (data.unit == QNN_PROFILE_EVENTUNIT_MICROSEC) {
+        switch (data.type) {
+            case QNN_PROFILE_EVENTTYPE_EXECUTE:
+                sample.executeUs = data.value;
+                break;
+            case QNN_PROFILE_EVENTTYPE_EXECUTE_QUEUE_WAIT:
+                sample.queueWaitUs = data.value;
+                break;
+            case QNN_PROFILE_EVENTTYPE_EXECUTE_DEVICE:
+                if (sample.acceleratorUs == 0) sample.acceleratorUs = data.value;
+                break;
+            case QNN_HTP_PROFILE_EVENTTYPE_GRAPH_EXECUTE_ACCEL_TIME_MICROSEC:
+                sample.acceleratorUs = data.value;  // vendor value wins
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (depth >= 2) return;  // EXECUTE -> sub-event is the only nesting we need
+    const QnnProfile_EventId_t* subIds = nullptr;
+    uint32_t subCount = 0;
+    if (qnn.profileGetSubEvents(eventId, &subIds, &subCount) != QNN_SUCCESS ||
+        subIds == nullptr) {
+        return;
+    }
+    for (uint32_t i = 0; i < subCount; ++i) {
+        foldProfileEvent(subIds[i], sample, logSchema, depth + 1);
+    }
+}
+
+void QnnRuntime::collectProfile(const std::string& stage, uint64_t wallUs) {
+    const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
+    ProfileSample sample;
+    sample.stage  = stage;
+    sample.wallUs = wallUs;
+
+    const QnnProfile_EventId_t* eventIds = nullptr;
+    uint32_t eventCount = 0;
+    if (qnn.profileGetEvents(state_->profile, &eventIds, &eventCount) == QNN_SUCCESS &&
+        eventIds != nullptr) {
+        const bool logSchema = !state_->profileSchemaLogged;
+        if (logSchema) {
+            LOGI("profile schema dump for stage=%s (%u top-level events)",
+                 stage.c_str(), eventCount);
+        }
+        for (uint32_t i = 0; i < eventCount; ++i) {
+            foldProfileEvent(eventIds[i], sample, logSchema, 0);
+        }
+        state_->profileSchemaLogged = true;
+        sample.profiled = true;
+    }
+
+    std::lock_guard<std::mutex> lock(state_->profileMutex);
+    // Bounded so a forgotten drain cannot grow without limit during a soak.
+    if (state_->profileSamples.size() < 4096) {
+        state_->profileSamples.push_back(std::move(sample));
+    }
+}
+#endif
+
+#if !ONEVOICE_HAS_QNN
+// Same symbols, no-op bodies: the class layout and link surface must not depend
+// on whether the SDK was present at compile time.
+void QnnRuntime::collectProfile(const std::string&, uint64_t) {}
+void QnnRuntime::foldProfileEvent(uint64_t, ProfileSample&, bool, int) {}
+#endif
+
+bool QnnRuntime::setProfilingEnabled(bool enabled) {
+#if ONEVOICE_HAS_QNN
+    if (!state_ || !state_->api || !state_->backend) return false;
+    const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
+    if (enabled == state_->profilingEnabled) return true;
+    if (enabled) {
+        // BASIC only. DETAILED emits a per-node event stream whose collection
+        // cost distorts the very latency it is supposed to explain, so it is
+        // reserved for one-off diagnosis runs, never for gate numbers.
+        Qnn_ProfileHandle_t handle = nullptr;
+        const auto err = qnn.profileCreate(state_->backend,
+                                           QNN_PROFILE_LEVEL_BASIC, &handle);
+        if (err != QNN_SUCCESS || handle == nullptr) {
+            LOGW("profileCreate failed (0x%llx); profiling stays off",
+                 static_cast<unsigned long long>(err));
+            return false;
+        }
+        state_->profile = handle;
+        state_->profilingEnabled = true;
+        LOGI("QNN profiling enabled (BASIC)");
+    } else {
+        if (state_->profile) qnn.profileFree(state_->profile);
+        state_->profile = nullptr;
+        state_->profilingEnabled = false;
+        LOGI("QNN profiling disabled");
+    }
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool QnnRuntime::profilingEnabled() const noexcept {
+#if ONEVOICE_HAS_QNN
+    return state_ && state_->profilingEnabled;
+#else
+    return false;
+#endif
+}
+
+std::vector<QnnRuntime::ProfileSample> QnnRuntime::drainProfile() {
+#if ONEVOICE_HAS_QNN
+    if (!state_) return {};
+    std::lock_guard<std::mutex> lock(state_->profileMutex);
+    std::vector<ProfileSample> out;
+    out.swap(state_->profileSamples);
+    return out;
+#else
+    return {};
+#endif
+}
+
+bool QnnRuntime::applyPowerConfig(const PowerConfig& config, std::string& error) {
+    error.clear();
+#if ONEVOICE_HAS_QNN
+    if (!ready_.load(std::memory_order_acquire) || !state_ || !state_->api) {
+        error = "backend is not ready";
+        return false;
+    }
+    const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
+
+    QnnDevice_Infrastructure_t infra = nullptr;
+    const auto infraErr = qnn.deviceGetInfrastructure(&infra);
+    if (infraErr != QNN_SUCCESS || infra == nullptr) {
+        error = "deviceGetInfrastructure failed";
+        return false;
+    }
+    auto* htpInfra = static_cast<QnnHtpDevice_Infrastructure_t*>(infra);
+    if (htpInfra->infraType != QNN_HTP_DEVICE_INFRASTRUCTURE_TYPE_PERF) {
+        error = "device infrastructure is not the perf type";
+        return false;
+    }
+    auto& perf = htpInfra->perfInfra;
+    if (!perf.createPowerConfigId || !perf.setPowerConfig) {
+        error = "perf infrastructure entry points are missing";
+        return false;
+    }
+
+    if (!state_->perfInfraReady) {
+        // deviceId/coreId 0: this SoC exposes a single NSP, and the manifest
+        // already pins the target to SM8550.
+        const auto idErr = perf.createPowerConfigId(0, 0, &state_->perfPowerConfigId);
+        if (idErr != QNN_SUCCESS) {
+            error = "createPowerConfigId failed";
+            return false;
+        }
+        state_->perfInfraReady = true;
+    }
+
+    // Voltage corner target per requested mode. "burst" pins the core to TURBO
+    // and disables sleep so DVFS cannot ramp mid-measurement; without this the
+    // first executes of a run are systematically slower than the rest and the
+    // p95 reflects the governor rather than the model.
+    QnnHtpPerfInfrastructure_VoltageCorner_t corner = DCVS_VOLTAGE_VCORNER_TURBO;
+    uint32_t dcvsEnable = 0;
+    if (config.mode == "burst") {
+        corner = DCVS_VOLTAGE_VCORNER_TURBO;
+        dcvsEnable = 0;                    // hold the vote, do not scale
+    } else if (config.mode == "sustained_high_performance") {
+        corner = DCVS_VOLTAGE_VCORNER_NOM_PLUS;
+        dcvsEnable = 1;
+    } else if (config.mode == "balanced") {
+        corner = DCVS_VOLTAGE_VCORNER_SVS_PLUS;
+        dcvsEnable = 1;
+    } else {
+        error = "unknown power mode: " + config.mode;
+        return false;
+    }
+
+    QnnHtpPerfInfrastructure_PowerConfig_t dcvs{};
+    dcvs.option = QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_DCVS_V3;
+    dcvs.dcvsV3Config.contextId = state_->perfPowerConfigId;
+    dcvs.dcvsV3Config.setDcvsEnable = 1;
+    dcvs.dcvsV3Config.dcvsEnable = dcvsEnable;
+    dcvs.dcvsV3Config.powerMode =
+        QNN_HTP_PERF_INFRASTRUCTURE_POWERMODE_PERFORMANCE_MODE;
+    dcvs.dcvsV3Config.setSleepDisable = 1;
+    dcvs.dcvsV3Config.sleepDisable = (config.mode == "burst") ? 1 : 0;
+    dcvs.dcvsV3Config.setSleepLatency = 1;
+    dcvs.dcvsV3Config.sleepLatency = config.rpcControlLatencyUs;
+    dcvs.dcvsV3Config.setBusParams = 1;
+    dcvs.dcvsV3Config.busVoltageCornerMin = corner;
+    dcvs.dcvsV3Config.busVoltageCornerTarget = corner;
+    dcvs.dcvsV3Config.busVoltageCornerMax = corner;
+    dcvs.dcvsV3Config.setCoreParams = 1;
+    dcvs.dcvsV3Config.coreVoltageCornerMin = corner;
+    dcvs.dcvsV3Config.coreVoltageCornerTarget = corner;
+    dcvs.dcvsV3Config.coreVoltageCornerMax = corner;
+
+    QnnHtpPerfInfrastructure_PowerConfig_t latency{};
+    latency.option =
+        QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_CONTROL_LATENCY;
+    latency.rpcControlLatencyConfig = config.rpcControlLatencyUs;
+
+    QnnHtpPerfInfrastructure_PowerConfig_t polling{};
+    polling.option =
+        QNN_HTP_PERF_INFRASTRUCTURE_POWER_CONFIGOPTION_RPC_POLLING_TIME;
+    polling.rpcPollingTimeConfig = config.rpcPollingTimeUs;
+
+    const QnnHtpPerfInfrastructure_PowerConfig_t* configs[] = {
+        &dcvs, &latency, &polling, nullptr,
+    };
+    const auto setErr = perf.setPowerConfig(state_->perfPowerConfigId, configs);
+    if (setErr != QNN_SUCCESS) {
+        char code[32];
+        snprintf(code, sizeof(code), "0x%llx",
+                 static_cast<unsigned long long>(setErr));
+        error = std::string("setPowerConfig failed (") + code + ")";
+        return false;
+    }
+
+    state_->powerMode = config.mode;
+    LOGI("HTP power config applied mode=%s rpcControlLatencyUs=%u rpcPollingUs=%u",
+         config.mode.c_str(), config.rpcControlLatencyUs, config.rpcPollingTimeUs);
+    return true;
+#else
+    (void)config;
+    error = "built without the QNN SDK";
+    return false;
+#endif
+}
+
+const std::string& QnnRuntime::activePowerMode() const noexcept {
+    static const std::string kUnavailable = "unavailable";
+#if ONEVOICE_HAS_QNN
+    return state_ ? state_->powerMode : kUnavailable;
+#else
+    return kUnavailable;
+#endif
+}
+
 bool QnnRuntime::executeGraph(const std::string& stage,
                               const std::vector<GraphBuffer>& inputs,
                               const std::vector<GraphBuffer>& outputs,
@@ -758,11 +1094,21 @@ bool QnnRuntime::executeGraph(const std::string& stage,
         !bind(it->outputs, outputs, qnnOutputs, "output")) return false;
 
     const auto& qnn = state_->api->QNN_INTERFACE_VER_NAME;
+    // Passing the handle costs measurable time inside graphExecute, which is
+    // why the latency baseline cohort runs with profiling never enabled.
+    Qnn_ProfileHandle_t profileHandle =
+        state_->profilingEnabled ? state_->profile : nullptr;
+    const uint64_t startUs = profileHandle ? monotonicUs() : 0;
     const Qnn_ErrorHandle_t executeError = qnn.graphExecute(
         it->graph,
         qnnInputs.data(), static_cast<uint32_t>(qnnInputs.size()),
         qnnOutputs.data(), static_cast<uint32_t>(qnnOutputs.size()),
-        /*profile=*/nullptr, /*signal=*/nullptr);
+        profileHandle, /*signal=*/nullptr);
+    if (profileHandle && executeError == QNN_SUCCESS) {
+        // Drain immediately: the next graphExecute on this handle overwrites
+        // the events, and the six Hybrid contexts execute back to back.
+        collectProfile(stage, monotonicUs() - startUs);
+    }
     if (executeError != QNN_SUCCESS) {
         char code[32];
         snprintf(code, sizeof(code), "0x%llx",

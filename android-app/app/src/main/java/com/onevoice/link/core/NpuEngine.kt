@@ -11,14 +11,19 @@ import android.system.Os
 import android.util.Log
 import com.onevoice.link.BuildConfig
 import java.io.File
+import java.lang.ref.WeakReference
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.sqrt
 
 private const val TAG = "OneVoiceNpu"
+private const val LID_DUMP_LIMIT = 8
 
-/** Selects whether speech synthesis stays on QNN or uses whole-utterance CPU Kokoro. */
+/** Legacy construction option; production exposes only [CPU_WHOLE_UTTERANCE]. */
 enum class NpuTtsMode {
     QNN_BUCKETED,
     CPU_WHOLE_UTTERANCE,
@@ -49,10 +54,10 @@ data class StageStatus(
 /**
  * Native QNN context loader for the Hexagon HTP.
  *
- * Live VI -> EN pipeline. Audio/VAD and deterministic tensor transforms run on
- * bounded CPU buffers. Full-QNN mode executes all six learned stages on HTP;
- * hybrid mode executes ASR/MT on HTP and renders Kokoro once for the whole
- * translated utterance on CPU to preserve temporal context.
+ * Auto-direction Hybrid pipeline. Audio/VAD and deterministic tensor transforms
+ * use bounded CPU buffers. SpeechFlow LID classifies each completed utterance,
+ * both ASR/MT branches execute on HTP, and Kokoro renders one continuous target
+ * utterance on CPU to preserve temporal context.
  *
  * Models normally live under internal `<filesDir>/models/npu/<direction>/`;
  * the deploy script stages them with `run-as` because direct external-storage
@@ -60,16 +65,19 @@ data class StageStatus(
  */
 class NpuEngine(
     context: Context,
-    private val ttsMode: NpuTtsMode = NpuTtsMode.QNN_BUCKETED,
+    @Suppress("UNUSED_PARAMETER") ttsMode: NpuTtsMode = NpuTtsMode.CPU_WHOLE_UTTERANCE,
 ) : EngineBackend {
 
-    override val displayName: String = when (ttsMode) {
-        NpuTtsMode.QNN_BUCKETED -> "QNN / Hexagon HTP · ASR → MT → TTS"
-        NpuTtsMode.CPU_WHOLE_UTTERANCE ->
-            "Hybrid · QNN ASR + MT · CPU Kokoro TTS"
+    override val displayName =
+        "Hybrid Auto · SpeechFlow LID · QNN ASR + MT · CPU Kokoro"
+    override val supportsLiveTranslation: Boolean = true
+
+    init {
+        // The benchmark receiver is a separate instance created by the
+        // framework, so it needs a way to reach the engine the Activity owns.
+        // Weak so a destroyed engine is not pinned alive by this alone.
+        activeEngine = WeakReference(this)
     }
-    override val supportsLiveTranslation: Boolean
-        get() = direction == TranslationDirection.VI_TO_EN
 
     override var lastError: String? = null
         private set
@@ -113,11 +121,7 @@ class NpuEngine(
     /** Absolute path shown in the UI so a missing-models error is actionable. */
     val modelRootPath: String get() = modelRoot.absolutePath
 
-    @Volatile
-    var direction: TranslationDirection = TranslationDirection.VI_TO_EN
-        private set
-
-    /** Current per-stage status for [direction]; replaced wholesale on change. */
+    /** Current per-stage status for both resident translation directions. */
     @Volatile
     var stages: List<StageStatus> = emptyList()
         private set
@@ -128,11 +132,36 @@ class NpuEngine(
     @Volatile
     private var pipelineListener: EngineBackend.PipelineListener? = null
     @Volatile
-    private var pipeline: NpuPipeline? = null
+    private var pipeline: AutoHybridPipeline? = null
     private val running = AtomicBoolean(false)
     private val releasePending = AtomicBoolean(false)
+    private val destroyed = AtomicBoolean(false)
     private val playbackLock = ReentrantLock()
-    private val segments = LinkedBlockingQueue<FloatArray>(MAX_QUEUED_SEGMENTS)
+    private val lidDumpCount = AtomicInteger(0)
+
+    /**
+     * Benchmark sink. Inert unless the harness created `<filesDir>/bench`, so a
+     * production run pays only one directory check per utterance.
+     */
+    private val telemetry: BenchTelemetry? =
+        runCatching { BenchTelemetry(appContext) }.getOrNull()
+    /**
+     * A bounded utterance plus the two facts about it that only the capture
+     * loop knows.
+     *
+     * [enqueuedNs] exists so queue_wait_ms can be separated from inference
+     * time: under back-pressure an utterance can sit here for hundreds of
+     * milliseconds, and folding that into the model timings would blame the
+     * models for a scheduling effect.
+     */
+    private class CapturedSegment(
+        val samples: FloatArray,
+        val enqueuedNs: Long,
+        /** True when the 10 s ASR ceiling cut the utterance, not silence. */
+        val forcedBoundary: Boolean,
+    )
+
+    private val segments = LinkedBlockingQueue<CapturedSegment>(MAX_QUEUED_SEGMENTS)
     @Volatile private var playing = false
     @Volatile private var lastAudio: Pair<FloatArray, Int>? = null
     private var captureThread: Thread? = null
@@ -147,19 +176,21 @@ class NpuEngine(
         listener = l
     }
 
-    /** The stages the manifest declares for [direction], before any load. */
-    fun plannedStages(d: TranslationDirection = direction): List<StageStatus> =
-        manifest.forDirection(d)?.let(::selectedStages)?.map { StageStatus(it) } ?: emptyList()
+    /** All HTP contexts kept resident by the auto-direction Hybrid pipeline. */
+    fun plannedStages(): List<StageStatus> = manifest.directions.flatMap { spec ->
+        selectedStages(spec).map { StageStatus(it) }
+    }
 
-    fun directionSpec(d: TranslationDirection = direction): DirectionSpec? =
-        manifest.forDirection(d)
+    fun directionSpec(d: TranslationDirection): DirectionSpec? = manifest.forDirection(d)
 
     // ------------------------------------------------------------------ init
-    /**
-     * Brings up the QNN backend, then loads every stage of the current
-     * direction. Returns true only when all stages loaded.
-     */
+    /** Brings up QNN and loads both ASR/MT branches plus their CPU host glue. */
+    @Synchronized
     override fun initialize(): Boolean {
+        if (destroyed.get()) {
+            lastError = "NPU engine has already been destroyed."
+            return false
+        }
         if (pipeline != null) return true
         if (releasePending.get()) {
             lastError = "Previous NPU inference is still shutting down."
@@ -190,14 +221,16 @@ class NpuEngine(
             lastError = "Native core unavailable on this ABI (arm64-v8a required)."
             return false
         }
-        val spec = manifest.forDirection(direction)
-        if (spec == null) {
-            lastError = "Manifest has no entry for ${direction.manifestId}."
-            return false
+        val directionSpecs = listOf("vi-en", "en-vi").map { id ->
+            manifest.directions.firstOrNull { it.id == id } ?: run {
+                lastError = "Manifest has no entry for $id."
+                return false
+            }
         }
-        if (!spec.available) {
-            lastError = spec.unavailableReason ?: "Direction unavailable."
-            stages = spec.stages.map { StageStatus(it, StageState.PENDING) }
+        directionSpecs.firstOrNull { !it.available }?.let { unavailable ->
+            lastError = unavailable.unavailableReason
+                ?: "Hybrid direction ${unavailable.id} is unavailable."
+            stages = plannedStages()
             publish()
             return false
         }
@@ -220,27 +253,18 @@ class NpuEngine(
             }
         }
 
-        if (!loadStagesFor(spec)) return false
+        if (!loadStagesFor(directionSpecs)) {
+            // loadModel publishes each context as soon as that stage succeeds.
+            // A later missing/invalid stage must not leave a partial six-context
+            // set resident: retrying initialize() would otherwise append another
+            // copy and can exhaust HTP/device memory.
+            runCatching { OneVoiceNative.nativeReleaseModels() }
+            return false
+        }
         return runCatching {
-            val directionRoot = File(modelRoot, direction.manifestId)
-            val useCpuTts = ttsMode == NpuTtsMode.CPU_WHOLE_UTTERANCE
-            val cpuTtsModel = if (useCpuTts) {
-                listOf(
-                    File(directionRoot, "tts_cpu.onnx"),
-                    File(appContext.filesDir, "models/hf/tts-en/model.int8.onnx"),
-                    File(appContext.filesDir, "models/hf/tts-en/model.onnx"),
-                ).firstOrNull(File::isFile)
-            } else {
-                null
-            }
-            pipeline = NpuPipeline.load(
-                directionRoot = directionRoot,
-                asrStage = spec.stages.single { it.stage == "asr" },
-                useCpuTts = useCpuTts,
-                cpuTtsModel = cpuTtsModel,
-            )
+            pipeline = AutoHybridPipeline.load(modelRoot, manifest)
             lastError = null
-            Log.i(TAG, "NPU live pipeline ready direction=$direction root=$modelRootPath")
+            Log.i(TAG, "Auto Hybrid pipeline ready directions=vi-en,en-vi root=$modelRootPath")
             true
         }.getOrElse { failure ->
             Log.e(TAG, "NPU frontend initialization failed", failure)
@@ -312,10 +336,12 @@ class NpuEngine(
         val source: String,
     )
 
-    /** Load every stage of [spec], publishing progress as each one completes. */
-    private fun loadStagesFor(spec: DirectionSpec): Boolean {
-        val stagesToLoad = selectedStages(spec)
-        var working = stagesToLoad.map { StageStatus(it) }
+    /** Load both direction-specific context sets under collision-free keys. */
+    private fun loadStagesFor(specs: List<DirectionSpec>): Boolean {
+        val stagesToLoad = specs.flatMap { spec ->
+            selectedStages(spec).map { stage -> spec.id to stage }
+        }
+        var working = stagesToLoad.map { (_, stage) -> StageStatus(stage) }
         stages = working
         publish()
 
@@ -326,9 +352,10 @@ class NpuEngine(
         Log.i(TAG, "using modelRoot=$modelRootPath")
 
         var allOk = true
-        stagesToLoad.forEachIndexed { i, stageSpec ->
+        stagesToLoad.forEachIndexed { i, (directionId, stageSpec) ->
+            val runtimeKey = "$directionId/${stageSpec.stage}"
             val file = stageSpec.resolve(modelRoot)
-            Log.i(TAG, "stage=${stageSpec.stage} path=${file.absolutePath} " +
+            Log.i(TAG, "stage=$runtimeKey path=${file.absolutePath} " +
                 "isFile=${file.isFile} canRead=${file.canRead()} len=${file.length()}")
             if (!file.isFile) {
                 working = working.replaceAt(
@@ -346,10 +373,10 @@ class NpuEngine(
             publish()
 
             val report = runCatching {
-                OneVoiceNative.loadModel(stageSpec.stage, file.absolutePath, stageSpec.graph)
+                OneVoiceNative.loadModel(runtimeKey, file.absolutePath, stageSpec.graph)
             }.getOrElse { t ->
                 ModelLoadReport(
-                    stage = stageSpec.stage, ok = false, loadMs = 0.0, sizeBytes = 0,
+                    stage = runtimeKey, ok = false, loadMs = 0.0, sizeBytes = 0,
                     graphName = "", socModel = 0, buildId = "",
                     inputs = emptyList(), outputs = emptyList(),
                     error = t.message ?: t.javaClass.simpleName,
@@ -357,20 +384,21 @@ class NpuEngine(
             }
 
             val contractError = if (report.ok) validateContract(stageSpec, report) else null
-            val stageOk = report.ok && contractError == null
-
-            // A .bin built for another Hexagon generation usually fails in
-            // contextCreateFromBinary, but when it does load, say so plainly
-            // rather than letting a wrong-chip artifact pass silently.
-            val socWarning =
-                if (report.ok && report.socModel != 0 &&
-                    report.socModel != manifest.targetSocModel
-                ) {
+            // The production manifest contains only device-specific SM8550
+            // contexts. Unknown (0) is not a harmless warning: accepting it
+            // would let a stale/generic artifact appear loaded and fail later.
+            val socError = if (report.ok && report.socModel != manifest.targetSocModel) {
+                if (report.socModel == 0) {
+                    "binary did not report a target socModel; expected " +
+                        "${manifest.targetSocModel} (${manifest.targetSocName})"
+                } else {
                     "built for socModel=${report.socModel}, " +
                         "expected ${manifest.targetSocModel} (${manifest.targetSocName})"
-                } else {
-                    null
                 }
+            } else {
+                null
+            }
+            val stageOk = report.ok && contractError == null && socError == null
 
             working = working.replaceAt(
                 i,
@@ -378,14 +406,14 @@ class NpuEngine(
                     spec = stageSpec,
                     state = if (stageOk) StageState.LOADED else StageState.FAILED,
                     report = report,
-                    error = report.error ?: contractError ?: socWarning,
+                    error = report.error ?: contractError ?: socError,
                 ),
             )
             stages = working
             publish()
             if (!stageOk) {
                 allOk = false
-                Log.e(TAG, "stage ${stageSpec.stage} failed: ${report.error ?: contractError}")
+                Log.e(TAG, "stage $runtimeKey failed: ${report.error ?: contractError ?: socError}")
             }
         }
 
@@ -400,13 +428,16 @@ class NpuEngine(
     }
 
     private fun selectedStages(spec: DirectionSpec): List<StageSpec> =
-        if (ttsMode == NpuTtsMode.CPU_WHOLE_UTTERANCE) {
-            spec.stages.filter { it.stage in HYBRID_QNN_STAGES }
-        } else {
-            spec.stages
-        }
+        spec.stages.filter { it.stage in HYBRID_QNN_STAGES }
 
     private fun validateContract(spec: StageSpec, report: ModelLoadReport): String? {
+        if (report.sizeBytes != spec.sizeBytes) {
+            return "file size ${report.sizeBytes}, expected ${spec.sizeBytes} bytes"
+        }
+        if (report.graphName != spec.graph) {
+            return "graph ${report.graphName}, expected ${spec.graph}"
+        }
+
         fun mismatch(expected: List<TensorSpec>, actual: List<TensorSpec>, kind: String): String? {
             if (expected.size != actual.size) {
                 return "$kind count ${actual.size}, expected ${expected.size}"
@@ -422,33 +453,16 @@ class NpuEngine(
             ?: mismatch(spec.outputs, report.outputs, "output")
     }
 
-    // ------------------------------------------------------------- direction
-    /**
-     * Switch direction. Contexts for the previous direction are released first:
-     * the two cascades together are ~2 GB of weights, which is not worth keeping
-     * resident. Callers must re-run [initialize] afterwards.
-     */
-    override fun setDirection(direction: TranslationDirection) {
-        if (direction == this.direction) return
-        stop()
-        pipeline?.close()
-        pipeline = null
-        this.direction = direction
-        if (runtimeUp) runCatching { OneVoiceNative.nativeReleaseModels() }
-        stages = plannedStages(direction)
-        lastError = null
-        publish()
-    }
-
     // ------------------------------------------------------------- lifecycle
     @SuppressLint("MissingPermission")
+    @Synchronized
     override fun start(): Boolean {
-        if (pipeline == null) {
-            lastError = "NPU pipeline is not initialized."
+        if (destroyed.get()) {
+            lastError = "NPU engine has already been destroyed."
             return false
         }
-        if (!supportsLiveTranslation) {
-            lastError = "EN → VI needs an English ASR QNN .bin, which is not present."
+        if (pipeline == null) {
+            lastError = "NPU pipeline is not initialized."
             return false
         }
         if (!running.compareAndSet(false, true)) return true
@@ -459,6 +473,63 @@ class NpuEngine(
         return true
     }
 
+    /**
+     * Run the inference worker over a fixture instead of the microphone.
+     *
+     * The benchmark needs the same utterance every iteration; a live mic makes
+     * every run a different input and the numbers stop being comparable. This
+     * starts the real [pipelineLoop] and pushes PCM into the same bounded queue
+     * the capture loop would have written to, so LID, routing, both HTP
+     * branches, TTS and playback all execute exactly as in production. Only the
+     * source of the samples differs.
+     *
+     * Playback stays enabled on purpose: AudioTrack contention and underruns
+     * are part of what the gates measure.
+     *
+     * Returns false when the pipeline is not loaded or a live session already
+     * owns the worker.
+     */
+    fun benchFeed(samples: FloatArray, forcedBoundary: Boolean = false): Boolean {
+        if (telemetry?.enabled != true) return false
+        if (pipeline == null) {
+            lastError = "NPU pipeline is not initialized."
+            return false
+        }
+        if (captureThread?.isAlive == true) {
+            lastError = "benchFeed refused: microphone capture is running."
+            return false
+        }
+        if (running.compareAndSet(false, true)) {
+            // No capture thread: the fixture is the only producer.
+            segments.clear()
+            pipelineThread = Thread(::pipelineLoop, "onevoice-npu-pipeline").apply { start() }
+        }
+        val queued = CapturedSegment(
+            samples = samples,
+            enqueuedNs = System.nanoTime(),
+            forcedBoundary = forcedBoundary,
+        )
+        // Blocking put, not offer: dropping a fixture would silently shrink the
+        // sample count a percentile is computed from.
+        return runCatching { segments.put(queued); true }.getOrDefault(false)
+    }
+
+    /**
+     * Synthesize speech with the loaded TTS so the harness can build a fixture.
+     *
+     * Returns 24 kHz float PCM, or null when the pipeline is not loaded. Used
+     * only to author fixtures; nothing on the measured path calls it.
+     */
+    internal fun benchSynthesize(
+        text: String,
+        direction: TranslationDirection,
+    ): FloatArray? {
+        if (telemetry?.enabled != true) return null
+        val active = pipeline ?: return null
+        return runCatching { active.synthesize(text, direction) }.getOrNull()
+    }
+
+    @Synchronized
     override fun stop() {
         running.set(false)
         val capture = captureThread
@@ -476,7 +547,9 @@ class NpuEngine(
         segments.clear()
     }
 
+    @Synchronized
     override fun destroy() {
+        if (!destroyed.compareAndSet(false, true)) return
         stop()
         val loaded = pipeline
         pipeline = null
@@ -553,6 +626,7 @@ class NpuEngine(
             var currentSize = 0
             var speechFrames = 0
             var silenceFrames = 0
+            var trailingSilenceSamples = 0
             var preRollSize = 0
             var preRollWrite = 0
 
@@ -580,7 +654,7 @@ class NpuEngine(
                 currentSize = preRollSize
             }
 
-            fun offerCurrent(size: Int) {
+            fun offerCurrent(size: Int, forcedBoundary: Boolean = false) {
                 if (size <= 0) return
                 val segment = current.copyOf(size)
                 var sumSquares = 0.0
@@ -589,14 +663,37 @@ class NpuEngine(
                     sumSquares += sample.toDouble() * sample
                     peak = maxOf(peak, kotlin.math.abs(sample))
                 }
+                val rms = sqrt(sumSquares / size).toFloat()
+                val crest = peak / (rms + 1e-9f)
                 Log.i(
                     TAG,
                     "Captured segment samples=$size durationMs=${size * 1_000L / SAMPLE_RATE} " +
-                        "rms=${"%.5f".format(sqrt(sumSquares / size))} " +
-                        "peak=${"%.5f".format(peak)}",
+                        "rms=${"%.5f".format(rms)} peak=${"%.5f".format(peak)} " +
+                        "crest=${"%.1f".format(crest)}",
                 )
-                if (segments.remainingCapacity() == 0 ||
-                    !segments.offer(segment)) {
+                // Per-frame VAD only decides where an utterance starts and ends;
+                // steady room noise sits just under VAD_RMS_THRESHOLD, so a few
+                // transient peaks open a segment that the one-second hangover
+                // then keeps alive. Measured on this device, such segments came
+                // back at rms 0.0066-0.0071 / peak 0.029-0.039 with a crest
+                // factor near 5, while real speech reached rms 0.013-0.030 and
+                // peaks of 0.09-0.31. Judging the completed utterance as a whole
+                // is what separates the two: speech is peaky because syllables
+                // are separated by near-silence, noise is not.
+                if (rms < SEGMENT_MIN_RMS || peak < SEGMENT_MIN_PEAK) {
+                    Log.i(
+                        TAG,
+                        "Discarding segment below the speech floor " +
+                            "(rms=${"%.5f".format(rms)} peak=${"%.5f".format(peak)})",
+                    )
+                    return
+                }
+                val queued = CapturedSegment(
+                    samples = segment,
+                    enqueuedNs = System.nanoTime(),
+                    forcedBoundary = forcedBoundary,
+                )
+                if (segments.remainingCapacity() == 0 || !segments.offer(queued)) {
                     Log.w(TAG, "Dropping speech segment: NPU inference queue is full")
                 }
             }
@@ -607,6 +704,7 @@ class NpuEngine(
                 if (count == 0) continue
                 if (playing) {
                     currentSize = 0; speechFrames = 0; silenceFrames = 0
+                    trailingSilenceSamples = 0
                     preRollSize = 0; preRollWrite = 0
                     continue
                 }
@@ -627,8 +725,10 @@ class NpuEngine(
                 if (speech) {
                     speechFrames++
                     silenceFrames = 0
+                    trailingSilenceSamples = 0
                 } else {
                     silenceFrames++
+                    trailingSilenceSamples += count
                 }
                 val endedBySilence = speechFrames >= MIN_SPEECH_FRAMES &&
                     silenceFrames >= END_SILENCE_FRAMES
@@ -636,20 +736,25 @@ class NpuEngine(
                     silenceFrames >= END_SILENCE_FRAMES
                 val endedByLength = currentSize >= MAX_SEGMENT_SAMPLES
                 if (endedBySilence) {
-                    offerCurrent(currentSize)
+                    // END_SILENCE_FRAMES is a VAD hangover, not speech. Keeping
+                    // the whole second makes short utterances silence-dominated
+                    // for direction routing and also wastes the fixed ASR window.
+                    offerCurrent((currentSize - trailingSilenceSamples).coerceAtLeast(1))
                     currentSize = 0
                     speechFrames = 0
                     silenceFrames = 0
+                    trailingSilenceSamples = 0
                     preRollSize = 0
                     preRollWrite = 0
                 } else if (rejectedBySilence) {
                     currentSize = 0
                     speechFrames = 0
                     silenceFrames = 0
+                    trailingSilenceSamples = 0
                     preRollSize = 0
                     preRollWrite = 0
                 } else if (endedByLength) {
-                    offerCurrent(MAX_SEGMENT_SAMPLES)
+                    offerCurrent(MAX_SEGMENT_SAMPLES, forcedBoundary = true)
                     // The ASR graph is statically capped at 10 seconds. Carry a
                     // short overlap into the next window so a word crossing the
                     // boundary is not lost entirely.
@@ -657,6 +762,7 @@ class NpuEngine(
                     current.copyInto(current, 0, currentSize - carry, currentSize)
                     currentSize = carry
                     speechFrames = 1
+                    trailingSilenceSamples = minOf(trailingSilenceSamples, carry)
                 }
             }
         } catch (failure: Throwable) {
@@ -671,33 +777,171 @@ class NpuEngine(
         }
     }
 
+    /**
+     * Debug aid for validating the LID frontend against its Python reference.
+     *
+     * Writes the exact float PCM the classifier saw, so the host can replay the
+     * identical samples instead of a re-encoded recording — the whole point is
+     * to compare decisions, not audio files. Off unless the marker file exists,
+     * and capped so a long session cannot fill internal storage.
+     */
+    private fun dumpLidSegment(samples: FloatArray, decision: LanguageDecision) {
+        val root = File(modelRootPath).parentFile?.let { File(it, "lid-dump") } ?: return
+        if (!root.isDirectory) return
+        if ((root.list()?.size ?: 0) >= 2 * LID_DUMP_LIMIT) return
+        val index = lidDumpCount.getAndIncrement()
+        if (index >= LID_DUMP_LIMIT) return
+        runCatching {
+            val bytes = ByteBuffer.allocate(samples.size * Float.SIZE_BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN)
+            samples.forEach(bytes::putFloat)
+            File(root, "seg%02d.f32".format(index)).writeBytes(bytes.array())
+            File(root, "seg%02d.json".format(index)).writeText(
+                """{"samples":${samples.size},"language":"${decision.language}",""" +
+                    """"accepted":${decision.accepted},"confidence":${decision.confidence},""" +
+                    """"margin":${decision.margin},"inferenceMs":${decision.inferenceMs}}""",
+            )
+            Log.i(TAG, "LID dump seg$index written (${samples.size} samples)")
+        }.onFailure { Log.w(TAG, "LID dump failed", it) }
+    }
+
+    /**
+     * Assemble one benchmark row.
+     *
+     * TTFA equals total compute here, not a first-chunk time: Kokoro runs
+     * whole-utterance ([NpuPipeline.synthesize]) and playback only starts once
+     * the full waveform exists, so nothing reaches the speaker earlier. e2e then
+     * adds the audio's own duration.
+     *
+     * The 300 ms echo guard and 1 s hangover are reported beside e2e rather
+     * than inside it. They are fixed VAD policy; folding them in would make a
+     * genuine model speed-up look like no change at all.
+     */
+    private fun recordBenchRow(
+        captured: CapturedSegment,
+        decision: LanguageDecision,
+        direction: TranslationDirection,
+        textResult: HybridTextResult,
+        translation: String,
+        lidMs: Long,
+        ttsMs: Long,
+        queueWaitMs: Long,
+        audioSamples: Int,
+    ) {
+        val bench = telemetry ?: return
+        if (!bench.enabled) return
+        val (underruns, requested, written) = bench.audioCounters()
+        val ttfaMs = lidMs + textResult.asrMs + textResult.mtMs + ttsMs
+        val audioSeconds = audioSamples.toDouble() / TTS_SAMPLE_RATE
+        bench.record(
+            UtteranceMetrics(
+                direction = direction.manifestId,
+                lidDecision = decision.language,
+                lidConfidence = decision.confidence,
+                speechDurationS = captured.samples.size.toDouble() / SAMPLE_RATE,
+                forcedBoundary = captured.forcedBoundary,
+                executionPath = textResult.executionPath.name,
+                lidMs = lidMs,
+                asrMs = textResult.asrMs,
+                mtMs = textResult.mtMs,
+                ttsMs = ttsMs,
+                queueWaitMs = queueWaitMs,
+                ttfaMs = ttfaMs,
+                e2eMs = ttfaMs + (audioSeconds * 1000.0).toLong(),
+                hangoverMs = END_SILENCE_FRAMES * 20L,
+                echoGuardMs = PRE_ROLL_SAMPLES * 1000L / SAMPLE_RATE,
+                mtOutputTokens = pipeline?.lastMtOutputTokens(direction) ?: 0,
+                ttsOutputChars = translation.length,
+                ttsOutputAudioS = audioSeconds,
+                thermalStatus = runCatching { OneVoiceNative.nativeThermalStatus() }
+                    .getOrDefault(-1),
+                powerMode = runCatching { OneVoiceNative.nativeActivePowerMode() }
+                    .getOrDefault("unavailable"),
+                underruns = underruns,
+                framesRequested = requested,
+                framesWritten = written,
+            ),
+        )
+    }
+
     private fun pipelineLoop() {
         try {
             while (running.get()) {
-                val samples = segments.take()
+                val captured = segments.take()
+                val samples = captured.samples
                 val active = pipeline ?: break
                 val startedNs = System.nanoTime()
-                val transcript = active.recognize(samples).trim()
-                val asrNs = System.nanoTime()
-                if (transcript.isEmpty()) continue
-                notifySegment(transcript, null)
-                val translation = active.translate(transcript).trim()
-                val mtNs = System.nanoTime()
-                notifySegment(transcript, translation)
-                if (translation.isEmpty()) continue
-                val audio = active.synthesize(translation)
-                val ttsNs = System.nanoTime()
-                if (audio.isEmpty()) {
-                    notifyPipelineError("NPU TTS returned an empty waveform.")
-                    continue
-                }
+                val queueWaitMs = (startedNs - captured.enqueuedNs) / 1_000_000L
+                val decision = active.detect(samples)
+                val lidNs = System.nanoTime()
+                dumpLidSegment(samples, decision)
+                val direction = decision.direction
                 Log.i(
                     TAG,
-                    "Pipeline transcript=\"$transcript\" translation=\"$translation\" " +
-                        "audioSamples=${audio.size} audioMs=${audio.size * 1_000L / TTS_SAMPLE_RATE} " +
-                        "asrMs=${(asrNs - startedNs) / 1_000_000L} " +
-                        "mtMs=${(mtNs - asrNs) / 1_000_000L} " +
-                        "ttsMs=${(ttsNs - mtNs) / 1_000_000L}",
+                    "LID language=${decision.language} accepted=${decision.accepted} " +
+                        "confidence=${"%.4f".format(decision.confidence)} " +
+                        "margin=${"%.4f".format(decision.margin)} " +
+                        "inferenceMs=${decision.inferenceMs}",
+                )
+                if (direction == null) {
+                    notifyPipelineError(
+                        "Language not confidently identified as Vietnamese or English " +
+                            "(top=${decision.language}, " +
+                            "confidence=${"%.2f".format(decision.confidence)}, " +
+                            "margin=${"%.2f".format(decision.margin)}). Please speak again.",
+                    )
+                    continue
+                }
+                lastError = null
+                val textResult = active.recognizeAndTranslate(samples, direction)
+                val transcript = textResult.transcript
+                if (transcript.isEmpty()) continue
+                notifySegment(
+                    transcript,
+                    null,
+                    direction,
+                    decision.confidence,
+                    textResult.executionPath,
+                )
+                val translation = textResult.translation
+                notifySegment(
+                    transcript,
+                    translation,
+                    direction,
+                    decision.confidence,
+                    textResult.executionPath,
+                )
+                if (translation.isEmpty()) continue
+                val ttsStartedNs = System.nanoTime()
+                val audio = active.synthesize(translation, direction)
+                val ttsNs = System.nanoTime()
+                if (audio.isEmpty()) {
+                    notifyPipelineError("Kokoro returned an empty waveform.")
+                    continue
+                }
+                val lidMs = (lidNs - startedNs) / 1_000_000L
+                val ttsMs = (ttsNs - ttsStartedNs) / 1_000_000L
+                val audioMs = audio.size * 1_000L / TTS_SAMPLE_RATE
+                Log.i(
+                    TAG,
+                    "Pipeline direction=$direction transcript=\"$transcript\" " +
+                        "translation=\"$translation\" " +
+                        "audioSamples=${audio.size} audioMs=$audioMs " +
+                        "lidMs=$lidMs queueWaitMs=$queueWaitMs " +
+                        "path=${textResult.executionPath} " +
+                        "asrMs=${textResult.asrMs} mtMs=${textResult.mtMs} " +
+                        "ttsMs=$ttsMs",
+                )
+                recordBenchRow(
+                    captured = captured,
+                    decision = decision,
+                    direction = direction,
+                    textResult = textResult,
+                    translation = translation,
+                    lidMs = lidMs,
+                    ttsMs = ttsMs,
+                    queueWaitMs = queueWaitMs,
+                    audioSamples = audio.size,
                 )
                 lastAudio = audio to TTS_SAMPLE_RATE
                 runCatching { pipelineListener?.onAudioReady() }
@@ -781,6 +1025,14 @@ class NpuEngine(
                 Thread.sleep(PLAYBACK_DRAIN_POLL_MS)
                 delivered = activeTrack.playbackHeadPosition.toLong() and 0xffff_ffffL
             }
+            // Ask the framework rather than inferring from the drain loop:
+            // getUnderrunCount() is the HAL's own tally of buffer starvation,
+            // which a write-side heuristic cannot see.
+            telemetry?.noteAudio(
+                requested = samples.size.toLong(),
+                written = written.toLong(),
+                underrun = activeTrack.underrunCount > 0,
+            )
             if (delivered < samples.size) {
                 Log.w(TAG, "AudioTrack drain timed out: delivered=$delivered/${samples.size}")
             } else {
@@ -799,8 +1051,23 @@ class NpuEngine(
         }
     }
 
-    private fun notifySegment(transcript: String, translation: String?) =
-        runCatching { pipelineListener?.onSegment(transcript, translation) }.let { Unit }
+    private fun notifySegment(
+        transcript: String,
+        translation: String?,
+        direction: TranslationDirection,
+        lidConfidence: Float,
+        executionPath: ExecutionPath,
+    ) = runCatching {
+        pipelineListener?.onSegment(
+            PipelineSegment(
+                transcript = transcript,
+                translation = translation,
+                direction = direction,
+                lidConfidence = lidConfidence,
+                executionPath = executionPath,
+            ),
+        )
+    }.let { Unit }
 
     private fun notifyPipelineError(message: String) {
         lastError = message
@@ -819,7 +1086,7 @@ class NpuEngine(
         }
     }
 
-    private fun releasePipeline(loaded: NpuPipeline?) {
+    private fun releasePipeline(loaded: AutoHybridPipeline?) {
         runCatching { loaded?.close() }
         if (OneVoiceNative.isLoaded) runCatching { OneVoiceNative.nativeDestroyEngine() }
         runtimeUp = false
@@ -836,10 +1103,18 @@ class NpuEngine(
         val active = checkNotNull(pipeline) { "NPU pipeline is not initialized" }
         // Silence is intentional: the assertion is graph execution/finite
         // buffers, not transcription quality for a synthetic test vector.
-        val silenceTranscript = active.recognize(FloatArray(SAMPLE_RATE))
-        val translated = active.translate(sourceText)
+        val direction = TranslationDirection.VI_TO_EN
+        // Exercise the primary VI ASR with silence, then use a deterministic
+        // source string for MT/TTS (silence is not expected to transcribe).
+        val silenceResult = active.recognizeAndTranslate(FloatArray(SAMPLE_RATE), direction)
+        val silenceTranscript = silenceResult.transcript
+        val translated = if (sourceText.isBlank()) "" else {
+            // The smoke path intentionally bypasses LID but still exercises the
+            // same VI QNN MT graph via a one-utterance helper.
+            active.translateForSmoke(sourceText, direction)
+        }
         check(translated.isNotBlank()) { "MT produced an empty result" }
-        val audio = active.synthesize(translated)
+        val audio = active.synthesize(translated, direction)
         check(audio.isNotEmpty() && audio.all(Float::isFinite)) {
             "TTS produced an empty or non-finite waveform"
         }
@@ -856,7 +1131,13 @@ class NpuEngine(
         listener?.invoke(stages)
     }
 
-    private companion object {
+    internal companion object {
+        /** Set by every constructed engine; read by [BenchControlReceiver]. */
+        private var activeEngine: WeakReference<NpuEngine>? = null
+
+        /** The engine an Activity currently owns, or null. */
+        internal fun current(): NpuEngine? = activeEngine?.get()
+
         /** Hexagon v73 = Snapdragon 8 Gen 2; matches the manifest's target SoC. */
         const val DSP_SKEL = "libQnnHtpV73Skel.so"
         const val SIGNED_ASSET_DIR = "dsp/signed"
@@ -865,6 +1146,13 @@ class NpuEngine(
         const val TTS_SAMPLE_RATE = 24_000
         const val FRAME_SAMPLES = 320 // 20 ms: responsive VAD without 100 ms edge loss
         const val VAD_RMS_THRESHOLD = 0.008
+
+        // Whole-utterance floor, sitting between the noise and speech clusters
+        // measured on this device (noise rms ≤0.0071 / peak ≤0.039; speech rms
+        // ≥0.013 / peak ≥0.09). Both must be cleared: a brief bump passes the
+        // peak test, and a loud steady hum passes the RMS one.
+        const val SEGMENT_MIN_RMS = 0.010f
+        const val SEGMENT_MIN_PEAK = 0.060f
         const val MIN_SPEECH_FRAMES = 6 // 120 ms
         const val END_SILENCE_FRAMES = 50 // 1 second pause before finalizing
         const val MAX_SEGMENT_SAMPLES = SAMPLE_RATE * 10

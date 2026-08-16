@@ -2,6 +2,7 @@ package com.onevoice.link
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -11,12 +12,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
-import com.onevoice.link.core.EngineBackend
+import androidx.lifecycle.lifecycleScope
 import com.onevoice.link.core.NpuEngine
 import com.onevoice.link.core.NpuTtsMode
-import com.onevoice.link.hf.HfEngineBackend
-import com.onevoice.link.ui.screens.BackendKind
-import com.onevoice.link.ui.screens.DashboardScreen
+import com.onevoice.link.ui.OneVoiceApp
+import com.onevoice.link.ui.screens.EngineController
 import com.onevoice.link.ui.theme.OneVoiceLinkTheme
 
 class MainActivity : ComponentActivity() {
@@ -32,45 +32,55 @@ class MainActivity : ComponentActivity() {
     private val requestMic =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             micGranted = granted
-            if (!granted) {
-                micPermanentlyDenied =
-                    !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
-            }
+            micPermanentlyDenied = !granted &&
+                !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
         }
 
-    /**
-     * Engine instances are owned by the dashboard controller. Keeping the map in
-     * the Activity only makes their lifetime explicit and prevents recreation on
-     * every Compose recomposition.
-     */
-    private var backends: Map<BackendKind, EngineBackend> = emptyMap()
+    // Nearby-device access is requested only from Settings. Listing already
+    // connected endpoints does not need scan/advertise permission.
+    private var bluetoothConnectGranted by mutableStateOf(false)
+
+    private val requestBluetoothConnect =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            bluetoothConnectGranted = granted || !requiresBluetoothConnectPermission()
+        }
+
+    /** Sole lifecycle owner; teardown always leaves the main thread immediately. */
+    private var engineController: EngineController? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         micGranted = hasMicPermission()
+        bluetoothConnectGranted = hasBluetoothConnectPermission()
 
-        // Keep the reference CPU path and the all-QNN path available. Hybrid is
-        // the default because whole-utterance Kokoro avoids fixed-window QNN
-        // decoder seams while ASR and translation still execute on HTP.
-        backends = mapOf(
-            BackendKind.HF to HfEngineBackend(applicationContext),
-            BackendKind.QNN to NpuEngine(applicationContext),
-            BackendKind.HYBRID to NpuEngine(
-                applicationContext,
-                NpuTtsMode.CPU_WHOLE_UTTERANCE,
-            ),
+        // Hybrid is the only user-facing pipeline. It automatically detects the
+        // source language per utterance; CPU execution is an internal degraded
+        // path, never a mode the user has to choose.
+        val hybridEngine = NpuEngine(
+            applicationContext,
+            NpuTtsMode.CPU_WHOLE_UTTERANCE,
         )
+        val controller = EngineController(hybridEngine, lifecycleScope)
+        engineController = controller
 
         enableEdgeToEdge()
         setContent {
             OneVoiceLinkTheme {
-                DashboardScreen(
+                OneVoiceApp(
                     micGranted = micGranted,
                     micPermanentlyDenied = micPermanentlyDenied,
-                    backends = backends,
-                    defaultBackend = BackendKind.HYBRID,
+                    bluetoothConnectGranted = bluetoothConnectGranted,
+                    engine = hybridEngine,
+                    engineController = controller,
                     onRequestMic = {
                         requestMic.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    onRequestBluetoothConnect = {
+                        if (requiresBluetoothConnectPermission()) {
+                            requestBluetoothConnect.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                        } else {
+                            bluetoothConnectGranted = true
+                        }
                     },
                 )
             }
@@ -82,16 +92,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        micGranted = hasMicPermission()
+        bluetoothConnectGranted = hasBluetoothConnectPermission()
+        if (micGranted) micPermanentlyDenied = false
+    }
+
+    override fun onStop() {
+        // No foreground service/notification exists, so capture must not remain
+        // active after the Activity loses visibility. Models remain resident.
+        engineController?.pauseLiveTranslation()
+        super.onStop()
+    }
+
     override fun onDestroy() {
-        // Activity teardown is the final safety net if Compose cancels its
-        // remembered scope before DisposableEffect cleanup finishes. Backend
-        // destroy() is idempotent, so a controller-initiated teardown is safe.
-        backends.values.distinct().forEach { runCatching { it.destroy() } }
-        backends = emptyMap()
+        // EngineController is the only teardown owner and performs blocking
+        // worker joins/native release on its private IO cleanup scope.
+        engineController?.shutdown()
+        engineController = null
         super.onDestroy()
     }
 
     private fun hasMicPermission(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
+
+    private fun hasBluetoothConnectPermission(): Boolean =
+        !requiresBluetoothConnectPermission() ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun requiresBluetoothConnectPermission(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 }

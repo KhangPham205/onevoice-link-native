@@ -21,6 +21,7 @@
 #include "qnn_runtime.h"
 #include "asr_frontend.h"
 #include "kokoro_audio.h"
+#include "thermal_probe.h"
 
 #define LOG_TAG "OneVoiceCore"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -35,6 +36,11 @@ struct Engine {
     std::unique_ptr<onevoice::QnnRuntime>  qnn;
 };
 std::unique_ptr<Engine> g_engine;
+
+// Snapshot handed across the two-call profile drain (stages first, then
+// values), so both arrays describe the same samples. Only ever touched from the
+// benchmark thread between utterances, never from the audio path.
+std::vector<onevoice::QnnRuntime::ProfileSample> g_profileSnapshot;
 
 // Helper: copy a jstring to a std::string (null-safe).
 std::string jstr(JNIEnv* env, jstring s) {
@@ -240,6 +246,64 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeExtractGipformerFeatures(
     return nullptr;
 }
 
+// ---- nativeExtractAmberNetFeatures(samples, directOutput) : String? ------
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeExtractAmberNetFeatures(
+        JNIEnv* env, jclass /*clazz*/, jfloatArray samples, jobject outputBuffer) {
+    if (!samples || !outputBuffer) return env->NewStringUTF("null AmberNet frontend buffer");
+    const jsize count = env->GetArrayLength(samples);
+    float* output = static_cast<float*>(env->GetDirectBufferAddress(outputBuffer));
+    const jlong capacity = env->GetDirectBufferCapacity(outputBuffer);
+    if (!output || capacity < 0) {
+        return env->NewStringUTF("AmberNet output is not a direct ByteBuffer");
+    }
+    std::vector<float> waveform(static_cast<std::size_t>(count));
+    env->GetFloatArrayRegion(samples, 0, count, waveform.data());
+    if (env->ExceptionCheck()) return env->NewStringUTF("cannot read AmberNet samples");
+    std::string error;
+    if (!onevoice::makeAmberNetFeatures(
+            waveform.data(), waveform.size(), output,
+            static_cast<std::size_t>(capacity) / sizeof(float), error)) {
+        return env->NewStringUTF(error.c_str());
+    }
+    return nullptr;
+}
+
+// ---- nativeExtractSpeechFlowFeatures(samples, directOutput, outFrames) ----
+// outFrames receives the unpadded frame count the classifier masks with; the
+// caller must forward it as input_2 or attention pools over the zero padding.
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeExtractSpeechFlowFeatures(
+        JNIEnv* env, jclass /*clazz*/, jfloatArray samples, jobject outputBuffer,
+        jintArray outFrames) {
+    if (!samples || !outputBuffer || !outFrames) {
+        return env->NewStringUTF("null SpeechFlow frontend buffer");
+    }
+    if (env->GetArrayLength(outFrames) < 1) {
+        return env->NewStringUTF("SpeechFlow frame-count array is empty");
+    }
+    const jsize count = env->GetArrayLength(samples);
+    float* output = static_cast<float*>(env->GetDirectBufferAddress(outputBuffer));
+    const jlong capacity = env->GetDirectBufferCapacity(outputBuffer);
+    if (!output || capacity < 0) {
+        return env->NewStringUTF("SpeechFlow output is not a direct ByteBuffer");
+    }
+    std::vector<float> waveform(static_cast<std::size_t>(count));
+    env->GetFloatArrayRegion(samples, 0, count, waveform.data());
+    if (env->ExceptionCheck()) return env->NewStringUTF("cannot read SpeechFlow samples");
+    std::size_t validFrames = 0;
+    std::string error;
+    if (!onevoice::makeSpeechFlowFeatures(
+            waveform.data(), waveform.size(), output,
+            static_cast<std::size_t>(capacity) / sizeof(float),
+            &validFrames, error)) {
+        return env->NewStringUTF(error.c_str());
+    }
+    jint frames = static_cast<jint>(validFrames);
+    env->SetIntArrayRegion(outFrames, 0, 1, &frames);
+    return nullptr;
+}
+
 // ---- nativeBuildKokoroHar(directF0, directHar) : String? ------------------
 JNIEXPORT jstring JNICALL
 Java_com_onevoice_link_core_OneVoiceNative_nativeBuildKokoroHar(
@@ -288,6 +352,113 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeLoadedModelCount(
         JNIEnv* /*env*/, jclass /*clazz*/) {
     if (!g_engine || !g_engine->qnn) return 0;
     return static_cast<jint>(g_engine->qnn->modelCount());
+}
+
+// ---- Benchmark surface -----------------------------------------------------
+// Deliberately separate from the execute path: adding an out-parameter to
+// nativeExecuteGraph would put benchmarking work on the hot call and change an
+// arity that main_jni.cpp and OneVoiceNative.kt must keep in lockstep.
+
+// ---- nativeSetQnnProfiling(enabled) : boolean ------------------------------
+JNIEXPORT jboolean JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeSetQnnProfiling(
+        JNIEnv* /*env*/, jclass /*clazz*/, jboolean enabled) {
+    if (!g_engine || !g_engine->qnn) return JNI_FALSE;
+    return g_engine->qnn->setProfilingEnabled(enabled == JNI_TRUE)
+        ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---- nativeApplyHtpPowerConfig(mode, latencyUs, pollingUs) : String? -------
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeApplyHtpPowerConfig(
+        JNIEnv* env, jclass /*clazz*/, jstring mode,
+        jint rpcControlLatencyUs, jint rpcPollingTimeUs) {
+    if (!g_engine || !g_engine->qnn) {
+        return env->NewStringUTF("runtime not initialized");
+    }
+    onevoice::QnnRuntime::PowerConfig config;
+    config.mode = jstr(env, mode);
+    config.rpcControlLatencyUs = static_cast<uint32_t>(rpcControlLatencyUs);
+    config.rpcPollingTimeUs    = static_cast<uint32_t>(rpcPollingTimeUs);
+    std::string error;
+    if (!g_engine->qnn->applyPowerConfig(config, error)) {
+        return env->NewStringUTF(error.c_str());
+    }
+    return nullptr;
+}
+
+// ---- nativeDrainQnnProfileStages() : String[] ------------------------------
+// Stage name per sample, positionally aligned with nativeDrainQnnProfile().
+// Names travel as strings rather than a hash because a hash would have to be
+// reproduced identically in Kotlin, and std::hash is not specified to be stable
+// across toolchains or even runs.
+//
+// Call order matters: this drains the buffer, so it must be called FIRST and
+// nativeDrainQnnProfile() reads the same snapshot it produced.
+JNIEXPORT jobjectArray JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeDrainQnnProfileStages(
+        JNIEnv* env, jclass /*clazz*/) {
+    g_profileSnapshot.clear();
+    if (g_engine && g_engine->qnn) g_profileSnapshot = g_engine->qnn->drainProfile();
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (stringClass == nullptr) return nullptr;
+    jobjectArray out = env->NewObjectArray(
+        static_cast<jsize>(g_profileSnapshot.size()), stringClass, nullptr);
+    if (out == nullptr) return nullptr;
+    for (std::size_t i = 0; i < g_profileSnapshot.size(); ++i) {
+        jstring name = env->NewStringUTF(g_profileSnapshot[i].stage.c_str());
+        env->SetObjectArrayElement(out, static_cast<jsize>(i), name);
+        env->DeleteLocalRef(name);
+    }
+    return out;
+}
+
+// ---- nativeDrainQnnProfile() : long[] --------------------------------------
+// Flat [wallUs, executeUs, acceleratorUs, queueWaitUs, profiled] * n over the
+// snapshot taken by nativeDrainQnnProfileStages(). A flat primitive array keeps
+// this one JNI crossing with no per-sample object allocation. Returns an empty
+// array rather than null so callers need no nullability special case.
+JNIEXPORT jlongArray JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeDrainQnnProfile(
+        JNIEnv* env, jclass /*clazz*/) {
+    constexpr jsize kFields = 5;
+    const jsize count = static_cast<jsize>(g_profileSnapshot.size());
+    jlongArray out = env->NewLongArray(count * kFields);
+    if (out == nullptr) return nullptr;
+    if (count == 0) return out;
+
+    std::vector<jlong> flat(static_cast<std::size_t>(count) * kFields);
+    for (jsize i = 0; i < count; ++i) {
+        const auto& s = g_profileSnapshot[static_cast<std::size_t>(i)];
+        flat[i * kFields + 0] = static_cast<jlong>(s.wallUs);
+        flat[i * kFields + 1] = static_cast<jlong>(s.executeUs);
+        flat[i * kFields + 2] = static_cast<jlong>(s.acceleratorUs);
+        flat[i * kFields + 3] = static_cast<jlong>(s.queueWaitUs);
+        flat[i * kFields + 4] = s.profiled ? 1 : 0;
+    }
+    env->SetLongArrayRegion(out, 0, count * kFields, flat.data());
+    g_profileSnapshot.clear();
+    return out;
+}
+
+// ---- nativeThermalStatus() : int -------------------------------------------
+// AThermalStatus value, or -1 when the platform predates API 30. Sampled from
+// the benchmark thread between utterances; the manager is created once and
+// kept, because acquiring it per call would dominate what it measures.
+JNIEXPORT jint JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeThermalStatus(
+        JNIEnv* /*env*/, jclass /*clazz*/) {
+    static onevoice::ThermalProbe probe;
+    return static_cast<jint>(probe.status());
+}
+
+// ---- nativeActivePowerMode() : String --------------------------------------
+JNIEXPORT jstring JNICALL
+Java_com_onevoice_link_core_OneVoiceNative_nativeActivePowerMode(
+        JNIEnv* env, jclass /*clazz*/) {
+    if (!g_engine || !g_engine->qnn) return env->NewStringUTF("unavailable");
+    return env->NewStringUTF(g_engine->qnn->activePowerMode().c_str());
 }
 
 // ---- nativeReleaseModels() : void -----------------------------------------

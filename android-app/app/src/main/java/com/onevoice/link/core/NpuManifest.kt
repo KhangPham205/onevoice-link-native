@@ -7,9 +7,10 @@ import java.io.File
 /**
  * The deploy contract for the NPU cascade, shipped as the `npu_manifest.json`
  * asset and generated from the context binaries themselves with
- * `qnn-context-binary-utility` (see onevoice-npu-bins/HANDOFF.md §7-B2).
+ * `qnn-context-binary-utility` (see docs/HANDOFF_FORM.md).
  *
- * Graph names are AI Hub-generated (`graph_08xlh5ri`, `opus_mt_encoder`, …) and
+ * Graph names are AI Hub-generated (`graph_oa00nu3e`, `graph_shbblv7u`,
+ * `opus_mt_encoder`, …) and
  * are NOT guessable — `graphRetrieve` fails on the slightest mismatch, so the
  * manifest is the single source of truth and must be regenerated whenever the
  * model team ships new binaries (`tools/models/gen_npu_manifest.py`).
@@ -27,10 +28,16 @@ data class NpuManifest(
 
     companion object {
         private const val ASSET = "npu_manifest.json"
+        private const val SCHEMA_VERSION = 1
+        private val REQUIRED_DIRECTIONS = setOf("vi-en", "en-vi")
+        private val REQUIRED_STAGES = setOf("asr", "mt_encoder", "mt_decoder")
 
         fun load(context: Context): NpuManifest {
             val text = context.assets.open(ASSET).bufferedReader().use { it.readText() }
             val o = JSONObject(text)
+            require(o.getInt("schemaVersion") == SCHEMA_VERSION) {
+                "Unsupported NPU manifest schema ${o.optInt("schemaVersion", -1)}"
+            }
             val soc = o.getJSONObject("targetSoc")
             val dirs = o.getJSONArray("directions")
             return NpuManifest(
@@ -40,8 +47,57 @@ data class NpuManifest(
                 hexagon = soc.getString("hexagon"),
                 modelRoot = o.getString("modelRoot"),
                 directions = (0 until dirs.length()).map { DirectionSpec.parse(dirs.getJSONObject(it)) },
-            )
+            ).also(::validateProductionContract)
         }
+
+        private fun validateProductionContract(manifest: NpuManifest) {
+            require(manifest.targetSocModel > 0 && manifest.targetSocName.isNotBlank() &&
+                manifest.hexagon.isNotBlank()) {
+                "NPU manifest has an invalid target SoC contract"
+            }
+            require(isSafeRelativePath(manifest.modelRoot)) {
+                "Unsafe NPU modelRoot: ${manifest.modelRoot}"
+            }
+            val directionIds = manifest.directions.map(DirectionSpec::id)
+            require(directionIds.size == REQUIRED_DIRECTIONS.size &&
+                directionIds.toSet() == REQUIRED_DIRECTIONS) {
+                "NPU manifest directions must be exactly $REQUIRED_DIRECTIONS, got $directionIds"
+            }
+            manifest.directions.forEach { direction ->
+                require(direction.available) {
+                    "Hybrid direction ${direction.id} is unavailable: " +
+                        (direction.unavailableReason ?: "no reason supplied")
+                }
+                val stageIds = direction.stages.map(StageSpec::stage)
+                require(stageIds.size == REQUIRED_STAGES.size &&
+                    stageIds.toSet() == REQUIRED_STAGES) {
+                    "${direction.id} stages must be exactly $REQUIRED_STAGES, got $stageIds"
+                }
+                direction.stages.forEach { stage ->
+                    require(stage.file.startsWith("${direction.id}/") &&
+                        isSafeRelativePath(stage.file)) {
+                        "Unsafe/cross-direction model path for ${direction.id}/${stage.stage}: " +
+                            stage.file
+                    }
+                    require(stage.graph.isNotBlank() && stage.sizeBytes > 0L) {
+                        "Invalid graph/file contract for ${direction.id}/${stage.stage}"
+                    }
+                    require(stage.inputs.isNotEmpty() && stage.outputs.isNotEmpty()) {
+                        "Missing tensor contract for ${direction.id}/${stage.stage}"
+                    }
+                    (stage.inputs + stage.outputs).forEach { tensor ->
+                        require(tensor.name.isNotBlank() && tensor.dtype.isNotBlank() &&
+                            tensor.dims.isNotEmpty() && tensor.dims.all { it > 0 }) {
+                            "Invalid tensor contract for ${direction.id}/${stage.stage}: $tensor"
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun isSafeRelativePath(path: String): Boolean =
+            path.isNotBlank() && !File(path).isAbsolute &&
+                path.split('/', '\\').none { it.isBlank() || it == "." || it == ".." }
     }
 }
 
@@ -50,9 +106,8 @@ data class DirectionSpec(
     val id: String,
     val label: String,
     /**
-     * False when the package cannot drive this direction at all. EN→VI is
-     * currently false: the model team has shipped Vietnamese ASR only, so there
-     * is no English `.bin` to start the cascade with (HANDOFF.md §4).
+     * False only when a complete direction bundle is unavailable. Production
+     * currently ships both VI→EN and EN→VI, including their QNN ASR encoders.
      */
     val available: Boolean,
     val unavailableReason: String?,
@@ -78,7 +133,7 @@ data class DirectionSpec(
 data class StageSpec(
     val stage: String,
     val label: String,
-    /** Path relative to the model root, e.g. `vi-en/asr_parakeet_vi.bin`. */
+    /** Path relative to the model root, e.g. `vi-en/asr_gipformer_encoder.bin`. */
     val file: String,
     val graph: String,
     val sizeBytes: Long,

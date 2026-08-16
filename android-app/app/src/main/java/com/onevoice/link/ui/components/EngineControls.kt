@@ -27,9 +27,7 @@ import com.onevoice.link.ui.theme.Spacing
 
 private val ControlButtonHeight = 56.dp
 
-/**
- * Backend-aware model load and live translation actions.
- */
+/** Model load and live actions for the single auto-direction Hybrid pipeline. */
 @Composable
 fun EngineControls(
     state: DashboardUiState,
@@ -45,12 +43,7 @@ fun EngineControls(
                 .fillMaxWidth()
                 .height(ControlButtonHeight),
         ) {
-            Text(
-                stringResource(
-                    if (state.isQnn) R.string.action_verify_qnn
-                    else R.string.action_load_offline,
-                ),
-            )
+            Text(stringResource(R.string.action_load_hybrid))
         }
 
         if (state.supportsLiveTranslation) {

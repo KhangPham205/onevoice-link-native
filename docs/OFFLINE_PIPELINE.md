@@ -1,145 +1,205 @@
-# Offline speech-to-speech pipelines
+# Automatic bidirectional Hybrid pipeline
 
-OneVoice has three fully offline modes. **Hybrid** is the default VI → EN path;
-**Offline CPU** is the bidirectional reference; **Full QNN** keeps all six
-learned VI → EN stages on Hexagon HTP for validation and optimization.
+OneVoice exposes one production mode: **Hybrid with automatic spoken-language
+identification**. There is no backend selector and no VI→EN / EN→VI toggle. A
+completed VAD utterance is classified acoustically, then routed through the
+matching ASR→MT→TTS branch.
 
-| Backend | Direction | Learned inference | Status |
+| Input | ASR | Translation | Speech output |
 |---|---|---|---|
-| Hybrid (default) | VI → EN | QNN ASR + MT; whole-utterance CPU Kokoro | Live, recommended |
-| Offline CPU | VI → EN, EN → VI | sherpa-onnx + ONNX Runtime | Live reference |
-| Full QNN | VI → EN | Six QNN graphs on HTP | Live, TTS quality-limited |
-| Hybrid / Full QNN | EN → VI | Missing English ASR context | Disabled |
+| Vietnamese | GIPFormer encoder on QNN HTP; RNN-T decoder/joiner on CPU | Marian VI→EN on QNN HTP | whole-utterance Kokoro EN on CPU |
+| English | Zipformer-small encoder on QNN HTP; RNN-T decoder/joiner on CPU | Marian EN→VI on QNN HTP | whole-utterance Kokoro VI on CPU |
+| Unknown / uncertain | none | none | none; fail closed and keep listening |
 
-## Hybrid live data flow
+Each direction has a cold CPU CTC ASR + Marian bundle. It is loaded only after
+that direction's QNN ASR/MT path throws and must not be presented as an HTP
+stage.
 
-```text
-AudioRecord + bounded VAD
-  -> native NeMo-compatible frontend -> QNN ASR
-  -> SentencePiece -> QNN Marian encoder/decoder
-  -> translated sentence -> sherpa-onnx Kokoro once for the whole utterance
-  -> one bounded 24 kHz waveform -> AudioTrack
-```
-
-Hybrid deliberately combines the two execution mechanisms. ASR and MT use the
-continuous QNN graph contracts supplied for those stages. Kokoro stays on CPU
-because the unified model sees the complete phoneme sequence and generates one
-continuous waveform, preserving prosody and decoder state across the sentence.
-
-## QNN live data flow
+## Per-utterance data flow
 
 ```text
 AudioRecord, 16 kHz mono
-  -> 20 ms frames, 300 ms pre-roll, energy VAD, 1 s silence hangover
-  -> native NeMo-compatible 80-mel frontend
-  -> QNN ASR -> CTC collapse/detokenize
-  -> SentencePiece -> QNN Marian encoder
-  -> QNN Marian decoder loop with persistent KV cache
-  -> exact eSpeak/Kokoro token IDs via the tiny frontend bridge -> QNN encoder
-  -> duration/alignment host math -> QNN learned prosody
-  -> native harmonic source/STFT -> QNN decoder in 25-frame buckets
-  -> phase-continuous HAR + overlap/crossfade stitching -> AudioTrack, 24 kHz mono
+  -> bounded VAD utterance
+  -> exact SpeechFlow log-Mel frontend -> SpeechFlow LID on CPU/TFLite
+       | accepted VI
+       |   -> GIPFormer encoder.bin on HTP
+       |   -> host RNN-T decoder/joiner
+       |   -> Marian VI->EN encoder/decoder on HTP
+       |   -> CPU Kokoro EN, one continuous waveform
+       |
+       | accepted EN
+       |   -> Zipformer-small encoder.bin on HTP
+       |   -> host RNN-T decoder/joiner
+       |   -> Marian EN->VI encoder/decoder on HTP
+       |   -> CPU Kokoro VI, one continuous waveform
+       |
+       ` rejected/other language -> no ASR, MT, or TTS
+  -> AudioTrack, 24 kHz mono
 ```
 
-The following learned stages run on HTP:
+LID runs before either ASR, so it can make the routing decision without a
+transcript. `papluca/xlm-roberta-base-language-detection` is a text classifier
+and therefore cannot replace this first acoustic decision; at most it can be a
+post-ASR validator.
 
-| Stage | Graph |
-|---|---|
-| Vietnamese ASR | `graph_08xlh5ri` |
-| Marian encoder | `opus_mt_encoder` |
-| Marian autoregressive decoder | `opus_mt_decoder` |
-| Kokoro encoder | `graph_5l17io1h` |
-| Kokoro learned prosody | `onevoice_kokoro_en_prosody_w8a8` |
-| Kokoro waveform decoder | `graph_93073co3` |
+LID executes on CPU through TFLite. Its interface is intentionally isolated so a
+future static SM8550 QNN context can replace it without changing capture or
+routing. Copying a model file beside the QNN contexts does not execute it on HTP.
 
-Small deterministic transforms remain on CPU: audio framing/VAD, mel features,
-tokenization, CTC collapse, MT argmax/cache placement, alignment, harmonic STFT,
-bucket stitching, and audio I/O. This does not make the backend a CPU model
-path; all neural-network inference is performed by the QNN contexts on HTP.
+## Headset assignment and future Auracast routing
 
-## Recording and playback boundaries
+Settings can persist a VI/EN preferred language for Bluetooth audio endpoints
+that Android currently exposes. Those assignments are not a second UI mode and
+do not currently redirect `AudioTrack`: they are input to a future
+one-speaker/many-listener route planner.
 
-The QNN ASR graph has a fixed ten-second input window. Capture therefore uses:
+The classifier can be bypassed only after a separate floor-control/microphone
+transport proves exactly one active headset. At the utterance boundary, the app
+will snapshot that speaker and the listener assignments, derive the source
+direction from the speaker's language and target only listeners assigned the
+opposite language. Unknown, unassigned or multiple speakers fail closed.
 
-- 20 ms frames and a 300 ms circular pre-roll so initial consonants are kept;
-- an RMS threshold of `0.008`, at least 120 ms of voiced audio, and one second
-  of trailing silence before ending an utterance;
-- a ten-second hard ASR window with 500 ms carry-over when continuous speech
-  must be split.
+Auracast itself is broadcast downlink and neither supplies a microphone uplink
+nor enumerates every listener. A normally installed Android APK also lacks the
+privileged system APIs required to create/provision Auracast sessions. The
+current code therefore keeps acoustic LID as the operational fallback and marks
+Auracast broadcast creation/provisioning as inactive. The required OEM-service boundary is detailed
+in [AURACAST_ROUTING.md](AURACAST_ROUTING.md).
 
-The Full-QNN TTS path accepts up to 750 alignment frames (30 decoder buckets),
-about 18.75 seconds of 24 kHz audio. Harmonic phase and RNG state continue
-across buckets, and overlap/crossfade stitching reduces hard boundary clicks.
-It cannot recreate the unified Kokoro decoder's whole-utterance temporal
-context, however, so audible rhythm/timbre discontinuities can remain even when
-every PCM frame is delivered. Hybrid avoids that boundary entirely.
+## SpeechFlow LID export contract
 
-These details are load-bearing. Reducing the hangover, removing pre-roll,
-resetting HAR per bucket, or restoring the former 200-frame TTS cap introduces
-additional missing-word or truncation failures. It does not resolve the
-inherent fixed-window quality difference; use Hybrid for smooth output.
-
-## Deploy the QNN artifacts
-
-Build and install a debuggable APK, then target the device explicitly:
+The published artifact is a TensorFlow SavedModel whose graph excludes the audio
+frontend, so the input is a processed feature tensor, not PCM. Generate the
+reviewed deployment trio with:
 
 ```bash
-cd android-app
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-  ./gradlew --no-daemon --no-parallel --max-workers=1 :app:assembleDebug
-adb -s R5CW72TP4EP install -r -t app/build/outputs/apk/debug/app-debug.apk
-cd ..
-tools/models/push-npu-models.sh vi-en R5CW72TP4EP
+python3 tools/models/convert_speechflow_lid.py models-src/speechflow-lid
 ```
 
-The script stages contexts and frontend assets into the app's internal
-`files/models/npu/vi-en` directory through `run-as`. It skips an existing file
-when the byte size matches and never clears app data.
+Expected output under the git-ignored `models-npu-generated/lid/` directory:
 
-## Device validation
+```text
+speechflow_langid.tflite
+speechflow_labels.json
+speechflow_contract.json
+```
 
-The instrumented smoke test does more than load contexts: it executes ASR,
-translates a long Vietnamese sentence, synthesizes it, validates finite PCM,
-and sends it through Android `AudioTrack`.
+The contract pins 16 kHz audio, 80 features, 25 ms / 10 ms framing, FFT 512,
+pre-emphasis 0.97, peak signal normalization, **whole-utterance** feature
+normalization and **time-major** layout. Both differ from the AmberNet export
+that preceded it, and both fail silently — reusing `makeAmberNetFeatures` here
+produces finite, wrong features rather than an error.
+
+`output_1` is unnormalized logits. Every value is negative, which makes them
+look like log-probabilities, but `exp()` over the vector sums to ~0.27; treating
+them that way reports confidence above 1.0. Apply softmax — it reproduces
+upstream `predict_pb` to within rounding.
+
+The labels file pins all 14 output IDs, including English index 1 and Vietnamese
+index 12; the order is upstream `vocab/vocab.txt`, which is alphabetical.
+Deployment refuses to proceed if any member of this trio is missing; a model
+paired with stale labels or frontend parameters is unsafe.
+
+Class 13 is `other`, but it is not a guard: gaussian noise ranks `italian` at
+p≈0.72 on this export. The thresholds below are what fail closed.
+
+Classification is fail-closed. The global top-1 class must be `english` or `vietnamese` and
+must pass both confidence and top-1/top-2 margin thresholds. Do not renormalize
+only the EN and VI logits: doing so would force an unsupported third language
+into a false route. Very short, mixed-language, silent, or low-confidence turns
+produce no translated audio.
+
+## QNN context contracts
+
+`android-app/app/src/main/assets/npu_manifest.json` lists QNN contexts only.
+Host ONNX/tokenizer/voice files are deliberately absent from `stages`; this
+keeps the HTP claim auditable.
+
+| Direction | Logical stage | Graph | Input | Output |
+|---|---|---|---|---|
+| VI→EN | ASR encoder | `graph_oa00nu3e` | `x` FP32 `[1,1000,80]` | `output_0` FP32 `[1,248,512]` |
+| EN→VI | ASR encoder | `graph_shbblv7u` | `x` FP32 `[1,1000,80]` | `output_0` FP32 `[1,248,512]` |
+| VI→EN | Marian encoder | `opus_mt_encoder` | IDs/mask `[1,256]` | 12 cross-attention tensors |
+| VI→EN | Marian decoder | `opus_mt_decoder` | token/position/mask/KV | logits `[1,1,53739]` + KV |
+| EN→VI | Marian encoder | `opus_mt_encoder` | IDs/mask `[1,256]` | 12 cross-attention tensors |
+| EN→VI | Marian decoder | `opus_mt_decoder` | token/position/mask/KV | logits `[1,1,53685]` + KV |
+
+Both ASR encoders were compiled by QAIRT v2.45.0 for `socModel=43`, Hexagon
+v73. The English bundle reports 57.19 ms encoder inference, 93.4 MB peak memory,
+and 100% NPU placement in its supplied metadata; on-device integration still
+has to validate end-to-end latency and accuracy.
+
+The two Marian binaries reuse the same embedded graph names, so runtime lookup
+keys must be direction-qualified even though their logical roles remain
+`mt_encoder` and `mt_decoder`. Loading two contexts under an unqualified key
+would cause `executeGraph()` to select the first direction.
+
+## Deployed layout
+
+Run the default `auto` plan after installing a debuggable APK:
 
 ```bash
-cd android-app
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-  ./gradlew --no-daemon --no-parallel --max-workers=1 \
-  :app:assembleDebug :app:assembleDebugAndroidTest
-adb -s R5CW72TP4EP install -r -t app/build/outputs/apk/debug/app-debug.apk
-adb -s R5CW72TP4EP install -r -t \
-  app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-adb -s R5CW72TP4EP shell am instrument -w \
-  com.onevoice.link.test/androidx.test.runner.AndroidJUnitRunner
+tools/models/push-npu-models.sh auto R5CW72TP4EP
 ```
 
-On the target SM8550 device, `AudioTrack` delivered every requested frame in
-both modes. For the same sentence, Full-QNN synthesis took about 1.2 seconds and
-used three decoder buckets; Hybrid whole-utterance CPU Kokoro took about 2.7
-seconds. The faster QNN result remained audibly less smooth, which isolates the
-problem to bucketed synthesis rather than playback loss.
+The script preflights every local source before modifying the phone, verifies
+every published file with SHA-256, uses `.part` plus an in-filesDir rename for
+large files, and publishes each eSpeak tree only after verifying every file.
 
-## Current limitations
+```text
+files/models/npu/
+|-- shared/
+|   |-- speechflow_langid.tflite
+|   |-- speechflow_labels.json
+|   `-- speechflow_contract.json
+|-- vi-en/
+|   |-- asr_gipformer_encoder.bin
+|   |-- asr_gipformer_{decoder,joiner}.onnx
+|   |-- asr_gipformer_{tokens,bpe,config}.*
+|   |-- mt_{encoder,decoder}.bin
+|   |-- mt_{source,target}.spm, mt_vocab.json, mt_config.json
+|   |-- tts_cpu.onnx, tts_tokens.txt, tts_voices.bin
+|   |-- fallback/asr/{model.onnx,tokens.txt}
+|   |-- fallback/mt/{encoder_model.onnx,decoder_model.onnx,source.spm,vocab.json,mt_config.json}
+|   `-- espeak-ng-data/
+`-- en-vi/
+    |-- asr_zipformer_encoder.bin
+    |-- asr_zipformer_{decoder,joiner}.onnx
+    |-- asr_zipformer_tokens.txt
+    |-- mt_{encoder,decoder}.bin
+    |-- mt_{source,target}.spm, mt_vocab.json, mt_config.json
+    |-- tts_cpu.onnx, tts_tokens.txt, tts_voices.bin
+    |-- fallback/asr/{model.onnx,tokens.txt}
+    |-- fallback/mt/{encoder_model.onnx,decoder_model.onnx,source.spm,vocab.json,mt_config.json}
+    `-- espeak-ng-data/
+```
 
-- EN → VI QNN is disabled because no deployable English ASR `.bin` exists.
-- Full-QNN English Kokoro uses exact eSpeak phonemization. A tiny bridge ONNX
-  model exposes sherpa-onnx's normal Kokoro token IDs without loading the full
-  CPU Kokoro network; learned synthesis still executes in QNN.
-- Full-QNN Kokoro decoding is fixed at 25 alignment frames per context call.
-  Host overlap/crossfade cannot fully reproduce whole-utterance decoder state.
-- The ASR context is statically limited to ten seconds per inference. Long
-  continuous speech is deliberately segmented with overlap, not fed as one
-  unbounded tensor.
+Legacy Parakeet and fixed-window QNN Kokoro contexts are no longer part of the
+production deploy plan. Existing old files on a development phone are not
+deleted automatically; the script never performs broad cleanup.
 
-## Host RAM policy
+## Recording, failure, and memory policy
 
-Gradle is bounded to a 1 GiB heap, one worker, and no parallel execution.
-Native linking can still need several GiB; avoid concurrent Android Studio or
-Gradle builds. Runtime tensor buffers are persistent and reused. Full QNN does
-not load the 345 MB unified Kokoro ONNX model; Hybrid intentionally loads one
-CPU Kokoro instance and releases it when the backend changes.
+Capture uses 20 ms frames, 300 ms pre-roll, a one-second end hangover, a
+ten-second ASR ceiling, 500 ms overlap at forced boundaries, and a queue of two
+utterances. Learned inference never runs on the audio read loop. Capture is
+suppressed during playback so the device does not translate its own speaker.
 
-Phân tích đầy đủ về artifact TTS fixed-window, bằng chứng thiết bị và yêu cầu
-re-export dành cho team model nằm tại
-[Sự cố chất lượng TTS QNN](incidents/2026-08-09-qnn-tts-fixed-window-quality.md).
+“CPU fallback” is failover, not fail-closed. The safe behavior is:
+
+1. An uncertain language decision always fails closed: no default direction.
+2. A QNN ASR/MT exception quarantines that direction's HTP text path for the
+   current engine lifetime.
+3. Load its reviewed CPU bundle lazily and reprocess the complete captured
+   utterance from its PCM boundary; never splice partial NPU and CPU results.
+4. If fallback is unavailable or also fails, stop producing speech and expose a
+   degraded/error state.
+
+Only fallback assets should be kept cold until needed. Do not eagerly load the
+large CPU reference pipelines alongside both Hybrid branches. Measure Android
+PSS, HTP load, per-stage latency, and classifier acceptance on the target phone
+before deciding whether both Kokoro sessions may remain hot.
+
+The former fixed-window QNN TTS experiment and its audible seam analysis remain
+documented for historical reference in
+[2026-08-09-qnn-tts-fixed-window-quality.md](incidents/2026-08-09-qnn-tts-fixed-window-quality.md).

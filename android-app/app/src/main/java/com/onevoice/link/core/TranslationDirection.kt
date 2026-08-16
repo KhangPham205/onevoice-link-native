@@ -1,13 +1,12 @@
 package com.onevoice.link.core
 
 /**
- * Which way the conversation is being translated. A 2-person conversation flips
- * this per speaker turn.
+ * The immutable route selected for one completed utterance.
  *
- * Switching is NOT free on the NPU path: each direction needs its own cascade of
- * context binaries, and both directions together exceed what is sensible to keep
- * resident on the HTP, so [NpuEngine] releases the old contexts and loads the new
- * ones on every switch.
+ * Both direction-qualified ASR/MT context sets stay resident in the production
+ * Hybrid engine. Selecting a direction therefore never unloads or swaps models.
+ * Today the route comes from acoustic LID; a future authenticated headset-floor
+ * controller can supply the same enum without changing the ASR/MT/TTS branches.
  */
 enum class TranslationDirection {
     VI_TO_EN,

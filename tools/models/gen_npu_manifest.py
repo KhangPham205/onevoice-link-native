@@ -37,35 +37,31 @@ TARGET_SOC = {"qnnSocModel": 43, "socModel": "SM8550",
               "marketing": "Snapdragon 8 Gen 2", "hexagon": "v73"}
 
 # (direction, stage, deployed filename, path under onevoice-npu-bins/)
-# GIPFormer is an RNN-T bundle: only its encoder is a QNN context, while the
-# small decoder + joiner remain host-side ONNX models staged by
-# push-npu-models.sh. Keep the encoder row here because this manifest describes
-# QNN contexts only. opus-mt and Kokoro remain unchanged.
+# Both ASR models are transducer bundles: only their encoders are QNN contexts,
+# while the small decoder + joiner stay as host-side ONNX models staged by
+# push-npu-models.sh. This manifest intentionally lists QNN contexts only;
+# Direction-routing state, host transducer pieces, CPU ASR fallback, and
+# whole-utterance Kokoro are deployment assets rather than graphRetrieve targets.
+#
+# Hybrid is the only production backend. Do not re-add the fixed-window QNN TTS
+# contexts here: retaining them would make the load plan and UI imply a mode the
+# product no longer exposes.
 DEPLOY = [
     ("vi-en", "asr",         "asr_gipformer_encoder.bin", "asr/gipformer_65m_rnnt-bundle/bin/encoder.bin"),
     ("vi-en", "mt_encoder",  "mt_encoder.bin",      "mt/opus_mt_vi_en__float_8gen2/encoder_float.bin"),
     ("vi-en", "mt_decoder",  "mt_decoder.bin",      "mt/opus_mt_vi_en__float_8gen2/decoder_float.bin"),
-    ("vi-en", "tts_encoder", "tts_encoder.bin",     "tts/kokoro_en__encoder_8gen2/encoder.bin"),
-    # Generated locally from Kokoro's ONNX prosody graph. The relative path is
-    # intentionally allowed to leave onevoice-npu-bins/; dump() still validates
-    # its embedded graph/I/O contract and SM8550 socModel before writing.
-    ("vi-en", "tts_prosody", "tts_prosody.bin",     "../models-npu-generated/tts/kokoro_en_prosody_w8a8.bin"),
-    ("vi-en", "tts_decoder", "tts_decoder.bin",     "tts/kokoro_en__decoder_npu_8gen2/decoder_npu.bin"),
-    # No ASR row: the package ships Vietnamese ASR only (HANDOFF.md §4), so
-    # EN->VI is marked unavailable below and the app locks the toggle.
+    ("en-vi", "asr",         "asr_zipformer_encoder.bin", "asr/zipformer_small_en-bundle/bin/encoder.bin"),
     ("en-vi", "mt_encoder",  "mt_encoder.bin",      "mt/opus_mt_en_vi__float_8gen2/encoder_float.bin"),
     ("en-vi", "mt_decoder",  "mt_decoder.bin",      "mt/opus_mt_en_vi__float_8gen2/decoder_float.bin"),
-    ("en-vi", "tts_encoder", "tts_encoder.bin",     "tts/kokoro_vi__encoder_8gen2/encoder.bin"),
-    ("en-vi", "tts_decoder", "tts_decoder.bin",     "tts/kokoro_vi__decoder_npu_8gen2/decoder_npu.bin"),
 ]
 
 LABELS = {
-    "asr": "ASR · GIPFormer-65M RNN-T vi",
-    "mt_encoder": "MT encoder · opus-mt",
-    "mt_decoder": "MT decoder · opus-mt",
-    "tts_encoder": "TTS encoder · Kokoro",
-    "tts_prosody": "TTS prosody · Kokoro W8A8",
-    "tts_decoder": "TTS decoder · Kokoro",
+    ("vi-en", "asr"): "ASR · GIPFormer-65M RNN-T vi",
+    ("en-vi", "asr"): "ASR · Zipformer-small RNN-T en",
+    ("vi-en", "mt_encoder"): "MT encoder · opus-mt vi→en",
+    ("vi-en", "mt_decoder"): "MT decoder · opus-mt vi→en",
+    ("en-vi", "mt_encoder"): "MT encoder · opus-mt en→vi",
+    ("en-vi", "mt_decoder"): "MT decoder · opus-mt en→vi",
 }
 
 
@@ -117,23 +113,17 @@ def main() -> int:
         info = dump(src)["info"]
         graph = info["graphs"][0]["info"]
         soc = info.get("socModel")
-        # qnn-context-binary-generator leaves socModel unspecified (0) for the
-        # locally generated single-op prosody context. That exact artifact is
-        # already exercised on SM8550; keep the exception stage-scoped so an
-        # accidental wrong-chip model in any vendor/AI-Hub row still fails the
-        # generation atomically.
-        unspecified_local_prosody = stage == "tts_prosody" and soc == 0
-        if soc != TARGET_SOC["qnnSocModel"] and not unspecified_local_prosody:
+        # Every production Hybrid context is a device-specific AI Hub artifact.
+        # Refuse an unspecified or wrong SoC instead of publishing a manifest
+        # that the SM8550 runtime cannot safely retrieve.
+        if soc != TARGET_SOC["qnnSocModel"]:
             print(f"!! {rel}: socModel={soc}, expected "
                   f"{TARGET_SOC['qnnSocModel']} — wrong chip, refusing to write",
                   file=sys.stderr)
             return 1
-        if unspecified_local_prosody:
-            print(f".. {rel}: socModel unspecified (0); allowed only for "
-                  "the locally generated tts_prosody context")
         by_direction.setdefault(direction, []).append({
             "stage": stage,
-            "label": LABELS[stage],
+            "label": LABELS[(direction, stage)],
             "file": f"{direction}/{dest_name}",
             "graph": graph["graphName"],
             "sizeBytes": os.path.getsize(src),
@@ -145,16 +135,18 @@ def main() -> int:
 
     manifest = {
         "schemaVersion": 1,
-        "comment": "Generated by tools/models/gen_npu_manifest.py from the "
-                   "context binaries themselves (HANDOFF.md §7-B2). Graph names "
-                   "are AI Hub-generated; graphRetrieve fails on any mismatch.",
+        "comment": "Generated by tools/models/gen_npu_manifest.py from Hybrid's "
+                   "QNN context binaries. Host routing/transducer/Kokoro assets "
+                   "are staged separately and are not graphRetrieve targets. "
+                   "Graph names are AI Hub-generated; graphRetrieve fails on "
+                   "any mismatch.",
         "targetSoc": TARGET_SOC,
         "modelRoot": "models/npu",
         "directions": [
             {"id": "vi-en", "label": "VI → EN", "available": True,
              "unavailableReason": None, "stages": by_direction.get("vi-en", [])},
-            {"id": "en-vi", "label": "EN → VI", "available": False,
-             "unavailableReason": "missing_asr_en",
+            {"id": "en-vi", "label": "EN → VI", "available": True,
+             "unavailableReason": None,
              "stages": by_direction.get("en-vi", [])},
         ],
     }

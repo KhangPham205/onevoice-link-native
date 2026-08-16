@@ -10,7 +10,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import com.onevoice.link.R
 import com.onevoice.link.core.EngineBackend
+import com.onevoice.link.core.ExecutionPath
 import com.onevoice.link.core.NpuEngine
+import com.onevoice.link.core.PipelineSegment
 import com.onevoice.link.core.StageState
 import com.onevoice.link.core.StageStatus
 import com.onevoice.link.core.TranslationDirection
@@ -21,23 +23,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Lifecycle stages shared by the CPU and QNN live paths. */
+/** Lifecycle stages for the single auto-direction Hybrid pipeline. */
 enum class EngineStage(@field:StringRes val labelRes: Int) {
     NOT_INITIALIZED(R.string.stage_not_initialized),
     INITIALIZED(R.string.stage_initialized),
     RUNNING(R.string.stage_running),
-}
-
-/** Which implementation currently owns the speech pipeline. */
-enum class BackendKind(@field:StringRes val labelRes: Int) {
-    /** Complete offline ASR -> MT -> TTS pipeline backed by ONNX Runtime. */
-    HF(R.string.backend_hf),
-
-    /** QNN ASR/MT with CPU Kokoro rendering one continuous utterance. */
-    HYBRID(R.string.backend_hybrid),
-
-    /** Native QNN/HTP learned stages with bounded CPU audio/tensor host glue. */
-    QNN(R.string.backend_qnn),
 }
 
 enum class MessageKind { Info, Error }
@@ -62,28 +52,26 @@ data class DashboardUiState(
     val message: UiMessage,
     val micGranted: Boolean,
     val micPermanentlyDenied: Boolean = false,
-    val selectedBackend: BackendKind = BackendKind.HF,
-    val backendDisplayName: String = "",
     val supportsLiveTranslation: Boolean = true,
     val transcript: String? = null,
     val translation: String? = null,
     val replayAvailable: Boolean = false,
-    val direction: TranslationDirection = TranslationDirection.VI_TO_EN,
-    /** QNN-only: one row per context binary in the selected cascade. */
+    /** Null until acoustic language identification accepts an utterance. */
+    val detectedDirection: TranslationDirection? = null,
+    /** Calibrated language-identification score for [detectedDirection]. */
+    val lidConfidence: Float? = null,
+    /** Actual route used for the latest utterance, not a user-selectable mode. */
+    val executionPath: ExecutionPath? = null,
+    /** QNN contexts needed by the Hybrid pipeline. */
     val stages: List<StageStatus> = emptyList(),
-    val unavailableDirections: Set<TranslationDirection> = emptySet(),
-    val directionUnavailableReason: String? = null,
     val targetSoc: String = "",
     val hexagon: String = "",
     val modelRootPath: String = "",
 ) {
     val running: Boolean get() = stage == EngineStage.RUNNING
-    val isQnn: Boolean get() = selectedBackend != BackendKind.HF
-    val isHybrid: Boolean get() = selectedBackend == BackendKind.HYBRID
 
     val canInitialize: Boolean get() =
-        !busy && stage == EngineStage.NOT_INITIALIZED &&
-            direction !in unavailableDirections
+        !busy && stage == EngineStage.NOT_INITIALIZED
 
     val canToggle: Boolean get() =
         supportsLiveTranslation && !busy &&
@@ -93,52 +81,34 @@ data class DashboardUiState(
         supportsLiveTranslation && stage != EngineStage.NOT_INITIALIZED &&
             !micGranted && !running
 
-    /** Selecting another backend releases the currently resident model bundle. */
-    val canSelectBackend: Boolean get() = !busy && !running
-
-    /**
-     * A direction change also releases the current bundle/cascade, so changing
-     * direction remains possible after initialization without retaining both
-     * directions in memory.
-     */
-    val canSwitchDirection: Boolean get() = !busy && !running
-
     val showTranslationCard: Boolean get() = supportsLiveTranslation
     val canReplay: Boolean get() =
         supportsLiveTranslation && replayAvailable && !busy
 }
 
 /**
- * Activity-scoped state holder for both [EngineBackend] implementations.
+ * Activity-scoped state holder for the single Hybrid engine.
  *
- * It owns backend lifecycle and keeps only one model bundle resident. Switching
- * backend or direction destroys the active backend first, then returns the UI to
- * NOT_INITIALIZED so the newly selected models can be loaded explicitly.
+ * Language routing happens per utterance inside the engine. The controller only
+ * presents the route selected by LID; it never unloads models in response to a
+ * UI direction change.
  */
 @Stable
 class EngineController(
-    backends: Map<BackendKind, EngineBackend>,
+    private val backend: EngineBackend,
     private val scope: CoroutineScope,
-    defaultBackend: BackendKind = BackendKind.HF,
 ) {
-    private val backends = backends.toMap()
-    private var backend: EngineBackend =
-        requireNotNull(this.backends[defaultBackend]) {
-            "No backend registered for $defaultBackend"
-        }
-
     // This scope survives rememberCoroutineScope cancellation long enough to
     // release native/ORT resources during DisposableEffect.onDispose.
     private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var shutdownRequested = false
+    private var pauseRequested = false
 
-    var backendKind by mutableStateOf(defaultBackend)
-        private set
     var stage by mutableStateOf(EngineStage.NOT_INITIALIZED)
         private set
     var busy by mutableStateOf(false)
         private set
-    var message by mutableStateOf(idleMessage(defaultBackend))
+    var message by mutableStateOf(UiMessage(R.string.msg_idle_hybrid_auto))
         private set
     var transcript by mutableStateOf<String?>(null)
         private set
@@ -146,33 +116,31 @@ class EngineController(
         private set
     var replayAvailable by mutableStateOf(false)
         private set
-    var direction by mutableStateOf(TranslationDirection.VI_TO_EN)
+    var detectedDirection by mutableStateOf<TranslationDirection?>(null)
+        private set
+    var lidConfidence by mutableStateOf<Float?>(null)
+        private set
+    var executionPath by mutableStateOf<ExecutionPath?>(null)
         private set
     var stages by mutableStateOf<List<StageStatus>>(emptyList())
         private set
 
-    val backendDisplayName: String get() = backend.displayName
     val supportsLiveTranslation: Boolean get() = backend.supportsLiveTranslation
 
-    private var pipelineListener: EngineBackend.PipelineListener? = null
-    private var stageListener: ((List<StageStatus>) -> Unit)? = null
-
     init {
-        backend.setDirection(direction)
         attachBackendListeners()
         stages = plannedStages()
     }
 
-    fun initialize() = launchBusy(initializingMessage()) {
-        val selected = backend
+    fun initialize() = launchBusy(UiMessage(R.string.msg_initializing_hybrid_auto)) {
         val result = withContext(Dispatchers.IO) {
-            runCatching { selected.initialize() }
+            runCatching { backend.initialize() }
         }
         result.onSuccess { initialized ->
             stage = if (initialized) EngineStage.INITIALIZED
             else EngineStage.NOT_INITIALIZED
             message = if (initialized) {
-                initializedMessage()
+                UiMessage(R.string.msg_initialized_hybrid_auto)
             } else {
                 backendFailure(R.string.msg_init_failed)
             }
@@ -188,46 +156,13 @@ class EngineController(
     }
 
     /**
-     * Switch implementation while keeping only one resident model set. This is
-     * allowed from INITIALIZED; [EngineBackend.destroy] performs the required
-     * explicit unload.
+     * Stop microphone/playback when translation controls are no longer visible.
+     * Loaded models stay resident, so returning to the dashboard is cheap.
      */
-    fun selectBackend(newKind: BackendKind) {
-        if (newKind == backendKind || busy || stage == EngineStage.RUNNING) return
-        launchBusy(UiMessage(R.string.msg_switching_backend)) {
-            val previous = backend
-            detachBackendListeners(previous)
-            withContext(Dispatchers.IO) { runCatching { previous.destroy() } }
-
-            backend = requireNotNull(backends[newKind])
-            backendKind = newKind
-            withContext(Dispatchers.IO) { backend.setDirection(direction) }
-            resetPresentation()
-            attachBackendListeners()
-            stages = plannedStages()
-            message = idleMessage(newKind)
-        }
-    }
-
-    /**
-     * Release the selected direction before changing it. This avoids keeping two
-     * Parakeet/Kokoro bundles or two QNN cascades resident on an 8 GB phone.
-     */
-    fun switchDirection(newDirection: TranslationDirection) {
-        if (newDirection == direction || busy || stage == EngineStage.RUNNING) return
-        launchBusy(UiMessage(R.string.msg_switching_direction)) {
-            val selected = backend
-            detachBackendListeners(selected)
-            withContext(Dispatchers.IO) {
-                runCatching { selected.destroy() }
-                selected.setDirection(newDirection)
-            }
-            direction = newDirection
-            resetPresentation()
-            attachBackendListeners()
-            stages = plannedStages()
-            message = idleMessage(backendKind)
-        }
+    fun pauseLiveTranslation() {
+        if (shutdownRequested) return
+        pauseRequested = true
+        if (!busy && stage != EngineStage.NOT_INITIALIZED) stop()
     }
 
     fun replayLast() {
@@ -246,62 +181,69 @@ class EngineController(
         }
     }
 
-    /**
-     * Detach callbacks and begin off-main-thread teardown. MainActivity retains
-     * an idempotent final cleanup as a lifecycle safety net.
-     */
+    /** Detach callbacks and begin off-main-thread teardown. */
     fun shutdown() {
         if (shutdownRequested) return
         shutdownRequested = true
-        backends.values.distinct().forEach { registered ->
-            registered.setPipelineListener(null)
-            (registered as? NpuEngine)?.setStageListener(null)
-        }
+        backend.setPipelineListener(null)
+        (backend as? NpuEngine)?.setStageListener(null)
         cleanupScope.launch {
             try {
-                backends.values.distinct().forEach { registered ->
-                    runCatching { registered.destroy() }
-                }
+                runCatching { backend.destroy() }
             } finally {
                 cleanupScope.cancel()
             }
         }
     }
 
-    private fun start() = launchBusy(UiMessage(R.string.msg_starting)) {
-        transcript = null
-        translation = null
-        replayAvailable = false
-        val result = withContext(Dispatchers.IO) { runCatching { backend.start() } }
-        result.onSuccess { started ->
-            if (started) {
-                stage = EngineStage.RUNNING
-                message = UiMessage(R.string.msg_live)
-            } else {
-                message = backendFailure(R.string.msg_start_failed)
+    private fun start() {
+        pauseRequested = false
+        launchBusy(UiMessage(R.string.msg_starting_auto)) {
+            transcript = null
+            translation = null
+            replayAvailable = false
+            detectedDirection = null
+            lidConfidence = null
+            executionPath = null
+            val result = withContext(Dispatchers.IO) { runCatching { backend.start() } }
+            result.onSuccess { started ->
+                if (started) {
+                    stage = EngineStage.RUNNING
+                    message = UiMessage(R.string.msg_live_auto)
+                } else {
+                    message = backendFailure(R.string.msg_start_failed)
+                }
+            }.onFailure { failure ->
+                message = nativeFailure(failure)
             }
-        }.onFailure { failure ->
-            message = nativeFailure(failure)
         }
     }
 
-    private fun stop() = launchBusy(UiMessage(R.string.msg_stopping)) {
-        withContext(Dispatchers.IO) { runCatching { backend.stop() } }
-        stage = EngineStage.INITIALIZED
-        message = UiMessage(R.string.msg_stopped)
+    private fun stop() {
+        // Consume a pending lifecycle/navigation pause before entering the
+        // busy envelope; otherwise its finally block would schedule stop again.
+        pauseRequested = false
+        launchBusy(UiMessage(R.string.msg_stopping)) {
+            withContext(Dispatchers.IO) { runCatching { backend.stop() } }
+            stage = EngineStage.INITIALIZED
+            message = UiMessage(R.string.msg_stopped)
+        }
     }
 
     private fun attachBackendListeners() {
-        val selected = backend
         val listener = object : EngineBackend.PipelineListener {
-            override fun onSegment(transcript: String, translation: String?) {
+            override fun onSegment(segment: PipelineSegment) {
                 scope.launch {
-                    if (backend !== selected || shutdownRequested) return@launch
-                    this@EngineController.transcript = transcript
-                    if (translation == null) {
-                        this@EngineController.translation = null
-                    } else {
-                        this@EngineController.translation = translation
+                    if (shutdownRequested) return@launch
+                    transcript = segment.transcript
+                    translation = segment.translation
+                    detectedDirection = segment.direction
+                    lidConfidence = segment.lidConfidence
+                    executionPath = segment.executionPath
+                    if (stage == EngineStage.RUNNING) {
+                        // A valid next utterance clears a recoverable low-LID or
+                        // per-segment inference error from the status banner.
+                        message = UiMessage(R.string.msg_live_auto)
                     }
                     // Translation text arrives before TTS. Replay becomes safe
                     // only after onAudioReady publishes the waveform.
@@ -311,16 +253,16 @@ class EngineController(
 
             override fun onAudioReady() {
                 scope.launch {
-                    if (backend !== selected || shutdownRequested) return@launch
+                    if (shutdownRequested) return@launch
                     replayAvailable = true
                 }
             }
 
             override fun onPipelineError(message: String) {
                 scope.launch {
-                    if (backend !== selected || shutdownRequested) return@launch
-                    // Per-segment MT/TTS errors are recoverable and capture may
-                    // still be running, so the callback must not invent a stop.
+                    if (shutdownRequested) return@launch
+                    // Per-utterance LID/MT/TTS failures are recoverable; the
+                    // capture worker may still be listening for the next turn.
                     this@EngineController.message = UiMessage(
                         R.string.msg_backend_error,
                         message,
@@ -331,7 +273,7 @@ class EngineController(
 
             override fun onPipelineStopped(message: String) {
                 scope.launch {
-                    if (backend !== selected || shutdownRequested) return@launch
+                    if (shutdownRequested) return@launch
                     stage = EngineStage.INITIALIZED
                     this@EngineController.message = UiMessage(
                         R.string.msg_backend_error,
@@ -341,37 +283,19 @@ class EngineController(
                 }
             }
         }
-        pipelineListener = listener
-        selected.setPipelineListener(listener)
+        backend.setPipelineListener(listener)
 
-        (selected as? NpuEngine)?.let { npu ->
-            val listener: (List<StageStatus>) -> Unit = { updated ->
+        (backend as? NpuEngine)?.let { npu ->
+            npu.setStageListener { updated ->
                 scope.launch {
-                    if (backend === npu && !shutdownRequested) stages = updated
+                    if (!shutdownRequested) stages = updated
                 }
             }
-            stageListener = listener
-            npu.setStageListener(listener)
         }
     }
 
-    private fun detachBackendListeners(selected: EngineBackend = backend) {
-        selected.setPipelineListener(null)
-        (selected as? NpuEngine)?.setStageListener(null)
-        pipelineListener = null
-        stageListener = null
-    }
-
     private fun plannedStages(): List<StageStatus> =
-        (backend as? NpuEngine)?.plannedStages(direction).orEmpty()
-
-    private fun resetPresentation() {
-        stage = EngineStage.NOT_INITIALIZED
-        transcript = null
-        translation = null
-        replayAvailable = false
-        stages = emptyList()
-    }
+        (backend as? NpuEngine)?.plannedStages().orEmpty()
 
     /** Prefer the backend's own diagnostic over the generic failure copy. */
     private fun backendFailure(@StringRes generic: Int): UiMessage {
@@ -390,22 +314,6 @@ class EngineController(
         MessageKind.Error,
     )
 
-    private fun initializingMessage(): UiMessage = UiMessage(
-        when (backendKind) {
-            BackendKind.HF -> R.string.msg_initializing_offline
-            BackendKind.QNN -> R.string.msg_initializing_qnn
-            BackendKind.HYBRID -> R.string.msg_initializing_hybrid
-        },
-    )
-
-    private fun initializedMessage(): UiMessage = UiMessage(
-        when (backendKind) {
-            BackendKind.HF -> R.string.msg_initialized_offline
-            BackendKind.QNN -> R.string.msg_initialized_qnn
-            BackendKind.HYBRID -> R.string.msg_initialized_hybrid
-        },
-    )
-
     /** Shared envelope: busy -> progress message -> operation -> not busy. */
     private fun launchBusy(progress: UiMessage, block: suspend () -> Unit) {
         if (busy || shutdownRequested) return
@@ -418,17 +326,15 @@ class EngineController(
                 message = nativeFailure(failure)
             } finally {
                 busy = false
+                // Navigation/backgrounding may happen while start or replay is
+                // briefly busy. Honor that deferred pause as soon as the
+                // current operation releases the backend.
+                if (pauseRequested && !shutdownRequested &&
+                    stage != EngineStage.NOT_INITIALIZED
+                ) {
+                    stop()
+                }
             }
         }
-    }
-
-    private companion object {
-        fun idleMessage(kind: BackendKind): UiMessage = UiMessage(
-            when (kind) {
-                BackendKind.HF -> R.string.msg_idle_offline
-                BackendKind.QNN -> R.string.msg_idle_qnn
-                BackendKind.HYBRID -> R.string.msg_idle_hybrid
-            },
-        )
     }
 }

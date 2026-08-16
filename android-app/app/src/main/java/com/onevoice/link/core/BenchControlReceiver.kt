@@ -1,0 +1,198 @@
+package com.onevoice.link.core
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.util.Log
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+private const val TAG = "OneVoiceBenchCtl"
+
+/**
+ * adb-driven control surface for the benchmark skill.
+ *
+ * A receiver rather than an exported Activity or a socket: the harness already
+ * talks to the device over adb, and `am broadcast` needs no port, no foreground
+ * window and no extra permission. It is registered but not exported, so only
+ * the shell uid (via `am`) and the app itself can reach it.
+ *
+ * Nothing here touches the audio path. Every action either flips a flag read
+ * between utterances or writes a file, and all of it is inert unless the
+ * harness has created `<filesDir>/bench`.
+ *
+ * ```
+ * adb shell am broadcast -a com.onevoice.link.BENCH \
+ *   --es cmd profiling --ez on true -n com.onevoice.link/.core.BenchControlReceiver
+ * ```
+ */
+class BenchControlReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val telemetry = runCatching { BenchTelemetry(context.applicationContext) }
+            .getOrNull() ?: return
+        if (!telemetry.enabled) {
+            Log.i(TAG, "ignoring ${intent.getStringExtra(EXTRA_CMD)}: bench dir absent")
+            return
+        }
+        when (val command = intent.getStringExtra(EXTRA_CMD)) {
+            "profiling" -> {
+                val on = intent.getBooleanExtra(EXTRA_ON, false)
+                val ok = runCatching { OneVoiceNative.nativeSetQnnProfiling(on) }
+                    .getOrDefault(false)
+                Log.i(TAG, "profiling=$on applied=$ok")
+            }
+
+            "power" -> {
+                val mode = intent.getStringExtra(EXTRA_MODE) ?: "burst"
+                val latency = intent.getIntExtra(EXTRA_LATENCY_US, 100)
+                val polling = intent.getIntExtra(EXTRA_POLLING_US, 9999)
+                val error = runCatching {
+                    OneVoiceNative.nativeApplyHtpPowerConfig(mode, latency, polling)
+                }.getOrElse { it.message }
+                Log.i(TAG, "power mode=$mode latency=$latency polling=$polling " +
+                    "result=${error ?: "ok"}")
+            }
+
+            "memory" -> {
+                // Logged as one line so the harness can pair a snapshot with the
+                // adb-side `dumpsys meminfo -d` taken at the same moment; the
+                // dmabuf delta only shows up on the dumpsys side, because DSP
+                // allocations never appear in this process's PSS.
+                val snapshot = telemetry.memorySnapshot()
+                Log.i(TAG, "memory ${snapshot.entries.joinToString(" ") { "${it.key}=${it.value}" }}")
+            }
+
+            "flush" -> {
+                val name = intent.getStringExtra(EXTRA_NAME) ?: "bench.csv"
+                val file = telemetry.flush(name)
+                Log.i(TAG, "flush -> ${file?.absolutePath ?: "failed"}")
+            }
+
+            "qnn" -> {
+                // host_overhead_us is the actionable half of the profile: wall
+                // time minus accelerator time is what the app itself can shrink.
+                val samples = telemetry.drainQnnSamples()
+                samples.forEach { sample ->
+                    Log.i(
+                        TAG,
+                        "qnn stage=${sample.stage} wall_us=${sample.wallUs} " +
+                            "execute_us=${sample.executeUs} " +
+                            "accel_us=${sample.acceleratorUs} " +
+                            "queue_wait_us=${sample.queueWaitUs} " +
+                            "host_overhead_us=${sample.hostOverheadUs} " +
+                            "profiled=${sample.profiled}",
+                    )
+                }
+                Log.i(TAG, "qnn drained=${samples.size}")
+            }
+
+            "lowmem" -> {
+                Log.i(TAG, "lowmem killed_previously=${telemetry.wasKilledForMemory()}")
+            }
+
+            "synth" -> {
+                // Build a fixture by running the on-device TTS, then decimating
+                // 24 kHz -> 16 kHz so the result can be fed back in as if it
+                // were captured audio.
+                //
+                // Using the app's own Kokoro rather than a host tool keeps the
+                // fixture reproducible from the repo (same model, same eSpeak
+                // data) and avoids needing a phonemizer on the workstation. It
+                // is synthetic speech, which is the point: identical every run.
+                val text = intent.getStringExtra(EXTRA_TEXT)
+                val dirId = intent.getStringExtra(EXTRA_DIRECTION) ?: "vi-en"
+                val out = intent.getStringExtra(EXTRA_PATH)
+                val engine = NpuEngine.current()
+                if (text == null || out == null || engine == null) {
+                    Log.w(TAG, "synth ignored: text=$text out=$out engine=${engine != null}")
+                    return
+                }
+                val direction = when (dirId) {
+                    "vi-en" -> TranslationDirection.VI_TO_EN   // speaks English
+                    "en-vi" -> TranslationDirection.EN_TO_VI   // speaks Vietnamese
+                    else -> {
+                        Log.w(TAG, "synth: unknown direction $dirId")
+                        return
+                    }
+                }
+                val result = runCatching { engine.benchSynthesize(text, direction) }
+                    .getOrElse {
+                        Log.w(TAG, "synth failed", it)
+                        return
+                    }
+                if (result == null || result.isEmpty()) {
+                    Log.w(TAG, "synth produced no audio")
+                    return
+                }
+                // Integer 3:2 decimation with a short box filter. Crude, but the
+                // fixture only has to be intelligible to LID and ASR, and a
+                // sharper filter would add a dependency for no measurable gain.
+                val decimated = FloatArray(result.size * 2 / 3)
+                for (i in decimated.indices) {
+                    val src = i * 3 / 2
+                    decimated[i] = if (src + 1 < result.size) {
+                        (result[src] + result[src + 1]) * 0.5f
+                    } else {
+                        result[src.coerceAtMost(result.size - 1)]
+                    }
+                }
+                val buffer = ByteBuffer.allocate(decimated.size * Float.SIZE_BYTES)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                decimated.forEach(buffer::putFloat)
+                runCatching { File(out).writeBytes(buffer.array()) }
+                    .onSuccess {
+                        Log.i(TAG, "synth wrote $out samples=${decimated.size} " +
+                            "seconds=${"%.2f".format(decimated.size / 16000.0)}")
+                    }
+                    .onFailure { Log.w(TAG, "synth write failed", it) }
+            }
+
+            "feed" -> {
+                // Fixture PCM instead of the microphone: every iteration must
+                // see the identical utterance or the percentiles describe the
+                // room, not the pipeline. The file holds little-endian float32
+                // at 16 kHz — the same representation the capture loop hands to
+                // the inference worker, so no conversion sits in between.
+                val path = intent.getStringExtra(EXTRA_PATH)
+                val engine = NpuEngine.current()
+                if (path == null || engine == null) {
+                    Log.w(TAG, "feed ignored: path=$path engine=${engine != null}")
+                    return
+                }
+                val file = File(path)
+                if (!file.isFile) {
+                    Log.w(TAG, "feed ignored: $path is not a file")
+                    return
+                }
+                val bytes = runCatching { file.readBytes() }.getOrElse {
+                    Log.w(TAG, "feed failed to read $path", it)
+                    return
+                }
+                val samples = FloatArray(bytes.size / Float.SIZE_BYTES)
+                ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                    .asFloatBuffer().get(samples)
+                val accepted = engine.benchFeed(
+                    samples,
+                    forcedBoundary = intent.getBooleanExtra(EXTRA_FORCED, false),
+                )
+                Log.i(TAG, "feed ${file.name} samples=${samples.size} accepted=$accepted")
+            }
+
+            else -> Log.w(TAG, "unknown bench command: $command")
+        }
+    }
+
+    private companion object {
+        const val EXTRA_CMD = "cmd"
+        const val EXTRA_ON = "on"
+        const val EXTRA_MODE = "mode"
+        const val EXTRA_LATENCY_US = "latency_us"
+        const val EXTRA_POLLING_US = "polling_us"
+        const val EXTRA_NAME = "name"
+        const val EXTRA_PATH = "path"
+        const val EXTRA_FORCED = "forced"
+        const val EXTRA_TEXT = "text"
+        const val EXTRA_DIRECTION = "direction"
+    }
+}

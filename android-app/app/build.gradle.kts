@@ -212,6 +212,8 @@ tasks.named("preBuild") {
 dependencies {
     implementation(files("libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar"))
     implementation(libs.onnxruntime.android)
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.select.tf.ops)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)

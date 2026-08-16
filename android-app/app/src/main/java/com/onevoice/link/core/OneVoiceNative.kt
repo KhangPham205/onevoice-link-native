@@ -73,6 +73,71 @@ object OneVoiceNative {
         output: ByteBuffer,
     ): String?
 
+    /** NeMo AmberNet 16 kHz PCM float -> direct [1,80,1008] FLOAT32. */
+    external fun nativeExtractAmberNetFeatures(
+        samples: FloatArray,
+        output: ByteBuffer,
+    ): String?
+
+    // ---- Benchmark surface -------------------------------------------------
+    // Kept off the execute path on purpose: an out-parameter on
+    // nativeExecuteGraph would add work to the hot call and change an arity
+    // that this file and main_jni.cpp must keep byte-for-byte in agreement.
+
+    /**
+     * Turn per-execute QNN profiling on or off (BASIC level).
+     *
+     * Costs real time inside `graphExecute`, so a latency baseline must come
+     * from a cohort where this was never enabled. Returns false when the
+     * backend is down or the profile handle could not be created.
+     */
+    external fun nativeSetQnnProfiling(enabled: Boolean): Boolean
+
+    /**
+     * Pin the HTP DVFS/latency knobs. Returns null on success, else the error.
+     * Modes: `burst`, `sustained_high_performance`, `balanced`.
+     */
+    external fun nativeApplyHtpPowerConfig(
+        mode: String,
+        rpcControlLatencyUs: Int,
+        rpcPollingTimeUs: Int,
+    ): String?
+
+    /**
+     * Stage name per collected sample. MUST be called before
+     * [nativeDrainQnnProfile] — it takes the snapshot that call then reads, so
+     * the two arrays line up positionally.
+     */
+    external fun nativeDrainQnnProfileStages(): Array<String>
+
+    /**
+     * Flat `[wallUs, executeUs, acceleratorUs, queueWaitUs, profiled] * n` over
+     * the snapshot taken by [nativeDrainQnnProfileStages], which it consumes.
+     */
+    external fun nativeDrainQnnProfile(): LongArray
+
+    /** Power mode currently in force, or `unavailable`. */
+    external fun nativeActivePowerMode(): String
+
+    /**
+     * `AThermalStatus` value (0 none … 6 shutdown), or -1 before API 30.
+     * Resolved with dlsym because this module ships minSdk 28.
+     */
+    external fun nativeThermalStatus(): Int
+
+    /**
+     * SpeechFlow LID 16 kHz PCM float -> direct [1,1000,80] FLOAT32.
+     *
+     * Time-major, whole-utterance normalized — deliberately not the same
+     * contract as [nativeExtractAmberNetFeatures]. `outFrames[0]` receives the
+     * unpadded frame count that must be passed to the model as `input_2`.
+     */
+    external fun nativeExtractSpeechFlowFeatures(
+        samples: FloatArray,
+        output: ByteBuffer,
+        outFrames: IntArray,
+    ): String?
+
     /** Kokoro F0 [50] -> harmonic STFT [22,3001], both direct FLOAT32. */
     external fun nativeBuildKokoroHar(
         f0: ByteBuffer,

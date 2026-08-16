@@ -3,10 +3,8 @@ package com.onevoice.link.core
 /**
  * Common lifecycle for an offline speech-to-speech engine.
  *
- * [NpuEngine] provides both the six-stage QNN cascade and the hybrid QNN
- * ASR/MT + whole-utterance CPU TTS path. [com.onevoice.link.hf.HfEngineBackend]
- * is the CPU reference backend. All emit intermediate text through
- * [PipelineListener].
+ * Production uses one auto-routing Hybrid engine. The CPU implementation is
+ * retained as a failover/reference implementation but is not user-selectable.
  */
 interface EngineBackend {
     val displayName: String
@@ -26,7 +24,7 @@ interface EngineBackend {
 
     interface PipelineListener {
         /** Called from a worker thread after ASR and again after MT. */
-        fun onSegment(transcript: String, translation: String?)
+        fun onSegment(segment: PipelineSegment)
 
         /** Called only after a replayable waveform has been published. */
         fun onAudioReady() {}
@@ -38,3 +36,21 @@ interface EngineBackend {
         fun onPipelineStopped(message: String) {}
     }
 }
+
+/** Which compute path produced a segment; it is diagnostic, never a UI mode. */
+enum class ExecutionPath {
+    HYBRID_NPU,
+    CPU_FALLBACK,
+}
+
+/**
+ * Atomic per-utterance result. Direction and confidence travel with the text,
+ * preventing an asynchronous language update from relabeling another turn.
+ */
+data class PipelineSegment(
+    val transcript: String,
+    val translation: String?,
+    val direction: TranslationDirection,
+    val lidConfidence: Float,
+    val executionPath: ExecutionPath,
+)

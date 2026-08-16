@@ -22,10 +22,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
@@ -34,10 +30,7 @@ import androidx.compose.ui.unit.dp
 import com.onevoice.link.R
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.NpuEngine
-import com.onevoice.link.core.TranslationDirection
 import com.onevoice.link.ui.components.AppHeader
-import com.onevoice.link.ui.components.BackendSelector
-import com.onevoice.link.ui.components.DirectionToggle
 import com.onevoice.link.ui.components.EngineControls
 import com.onevoice.link.ui.components.MicPermissionRow
 import com.onevoice.link.ui.components.ModelCascadeCard
@@ -47,42 +40,20 @@ import com.onevoice.link.ui.theme.OneVoiceMotion
 import com.onevoice.link.ui.theme.Spacing
 
 /**
- * Stateful entry point. One [EngineController] owns both backend lifecycles so
- * switching implementation or direction can release the currently resident
- * model bundle before another one is loaded.
+ * Route for the only production mode: auto-direction Hybrid.
+ * [controller] is Activity-root owned so opening Settings never destroys models.
  */
 @Composable
 fun DashboardScreen(
     micGranted: Boolean,
     micPermanentlyDenied: Boolean,
-    backends: Map<BackendKind, EngineBackend>,
-    defaultBackend: BackendKind = BackendKind.HF,
+    engine: EngineBackend,
+    controller: EngineController,
     onRequestMic: () -> Unit,
+    onOpenMenu: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val scope = rememberCoroutineScope()
-    val controller = remember(backends) {
-        EngineController(backends, scope, defaultBackend)
-    }
-    DisposableEffect(controller) {
-        onDispose { controller.shutdown() }
-    }
-
-    val npuEngine = backends[controller.backendKind] as? NpuEngine
-    val unavailable = if (controller.backendKind != BackendKind.HF) {
-        TranslationDirection.entries
-            .filter { npuEngine?.directionSpec(it)?.available == false }
-            .toSet()
-    } else {
-        emptySet()
-    }
-    val unavailableReason = if (controller.backendKind != BackendKind.HF) {
-        npuEngine?.directionSpec(controller.direction)
-            ?.takeIf { !it.available }
-            ?.unavailableReason
-    } else {
-        null
-    }
+    val npuEngine = engine as? NpuEngine
 
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
         DashboardContent(
@@ -92,18 +63,14 @@ fun DashboardScreen(
                 message = controller.message,
                 micGranted = micGranted,
                 micPermanentlyDenied = micPermanentlyDenied,
-                selectedBackend = controller.backendKind,
-                backendDisplayName = controller.backendDisplayName,
                 supportsLiveTranslation = controller.supportsLiveTranslation,
                 transcript = controller.transcript,
                 translation = controller.translation,
                 replayAvailable = controller.replayAvailable,
-                direction = controller.direction,
+                detectedDirection = controller.detectedDirection,
+                lidConfidence = controller.lidConfidence,
+                executionPath = controller.executionPath,
                 stages = controller.stages,
-                unavailableDirections = unavailable,
-                directionUnavailableReason = unavailableReason?.let {
-                    reasonText(it)
-                },
                 targetSoc = npuEngine?.manifest?.targetMarketing.orEmpty(),
                 hexagon = npuEngine?.manifest?.hexagon.orEmpty(),
                 modelRootPath = npuEngine?.modelRootPath.orEmpty(),
@@ -111,19 +78,11 @@ fun DashboardScreen(
             onInitialize = controller::initialize,
             onToggleTranslation = controller::toggleTranslation,
             onRequestMic = onRequestMic,
-            onSelectBackend = controller::selectBackend,
-            onSelectDirection = controller::switchDirection,
             onReplay = controller::replayLast,
+            onOpenMenu = onOpenMenu,
             modifier = Modifier.padding(innerPadding),
         )
     }
-}
-
-/** Manifest reason codes → localized copy. */
-@Composable
-private fun reasonText(code: String): String = when (code) {
-    "missing_asr_en" -> stringResource(R.string.direction_unavailable_asr_en)
-    else -> code
 }
 
 /** Stateless and fully previewable: state in, events out. */
@@ -134,9 +93,8 @@ fun DashboardContent(
     onToggleTranslation: () -> Unit,
     onRequestMic: () -> Unit,
     modifier: Modifier = Modifier,
-    onSelectBackend: (BackendKind) -> Unit = {},
-    onSelectDirection: (TranslationDirection) -> Unit = {},
     onReplay: () -> Unit = {},
+    onOpenMenu: () -> Unit = {},
 ) {
     Column(
         modifier
@@ -151,43 +109,35 @@ fun DashboardContent(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(Spacing.lg),
         ) {
-            AppHeader(Modifier.padding(top = Spacing.lg, bottom = Spacing.sm))
+            AppHeader(
+                onMenuClick = onOpenMenu,
+                modifier = Modifier.padding(top = Spacing.lg, bottom = Spacing.sm),
+            )
             StatusCard(
                 stage = state.stage,
                 busy = state.busy,
                 message = state.message.resolve(),
                 isError = state.message.kind == MessageKind.Error,
             )
-            BackendSelector(
-                selected = state.selectedBackend,
-                enabled = state.canSelectBackend,
-                detail = state.backendDisplayName,
-                onSelect = onSelectBackend,
-            )
-            DirectionToggle(
-                direction = state.direction,
-                enabled = state.canSwitchDirection,
-                onSelect = onSelectDirection,
-                unavailable = state.unavailableDirections,
-                unavailableReason = state.directionUnavailableReason,
-            )
-            if (state.isQnn) {
-                // Keep per-context proof visible while the same backend runs
-                // the live pipeline below it.
+            if (state.showTranslationCard) {
+                TranslationCard(
+                    transcript = state.transcript,
+                    translation = state.translation,
+                    detectedDirection = state.detectedDirection,
+                    lidConfidence = state.lidConfidence,
+                    executionPath = state.executionPath,
+                    canReplay = state.canReplay,
+                    onReplay = onReplay,
+                )
+            }
+            if (state.stages.isNotEmpty()) {
+                // Diagnostics stay available for testing without pushing the
+                // live translation below the first screenful.
                 ModelCascadeCard(
                     stages = state.stages,
                     targetSoc = state.targetSoc,
                     hexagon = state.hexagon,
                     modelRootPath = state.modelRootPath,
-                )
-            }
-            if (state.showTranslationCard) {
-                TranslationCard(
-                    transcript = state.transcript,
-                    translation = state.translation,
-                    direction = state.direction,
-                    canReplay = state.canReplay,
-                    onReplay = onReplay,
                 )
             }
             if (state.supportsLiveTranslation) {
@@ -198,13 +148,7 @@ fun DashboardContent(
                 )
             }
             Text(
-                text = stringResource(
-                    when {
-                        state.isHybrid -> R.string.scope_notice_hybrid
-                        state.isQnn -> R.string.scope_notice_qnn
-                        else -> R.string.scope_notice_offline
-                    },
-                ),
+                text = stringResource(R.string.scope_notice_hybrid_auto),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

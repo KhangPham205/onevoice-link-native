@@ -84,6 +84,7 @@ add_library(onevoice_core SHARED
     src/qnn_runtime.cpp
     src/asr_frontend.cpp
     src/kokoro_audio.cpp
+    src/thermal_probe.cpp
 )
 
 target_include_directories(onevoice_core PRIVATE

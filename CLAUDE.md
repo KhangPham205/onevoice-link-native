@@ -4,11 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-On-device speech-to-speech translation (Vietnamese ↔ English) for Snapdragon phones. The app has three explicit backends:
+On-device speech-to-speech translation (Vietnamese ↔ English) for Snapdragon phones. The app exposes one production backend: **automatic Hybrid**. A CPU SpeechFlow LID classifier (TFLite) identifies each completed utterance, then the app routes it without user input:
 
-- **Hybrid (default)** is the production VI→EN path: QNN ASR + MarianMT execute on Hexagon HTP, then sherpa-onnx Kokoro renders the translated sentence as one continuous CPU utterance.
-- **Offline CPU** is the bidirectional reference path: Kotlin `AudioRecord` + bounded VAD → sherpa-onnx ASR → ONNX Runtime MarianMT → sherpa-onnx Kokoro TTS → `AudioTrack`.
-- **Full QNN** is the six-stage VI→EN path. ASR, MT and Kokoro encoder/prosody/decoder execute from context `.bin` files on HTP. Its fixed 25-frame TTS decoder requires host bucketing and can produce audible seams, so it is retained for NPU validation and optimization rather than used as the default listening path.
+- VI→EN: GIPFormer encoder and MarianMT execute on Hexagon HTP; the small RNN-T decoder/joiner and whole-utterance Kokoro EN run on CPU.
+- EN→VI: Zipformer-small encoder and MarianMT execute on Hexagon HTP; the small RNN-T decoder/joiner and whole-utterance Kokoro VI run on CPU.
+- Unknown/low-confidence language: fail closed, emit no translation or audio.
+
+CPU models may be retained as cold, whole-utterance failover assets, but there is no user-facing CPU or Full-QNN mode. The old fixed-window QNN Kokoro work remains historical evidence only.
+
+The Settings screen inventories connected Bluetooth audio endpoints and stores
+their preferred VI/EN listening language. This is future Auracast provisioning,
+not an active audio route. Auracast is downlink-only and does not identify the
+speaker; keep acoustic LID until an authenticated, exclusive speaker-floor plus
+verified microphone route supplies an endpoint ID. Route planning must snapshot
+one speaker and all listeners at the utterance boundary and fail closed on an
+unknown/ambiguous speaker. See `docs/AURACAST_ROUTING.md`.
 
 Target hardware is fixed: **arm64-v8a, Snapdragon 8 Gen 2** (`SM8550` / `kalama` / Hexagon **v73**, `qnnSocModel` 43). No other ABI is built.
 
@@ -25,8 +35,8 @@ cd android-app
 Model binaries are **not** in the APK — push them separately (needs a debuggable build for `run-as`):
 
 ```bash
-tools/models/push-npu-models.sh vi-en R5CW72TP4EP  # contexts + frontend assets, resumable
-tools/models/push-hf-models.sh vi-en R5CW72TP4EP  # complete runnable direction (~1.1 GB)
+python3 tools/models/convert_speechflow_lid.py models-src/speechflow-lid
+tools/models/push-npu-models.sh auto R5CW72TP4EP  # LID + both Hybrid directions
 adb logcat -s OneVoiceNpu:* OneVoiceQNN:* OneVoiceCore:* adsprpc:V
 ```
 
@@ -50,11 +60,11 @@ Gradle properties that change runtime behavior:
 
 Read `docs/ARCHITECTURE.md` for the threading model. The essentials:
 
-**Live audio is bounded.** All three backends use `AudioRecord` and `AudioTrack` from a capture and inference worker. QNN and Hybrid capture use 20 ms VAD frames, 300 ms pre-roll, one-second end hangover, a 10-second static ASR window, 500 ms overlap at forced window boundaries, and a queue of two utterances. Learned inference never runs on the audio read loop.
+**Live audio is bounded.** Hybrid uses `AudioRecord` and `AudioTrack` from capture and inference workers: 20 ms VAD frames, 300 ms pre-roll, one-second end hangover, a 10-second static ASR window, 500 ms overlap at forced window boundaries, and a queue of two utterances. LID and all learned inference run after a complete segment, never on the audio read loop.
 
-**JNI is confined to one file.** `native-core/src/main_jni.cpp` binds Kotlin direct buffers to the generic `QnnRuntime::executeGraph`, runs the native NeMo fbank frontend, and builds Kokoro HAR tensors. `core/OneVoiceNative.kt` is the Kotlin mirror — changing arity/order on either side breaks the other silently. The old Oboe `executeCascade()` worker is not used by the live QNN backend.
+**JNI is confined to one file.** `native-core/src/main_jni.cpp` binds Kotlin direct buffers to the generic `QnnRuntime::executeGraph` and runs the exact ASR/LID feature frontends. `core/OneVoiceNative.kt` is the Kotlin mirror — changing arity/order on either side breaks the other silently. The old Oboe `executeCascade()` worker is not used by Hybrid.
 
-**The cascade is six separate context binaries, not one graph.** ASR → MT encoder/decoder → TTS encoder → W8A8 prosody → TTS decoder, each an independently compiled `.bin` with its own graph name. `QnnRuntime` therefore creates the backend/device **once** and one context **per stage** (`native-core/src/qnn_runtime.cpp`). Loading each stage is a 3-step proof, reported separately so failures are diagnosable:
+**The two branches use six separate QNN context binaries, not one graph.** Each direction owns ASR encoder → MT encoder → MT decoder. `QnnRuntime` creates the backend/device **once** and one context **per stage** (`native-core/src/qnn_runtime.cpp`). Direction-qualified runtime keys are mandatory because both Marian directions embed the graph names `opus_mt_encoder` and `opus_mt_decoder`. Loading each stage is a 3-step proof, reported separately so failures are diagnosable:
 
 1. `QnnSystemContext_getBinaryInfo` — parse blob, read graph name + I/O contract + `socModel`, no hardware.
 2. `contextCreateFromBinary` — place graphs on the HTP (fails on wrong Hexagon arch or DSP-access denial).
@@ -68,17 +78,23 @@ Read `docs/ARCHITECTURE.md` for the threading model. The essentials:
 
 **Models live in internal `filesDir`, not external storage.** On Android 11+ (verified on Android 16 / One UI) an app cannot see files under its own `Android/data/<pkg>/files/` created by another uid — `adb shell` lists them, the path matches byte-for-byte, and the app still gets `exists() == false`; chowning does not help. `NpuEngine.candidateRoots` checks both and uses whichever actually holds models.
 
-**The complete offline path is Kotlin/native-library orchestration, not the C++ QNN worker.** `HfEngineBackend` loads only the selected direction to bound phone RAM. Its capture queue, waveform buffers, playback buffer and ORT sessions are bounded; changing direction/backend releases the current bundle before another is loaded. The dashboard defaults to Hybrid; every backend exposes transcript, translation and replay only after TTS publishes a waveform.
+**Automatic routing is Kotlin/native-library orchestration, not the old C++ cascade worker.** SpeechFlow LID decides VI, EN or unknown for each bounded utterance. The chosen branch owns its QNN ASR/MT contexts and CPU transducer/Kokoro host glue. An unknown decision never falls back to a default language. Transcript, translation and replay are published with the actual per-utterance route; replay becomes available only after TTS publishes a complete waveform.
+
+**Headset assignments do not currently replace LID.** The public Android
+inventory cannot identify an individual Auracast listener or the active talker,
+and an ordinary APK cannot manage Auracast broadcasts without a privileged OEM
+service. `headset/HeadsetRoutePlanner.kt` is a pure future policy boundary; it
+must not be interpreted as proof that audio was routed.
 
 ## Current status — read before debugging inference
 
 Keep the capability boundary explicit when debugging:
 
-- **Hybrid VI→EN is end-to-end and is the default.** It loads only the QNN ASR and Marian encoder/decoder contexts, then runs the existing Kokoro CPU model once for the complete translated sentence. This preserves the NPU acceleration where the supplied graph contracts are continuous while avoiding fixed-window QNN TTS seams.
-- **The Offline CPU backend is end-to-end.** On 2026-08-08 it was verified on `R5CW72TP4EP`: both directions initialized; VI→EN microphone capture produced a Vietnamese transcript, Marian produced English text, Kokoro published a replayable waveform, and the process remained alive at about 1.57 GB PSS (EN→VI ready state was about 764 MB PSS). Models live under `<filesDir>/models/hf`; stage each direction with `tools/models/push-hf-models.sh`.
-- **Full-QNN VI→EN is end-to-end but its bucketed TTS is not CPU-quality.** `QnnRuntime::executeGraph` retains binary tensor metadata and binds direct RAW buffers; the app implements NeMo fbank/CTC, Marian SentencePiece + KV-cache decode, Kokoro alignment/style, a generated W8A8 prosody context, phase-continuous HAR, bucket stitching and 24 kHz playback. On-device evidence for the same sentence measured about 1.2 s for full-QNN synthesis across three decoder buckets versus about 2.7 s for Hybrid whole-utterance CPU Kokoro. `AudioTrack` delivered every requested frame in both cases, so the remaining Full-QNN stutter is a synthesis/bucket-boundary quality limitation, not playback underrun or truncation.
-- **QNN EN→VI remains disabled** because no deployable English ASR context binary exists. Do not silently fall back to CPU or claim bidirectional NPU support.
-- **Full-QNN Kokoro uses exact eSpeak phonemization.** A tiny `tts_frontend.onnx` bridge lets sherpa-onnx perform the normal eSpeak/Kokoro frontend and returns the resulting token IDs without loading the 345 MB unified Kokoro CPU model. Hybrid instead loads that CPU model intentionally because it owns whole-utterance synthesis.
+- **Automatic Hybrid is the only user-facing path.** SpeechFlow LID runs on CPU/TFLite before ASR. Its SavedModel export excludes the audio frontend, so `models-npu-generated/lid/speechflow_contract.json` and `speechflow_labels.json` are as mandatory as the `.tflite` itself. Three traps, all silent: features are **time-major** `[1,1000,80]` (AmberNet was channel-first), normalization is **whole-utterance** (`normalize_per_feature: false`), and `output_1` is **raw logits despite being all-negative** — `exp()` over the vector sums to ~0.27, so softmax is required. The 14th class `other` is not a guard; gaussian noise ranks `italian` at p≈0.72. Two of 83 nodes need `tensorflow-lite-select-tf-ops`, which costs ~68 MB of APK.
+- **Both Hybrid directions have QNN ASR encoders.** VI uses GIPFormer graph `graph_oa00nu3e`; EN uses Zipformer-small graph `graph_shbblv7u`. Both contracts are FP32 `[1,1000,80]` → `[1,248,512]` on SM8550/v73. Their decoder/joiner ONNX files remain CPU host glue.
+- **Both Marian directions execute on HTP.** Their embedded graph names repeat, so never use the raw logical role as the sole loaded-context key when both directions are resident.
+- **Kokoro remains whole-utterance CPU by design.** This preserves continuous prosody and avoids the old fixed-window QNN decoder seams. Do not restore the former Full-QNN selector.
+- **CPU recovery is lazy and atomic at the utterance boundary.** An ASR/MT exception quarantines that direction's HTP text path; the cold CPU ASR+Marian bundle restarts from captured PCM rather than splicing partial results. An uncertain LID decision always fails closed even if CPU assets exist.
 - **The former `contextCreateFromBinary` `0x36b1` failure is resolved.** `0x36b1`
   is `QNN_DEVICE_ERROR_INVALID_CONFIG`; it did not prove a signature-policy
   failure. The real log chain was `libcdsprpc.so not found` → FastRPC remote

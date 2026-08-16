@@ -1,5 +1,39 @@
 # Architecture
 
+> [!IMPORTANT]
+> **SUPERSEDED — this document describes a design the app no longer uses.**
+>
+> Everything below describes the original Oboe + SPSC-ring cascade, in which a
+> C++ worker owned the audio path end to end. The shipping app does not work
+> that way: **Kotlin owns audio** via `AudioRecord`/`AudioTrack`, and the native
+> library is a function library that the Kotlin inference worker calls into.
+>
+> `CLAUDE.md` is authoritative wherever the two disagree. Concretely, in the
+> current build:
+>
+> | This document says | Actually |
+> |---|---|
+> | Realtime path never enters the JVM | Kotlin owns capture, VAD, routing and playback |
+> | Oboe capture/playback + SPSC rings | `AudioRecord` / `AudioTrack` from Kotlin workers |
+> | `audio_engine.cpp`, `ring_buffer.cpp` are the audio layer | Compiled but unreachable — nothing calls them |
+> | AI worker drains 1 s chunks and runs `executeCascade()` | `executeCascade()` returns `false` by design; `NpuPipeline` drives `executeGraph()` stage by stage |
+> | `nativeStartEngine()` spawns the AI worker | Returns `JNI_FALSE` and logs "obsolete" |
+> | 16 ms Oboe callback granularity | No Oboe callback exists on this path |
+>
+> **Why the change:** the pipeline stopped being streamable. LID must see a
+> complete utterance before it can choose a branch, and Kokoro synthesises the
+> whole utterance in one call to keep prosody continuous. With nothing to
+> stream, a realtime callback contract bought complexity and no latency. The
+> per-utterance orchestration — LID routing, HTP quarantine, cold CPU failover,
+> Compose state — is all Kotlin state, so keeping audio in C++ meant crossing
+> JNI twice per utterance and synchronising a lifecycle across two languages.
+>
+> For the current design see `CLAUDE.md` (§Architecture) and
+> `docs/OFFLINE_PIPELINE.md`. This file is kept because the Oboe code still
+> compiles and someone may want to know why it exists.
+
+---
+
 OneVoice Link is built around one hard rule: **the realtime audio→AI→audio path never enters the JVM.** Everything latency-sensitive lives in `libonevoice_core.so`; Kotlin only starts and stops it. This is what lets the app hit conversational latency without ART garbage-collection pauses tearing the audio stream.
 
 ## Component map

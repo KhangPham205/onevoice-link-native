@@ -15,14 +15,17 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.roundToInt
 
-/** Host glue around the separately compiled QNN contexts for VI -> EN. */
+/** Host glue for either direction's separately compiled QNN ASR and MT contexts. */
 internal class NpuPipeline private constructor(
+    private val stagePrefix: String,
+    private val asrArtifactPrefix: String,
     private val asrMode: NpuAsrMode,
     private val asrTokens: List<String>,
-    private val gipformerDecoder: GipformerRnntDecoder?,
+    private val rnntDecoder: ZipformerFamilyRnntDecoder?,
     private val translator: QnnMarianTranslator,
     private val ttsTokenIds: Set<Int>,
     private val voices: FileChannel?,
@@ -32,12 +35,17 @@ internal class NpuPipeline private constructor(
     companion object {
         private const val PARAKEET_FEATURE_BYTES = 1 * 1001 * 80 * Float.SIZE_BYTES
         private const val PARAKEET_LOGIT_BYTES = 1 * 126 * 1025 * Float.SIZE_BYTES
-        private const val GIPFORMER_FEATURE_BYTES =
-            1 * GipformerRnntDecoder.FEATURE_FRAMES * GipformerRnntDecoder.FEATURE_DIM *
+        private const val RNNT_FEATURE_BYTES =
+            1 * ZipformerFamilyRnntDecoder.FEATURE_FRAMES *
+                ZipformerFamilyRnntDecoder.FEATURE_DIM *
                 Float.SIZE_BYTES
-        private const val GIPFORMER_OUTPUT_BYTES =
-            1 * GipformerRnntDecoder.ENCODER_FRAMES * GipformerRnntDecoder.ENCODER_DIM *
+        private const val RNNT_OUTPUT_BYTES =
+            1 * ZipformerFamilyRnntDecoder.ENCODER_FRAMES *
+                ZipformerFamilyRnntDecoder.ENCODER_DIM *
                 Float.SIZE_BYTES
+        // Leaves ~0.9 dB of headroom below full scale, so a hot voice is
+        // attenuated rather than clamped sample-by-sample by AudioTrack.
+        private const val PEAK_CEILING = 0.90f
         private const val ASR_HOP_SAMPLES = 160
         private const val ASR_SUBSAMPLING = 8
         private const val ASR_OUTPUT_FRAMES = 126
@@ -51,9 +59,14 @@ internal class NpuPipeline private constructor(
         fun load(
             directionRoot: File,
             asrStage: StageSpec,
+            stagePrefix: String,
+            asrArtifactPrefix: String,
             useCpuTts: Boolean = false,
             cpuTtsModel: File? = null,
         ): NpuPipeline {
+            require(stagePrefix in setOf("vi-en", "en-vi")) {
+                "Unsupported Hybrid direction key: $stagePrefix"
+            }
             val asrMode = NpuAsrMode.from(asrStage)
             val requiredNames = buildList {
                 addAll(
@@ -64,11 +77,11 @@ internal class NpuPipeline private constructor(
                 )
                 when (asrMode) {
                     NpuAsrMode.PARAKEET_CTC -> add("asr_tokens.txt")
-                    NpuAsrMode.GIPFORMER_RNNT -> addAll(
+                    NpuAsrMode.ZIPFORMER_FAMILY_RNNT -> addAll(
                         listOf(
-                            "asr_gipformer_decoder.onnx",
-                            "asr_gipformer_joiner.onnx",
-                            "asr_gipformer_tokens.txt",
+                            "${asrArtifactPrefix}_decoder.onnx",
+                            "${asrArtifactPrefix}_joiner.onnx",
+                            "${asrArtifactPrefix}_tokens.txt",
                         ),
                     )
                 }
@@ -80,16 +93,19 @@ internal class NpuPipeline private constructor(
             }
             val missing = required.filterNot(File::isFile)
             val espeakData = File(directionRoot, "espeak-ng-data")
-            val espeakMissing = listOf("phontab", "phondata", "phonindex", "en_dict")
+            val targetDictionary = if (stagePrefix == "vi-en") "en_dict" else "vi_dict"
+            val espeakMissing = listOf("phontab", "phondata", "phonindex", targetDictionary)
                 .map { File(espeakData, it) }
                 .filterNot(File::isFile)
             require(missing.isEmpty()) {
                 "Missing NPU frontend assets: ${missing.joinToString { it.name }}. " +
-                    "Run tools/models/push-npu-models.sh vi-en R5CW72TP4EP."
+                    "Run tools/models/push-npu-models.sh auto <adb-serial> " +
+                    "(missing direction: $stagePrefix)."
             }
             require(espeakMissing.isEmpty()) {
                 "Missing eSpeak frontend data: ${espeakMissing.joinToString { it.name }}. " +
-                    "Run tools/models/push-npu-models.sh vi-en R5CW72TP4EP."
+                    "Run tools/models/push-npu-models.sh auto <adb-serial> " +
+                    "(missing direction: $stagePrefix)."
             }
             val asrTokens = if (asrMode == NpuAsrMode.PARAKEET_CTC) {
                 val asrIndex = parseIndexedTokens(File(directionRoot, "asr_tokens.txt"))
@@ -120,16 +136,19 @@ internal class NpuPipeline private constructor(
                     silenceScale = 1.0f,
                 )
             }
-            var gipformer: GipformerRnntDecoder? = null
+            var rnntDecoder: ZipformerFamilyRnntDecoder? = null
             var translator: QnnMarianTranslator? = null
             var voices: FileChannel? = null
             var ttsFrontend: OfflineTts? = null
             var cpuTts: OfflineTts? = null
             try {
-                if (asrMode == NpuAsrMode.GIPFORMER_RNNT) {
-                    gipformer = GipformerRnntDecoder.load(directionRoot)
+                if (asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
+                    rnntDecoder = ZipformerFamilyRnntDecoder.load(
+                        directionRoot,
+                        asrArtifactPrefix,
+                    )
                 }
-                translator = QnnMarianTranslator.load(directionRoot)
+                translator = QnnMarianTranslator.load(directionRoot, stagePrefix)
                 if (useCpuTts) {
                     cpuTts = OfflineTts(
                         config = kokoroConfig(requireNotNull(cpuTtsModel).absolutePath),
@@ -143,9 +162,11 @@ internal class NpuPipeline private constructor(
                     )
                 }
                 return NpuPipeline(
+                    stagePrefix = stagePrefix,
+                    asrArtifactPrefix = asrArtifactPrefix,
                     asrMode = asrMode,
                     asrTokens = asrTokens,
-                    gipformerDecoder = gipformer,
+                    rnntDecoder = rnntDecoder,
                     translator = checkNotNull(translator),
                     ttsTokenIds = ttsTokens.values.toSet(),
                     voices = voices,
@@ -157,7 +178,7 @@ internal class NpuPipeline private constructor(
                 runCatching { ttsFrontend?.release() }
                 runCatching { voices?.close() }
                 runCatching { translator?.close() }
-                runCatching { gipformer?.close() }
+                runCatching { rnntDecoder?.close() }
                 throw failure
             }
         }
@@ -174,15 +195,15 @@ internal class NpuPipeline private constructor(
     }
 
     private val asrFeatures = direct(
-        if (asrMode == NpuAsrMode.GIPFORMER_RNNT) {
-            GIPFORMER_FEATURE_BYTES
+        if (asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
+            RNNT_FEATURE_BYTES
         } else {
             PARAKEET_FEATURE_BYTES
         },
     )
     private val asrOutput = direct(
-        if (asrMode == NpuAsrMode.GIPFORMER_RNNT) {
-            GIPFORMER_OUTPUT_BYTES
+        if (asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
+            RNNT_OUTPUT_BYTES
         } else {
             PARAKEET_LOGIT_BYTES
         },
@@ -208,25 +229,27 @@ internal class NpuPipeline private constructor(
         }
         return when (asrMode) {
             NpuAsrMode.PARAKEET_CTC -> recognizeParakeet(samples)
-            NpuAsrMode.GIPFORMER_RNNT -> recognizeGipformer(samples)
+            NpuAsrMode.ZIPFORMER_FAMILY_RNNT -> recognizeRnnt(samples)
         }
     }
 
-    private fun recognizeGipformer(samples: FloatArray): String {
+    private fun recognizeRnnt(samples: FloatArray): String {
+        // The JNI name predates the English bundle. Both deployed encoders use
+        // the same Kaldi/icefall feature contract, so this frontend is shared.
         checkNative(OneVoiceNative.nativeExtractGipformerFeatures(samples, asrFeatures))
-        execute("asr", arrayOf(asrFeatures), arrayOf(asrOutput))
+        execute("$stagePrefix/asr", arrayOf(asrFeatures), arrayOf(asrOutput))
         // Kaldi snip_edges=false creates round(sampleCount / 160) frames. The
         // encoder's exported length graph is (((T - 7) / 2) + 1) / 2.
         val validFeatureFrames = ((samples.size + ASR_HOP_SAMPLES / 2) /
-            ASR_HOP_SAMPLES).coerceIn(1, GipformerRnntDecoder.FEATURE_FRAMES)
+            ASR_HOP_SAMPLES).coerceIn(1, ZipformerFamilyRnntDecoder.FEATURE_FRAMES)
         val validEncoderFrames = ((((validFeatureFrames - 7).coerceAtLeast(0) / 2) + 1) / 2)
-            .coerceIn(1, GipformerRnntDecoder.ENCODER_FRAMES)
-        val transcript = checkNotNull(gipformerDecoder) {
-            "Gipformer decoder is unavailable"
+            .coerceIn(1, ZipformerFamilyRnntDecoder.ENCODER_FRAMES)
+        val transcript = checkNotNull(rnntDecoder) {
+            "RNN-T host decoder is unavailable"
         }.decode(asrOutput, validEncoderFrames)
         Log.i(
             TAG,
-            "ASR model=gipformer-rnnt samples=${samples.size} " +
+            "ASR model=$asrArtifactPrefix samples=${samples.size} " +
                 "featureFrames=$validFeatureFrames encoderFrames=$validEncoderFrames " +
                 "transcript=\"$transcript\"",
         )
@@ -235,7 +258,7 @@ internal class NpuPipeline private constructor(
 
     private fun recognizeParakeet(samples: FloatArray): String {
         checkNative(OneVoiceNative.nativeExtractAsrFeatures(samples, asrFeatures))
-        execute("asr", arrayOf(asrFeatures), arrayOf(asrOutput))
+        execute("$stagePrefix/asr", arrayOf(asrFeatures), arrayOf(asrOutput))
         val logits = asrOutput.asFloatBuffer()
         // The graph is statically padded to 10 seconds/126 CTC steps and has no
         // external length tensor. Do not decode logits belonging solely to the
@@ -278,6 +301,33 @@ internal class NpuPipeline private constructor(
 
     fun translate(text: String): String = translator.translate(text)
 
+    /** Tokens the Marian decoder emitted for the last [translate]. */
+    val lastMtOutputTokens: Int get() = translator.lastOutputTokens
+
+    /**
+     * Scale a waveform in place so nothing leaves [-1, 1], returning the peak
+     * that was measured.
+     *
+     * Kokoro-Vietnamese is far hotter than the English voice: measured on the
+     * shipped models, a 60-token utterance peaks at 1.11 with 132 samples past
+     * full scale, against 0.32 for English. AudioTrack's PCM_FLOAT path hard
+     * clamps instead of scaling, so those samples come out as audible crackle
+     * that grows with sentence length. Attenuating the whole utterance by one
+     * factor keeps the waveform shape — and therefore the prosody — intact.
+     */
+    private fun limitPeak(samples: FloatArray): Float {
+        var peak = 0f
+        for (sample in samples) {
+            val magnitude = abs(sample)
+            if (magnitude > peak) peak = magnitude
+        }
+        if (peak > PEAK_CEILING) {
+            val gain = PEAK_CEILING / peak
+            for (index in samples.indices) samples[index] *= gain
+        }
+        return peak
+    }
+
     fun synthesize(text: String): FloatArray {
         cpuTts?.let { synthesizer ->
             val startedNs = System.nanoTime()
@@ -288,11 +338,13 @@ internal class NpuPipeline private constructor(
             require(generated.samples.all(Float::isFinite)) {
                 "CPU Kokoro returned non-finite waveform samples"
             }
+            val peak = limitPeak(generated.samples)
             Log.i(
                 TAG,
                 "CPU whole-utterance TTS textChars=${text.length} " +
                     "audioSamples=${generated.samples.size} " +
                     "durationMs=${generated.samples.size * 1_000L / generated.sampleRate} " +
+                    "rawPeak=${"%.3f".format(peak)} " +
                     "inferenceMs=${(System.nanoTime() - startedNs) / 1_000_000L}",
             )
             return generated.samples
@@ -330,7 +382,7 @@ internal class NpuPipeline private constructor(
         ttsIds.asIntBuffer().put(ids)
         ttsStyle.asFloatBuffer().put(style)
         execute(
-            "tts_encoder",
+            "$stagePrefix/tts_encoder",
             arrayOf(ttsIds, ttsStyle),
             arrayOf(ttsD, ttsDurations, ttsTEn),
         )
@@ -378,7 +430,7 @@ internal class NpuPipeline private constructor(
             }
 
             execute(
-                "tts_prosody",
+                "$stagePrefix/tts_prosody",
                 arrayOf(ttsEn, ttsStyleTail),
                 arrayOf(ttsF0, ttsNoise),
             )
@@ -390,7 +442,7 @@ internal class NpuPipeline private constructor(
                 ),
             )
             execute(
-                "tts_decoder",
+                "$stagePrefix/tts_decoder",
                 arrayOf(ttsF0, ttsNoise, ttsAsr, ttsStyleHead, ttsHar),
                 arrayOf(ttsWaveform),
             )
@@ -496,7 +548,7 @@ internal class NpuPipeline private constructor(
         ttsFrontend?.release()
         voices?.close()
         translator.close()
-        gipformerDecoder?.close()
+        rnntDecoder?.close()
     }
 
     private fun execute(stage: String, inputs: Array<ByteBuffer>, outputs: Array<ByteBuffer>) {
@@ -511,7 +563,7 @@ internal class NpuPipeline private constructor(
 
 private enum class NpuAsrMode {
     PARAKEET_CTC,
-    GIPFORMER_RNNT;
+    ZIPFORMER_FAMILY_RNNT;
 
     companion object {
         fun from(stage: StageSpec): NpuAsrMode {
@@ -521,7 +573,7 @@ private enum class NpuAsrMode {
                 input?.name == "x" && input.dtype == "FLOAT_32" &&
                     input.dims == listOf(1, 1000, 80) &&
                     output?.name == "output_0" && output.dtype == "FLOAT_32" &&
-                    output.dims == listOf(1, 248, 512) -> GIPFORMER_RNNT
+                    output.dims == listOf(1, 248, 512) -> ZIPFORMER_FAMILY_RNNT
 
                 input?.name == "input_features" && input.dtype == "FLOAT_32" &&
                     input.dims == listOf(1, 1001, 80) &&
@@ -537,26 +589,39 @@ private enum class NpuAsrMode {
 }
 
 /** Fixed-shape cached Marian decoder driven one token at a time on HTP. */
-private class QnnMarianTranslator(
+internal class QnnMarianTranslator private constructor(
+    private val stagePrefix: String,
     private val sentencePiece: SentencePieceUnigram,
     private val vocab: Map<String, Int>,
     private val idToToken: Array<String?>,
     private val eosId: Int,
     private val padId: Int,
     private val decoderStartId: Int,
+    private val targetPrefixId: Int?,
     private val maxLength: Int,
 ) : Closeable {
     private val ids = direct(256 * Int.SIZE_BYTES)
     private val mask = direct(256 * Int.SIZE_BYTES)
     private val cross = Array(12) { direct(1 * 8 * 256 * 64 * Float.SIZE_BYTES) }
     private val past = Array(12) { direct(1 * 8 * 255 * 64 * Float.SIZE_BYTES) }
+
+    /**
+     * Tokens emitted by the most recent [translate].
+     *
+     * Read by the benchmark path right after the call, on the same thread —
+     * translate() is only ever invoked from the single inference worker, so a
+     * plain field is sufficient and adds nothing to the hot loop.
+     */
+    @Volatile
+    var lastOutputTokens: Int = 0
+        private set
     private val present = Array(12) { direct(1 * 8 * 1 * 64 * Float.SIZE_BYTES) }
-    private val logits = direct(53_739 * Float.SIZE_BYTES)
+    private val logits = direct(idToToken.size * Float.SIZE_BYTES)
     private val decoderId = direct(Int.SIZE_BYTES)
     private val position = direct(Int.SIZE_BYTES)
 
     companion object {
-        fun load(root: File): QnnMarianTranslator {
+        fun load(root: File, stagePrefix: String): QnnMarianTranslator {
             val vocabObject = JSONObject(File(root, "mt_vocab.json").readText())
             val vocab = HashMap<String, Int>(vocabObject.length() * 2)
             val idToToken = arrayOfNulls<String>(vocabObject.length())
@@ -566,13 +631,25 @@ private class QnnMarianTranslator(
                 if (id in idToToken.indices) idToToken[id] = token
             }
             val config = JSONObject(File(root, "mt_config.json").readText())
+            val targetPrefixId = if (config.has("target_prefix_token_id") &&
+                !config.isNull("target_prefix_token_id")) {
+                config.getInt("target_prefix_token_id").also { id ->
+                    require(id in idToToken.indices && idToToken[id] != null) {
+                        "Invalid Marian target prefix token ID $id"
+                    }
+                }
+            } else {
+                null
+            }
             return QnnMarianTranslator(
+                stagePrefix = stagePrefix,
                 sentencePiece = SentencePieceUnigram.load(File(root, "mt_source.spm")),
                 vocab = vocab,
                 idToToken = idToToken,
                 eosId = config.getInt("eos_token_id"),
                 padId = config.getInt("pad_token_id"),
                 decoderStartId = config.getInt("decoder_start_token_id"),
+                targetPrefixId = targetPrefixId,
                 maxLength = config.optInt("max_length", 128).coerceIn(8, 128),
             )
         }
@@ -585,15 +662,22 @@ private class QnnMarianTranslator(
         val maskView = mask.asIntBuffer()
         repeat(256) { idsView.put(it, padId) }
         zero(mask)
-        val sourceCount = minOf(255, pieces.size)
-        repeat(sourceCount) { index ->
-            idsView.put(index, vocab[pieces[index]] ?: 1)
-            maskView.put(index, 1)
+        var sourceCount = 0
+        targetPrefixId?.let { prefix ->
+            idsView.put(sourceCount, prefix)
+            maskView.put(sourceCount, 1)
+            sourceCount++
+        }
+        val pieceCount = minOf(255 - sourceCount, pieces.size)
+        repeat(pieceCount) { index ->
+            idsView.put(sourceCount, vocab[pieces[index]] ?: 1)
+            maskView.put(sourceCount, 1)
+            sourceCount++
         }
         idsView.put(sourceCount, eosId)
         maskView.put(sourceCount, 1)
 
-        execute("mt_encoder", arrayOf(ids, mask), cross)
+        execute("$stagePrefix/mt_encoder", arrayOf(ids, mask), cross)
         past.forEach(::zero)
         val generated = IntArray(maxLength)
         var generatedSize = 0
@@ -612,11 +696,15 @@ private class QnnMarianTranslator(
                 decoderInputs += cross[layer * 2]
                 decoderInputs += cross[layer * 2 + 1]
             }
-            execute("mt_decoder", decoderInputs.toTypedArray(), arrayOf(logits, *present))
+            execute(
+                "$stagePrefix/mt_decoder",
+                decoderInputs.toTypedArray(),
+                arrayOf(logits, *present),
+            )
             val values = logits.asFloatBuffer()
             var next = -1
             var score = Float.NEGATIVE_INFINITY
-            repeat(53_739) { id ->
+            repeat(idToToken.size) { id ->
                 val value = values.get(id)
                 if (id != padId && !value.isNaN() && value > score) {
                     next = id
@@ -639,6 +727,9 @@ private class QnnMarianTranslator(
             }
             current = next
         }
+        // The decoder is autoregressive: mt_ms is proportional to this count, so
+        // a latency row without it cannot be compared against another row.
+        lastOutputTokens = generatedSize
         return buildString {
             repeat(generatedSize) { index ->
                 val token = idToToken.getOrNull(generated[index]) ?: return@repeat

@@ -19,6 +19,7 @@ internal class MarianTranslator private constructor(
     private val eosId: Long,
     private val padId: Long,
     private val decoderStartId: Long,
+    private val targetPrefixId: Long?,
     private val maxLength: Int,
 ) : AutoCloseable {
     companion object {
@@ -69,6 +70,16 @@ internal class MarianTranslator private constructor(
                     idToToken[id] = token
                 }
                 val config = JSONObject(File(directory, "mt_config.json").readText())
+                val targetPrefixId = if (config.has("target_prefix_token_id") &&
+                    !config.isNull("target_prefix_token_id")) {
+                    config.getLong("target_prefix_token_id").also { id ->
+                        require(idToToken.containsKey(id)) {
+                            "Invalid Marian target prefix token ID $id"
+                        }
+                    }
+                } else {
+                    null
+                }
                 return MarianTranslator(
                     environment = environment,
                     encoder = readyEncoder,
@@ -79,6 +90,7 @@ internal class MarianTranslator private constructor(
                     eosId = config.getLong("eos_token_id"),
                     padId = config.getLong("pad_token_id"),
                     decoderStartId = config.getLong("decoder_start_token_id"),
+                    targetPrefixId = targetPrefixId,
                     // A VAD segment is conversational speech, not a document. This
                     // cap prevents a malformed decode from holding the pipeline for
                     // hundreds of CPU passes.
@@ -97,12 +109,17 @@ internal class MarianTranslator private constructor(
         val unknownId = vocab["<unk>"] ?: 1L
         val sourcePieces = sourceSentencePiece.encodeToPieces(text)
         if (sourcePieces.isEmpty()) return ""
-        val pieceCount = minOf(sourcePieces.size, MAX_SOURCE_PIECES)
-        val sourceArray = LongArray(pieceCount + 1)
-        for (index in 0 until pieceCount) {
-            sourceArray[index] = vocab[sourcePieces[index]] ?: unknownId
+        val prefixCount = if (targetPrefixId == null) 0 else 1
+        val pieceCount = minOf(sourcePieces.size, MAX_SOURCE_PIECES - prefixCount)
+        val sourceArray = LongArray(prefixCount + pieceCount + 1)
+        var sourceOffset = 0
+        targetPrefixId?.let { prefix ->
+            sourceArray[sourceOffset++] = prefix
         }
-        sourceArray[pieceCount] = eosId
+        for (index in 0 until pieceCount) {
+            sourceArray[sourceOffset++] = vocab[sourcePieces[index]] ?: unknownId
+        }
+        sourceArray[sourceOffset] = eosId
 
         val sourceShape = longArrayOf(1, sourceArray.size.toLong())
         val maskArray = LongArray(sourceArray.size) { 1L }

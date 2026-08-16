@@ -18,6 +18,8 @@ import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.onevoice.link.core.EngineBackend
+import com.onevoice.link.core.ExecutionPath
+import com.onevoice.link.core.PipelineSegment
 import com.onevoice.link.core.TranslationDirection
 import java.io.File
 import java.util.concurrent.LinkedBlockingQueue
@@ -551,7 +553,18 @@ class HfEngineBackend(context: Context) : EngineBackend {
     }
 
     private fun notifySegment(transcript: String, translation: String?) {
-        runCatching { listener?.onSegment(transcript, translation) }
+        runCatching {
+            listener?.onSegment(
+                PipelineSegment(
+                    transcript = transcript,
+                    translation = translation,
+                    direction = direction,
+                    // This legacy reference backend has no acoustic router.
+                    lidConfidence = 1f,
+                    executionPath = ExecutionPath.CPU_FALLBACK,
+                ),
+            )
+        }
             .onFailure { Log.e(TAG, "Pipeline listener rejected a segment", it) }
     }
 

@@ -1,5 +1,11 @@
 # Model handoff contract (AI / model team → native integration)
 
+> [!IMPORTANT]
+> Đây là template lịch sử cho thiết kế một graph S2ST/Oboe cũ. Runtime Hybrid
+> hiện tại dùng sáu QNN context cùng host RNN-T/CPU Kokoro; contract production
+> đã đối chiếu từ binary nằm ở [HANDOFF_FORM.md](HANDOFF_FORM.md). Không dùng các
+> tên `onevoice_s2st`, chunk 1 giây hoặc giả định QNN v2.36 bên dưới để sửa app.
+
 This is the checklist the AI team follows to hand the model over. **A `.bin` alone is not runnable** — the native layer needs the tensor/graph contract below to bind inputs and outputs. Fill in every 🟨 field and deliver the artifacts in [§1](#1-deliverables-checklist).
 
 > How these fields map to code: `graphName`, `contextBinaryPath`, `backendLibPath`, `inputSampleCount` feed `InferenceConfig` ([qnn_inference.h](../native-core/include/qnn_inference.h)); the tensor table drives `mapTensors_()`; the audio/quantization semantics drive `execute()` in [qnn_inference.cpp](../native-core/src/qnn_inference.cpp).

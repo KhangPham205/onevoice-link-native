@@ -20,6 +20,26 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 
 
+def target_prefix_token_id(source: Path) -> int | None:
+    """Return Marian's optional sentence-initial target-language token ID."""
+    tokenizer_path = source / "tokenizer_config.json"
+    vocab_path = source / "vocab.json"
+    if not tokenizer_path.is_file() or not vocab_path.is_file():
+        return None
+
+    tokenizer = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+    target_lang = tokenizer.get("target_lang")
+    if not isinstance(target_lang, str) or not target_lang:
+        return None
+    target_tag = (target_lang if target_lang.startswith(">>") and
+                  target_lang.endswith("<<") else f">>{target_lang}<<")
+    vocab = json.loads(vocab_path.read_text(encoding="utf-8"))
+    token_id = vocab.get(target_tag)
+    if isinstance(token_id, int) and not isinstance(token_id, bool):
+        return token_id
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--direction", choices=["vi-en", "en-vi"], default="vi-en",
@@ -56,6 +76,13 @@ def main() -> None:
         "max_length": gen.get("max_length", cfg.get("max_length", 128)),
     }
     assert None not in mt_config.values(), f"missing ids: {mt_config}"
+    prefix_id = target_prefix_token_id(SRC)
+    if prefix_id is not None:
+        # Tatoeba Marian models such as opus-mt-en-vi require the target tag
+        # before SentencePiece source IDs. Persist the already-resolved ID so
+        # Kotlin does not have to reproduce MarianTokenizer's special-token
+        # parsing on device.
+        mt_config["target_prefix_token_id"] = prefix_id
     (OUT / "mt_config.json").write_text(json.dumps(mt_config, indent=2), encoding="utf-8")
 
     if args.int8:

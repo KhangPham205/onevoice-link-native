@@ -4,6 +4,7 @@
 
     <!-- Low-latency full-duplex capture for the S2ST pipeline. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="true" />
@@ -65,6 +66,29 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Benchmark control surface, driven by `adb shell am broadcast`.
+
+            It has to be exported: on this Android build a shell broadcast to a
+            non-exported receiver is dropped before it is even enqueued, even
+            when -n names the component (verified on the target — the
+            ActivityManager "Broadcasting" line never appears).
+
+            A signature-level android:permission was tried first and silently
+            swallowed the broadcast on this build, so the guard is instead:
+            every action is inert unless <filesDir>/bench exists, and that
+            directory can only be created through run-as, which requires a
+            debuggable build. A release build therefore carries the class but
+            can never be made to act on it.
+        -->
+        <receiver
+            android:name=".core.BenchControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.onevoice.link.BENCH" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

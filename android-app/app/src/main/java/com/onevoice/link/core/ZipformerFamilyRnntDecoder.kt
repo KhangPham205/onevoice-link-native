@@ -1,5 +1,6 @@
 package com.onevoice.link.core
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
@@ -10,12 +11,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
 
-/** CPU decoder/joiner for the Gipformer encoder context that executes on HTP. */
-internal class GipformerRnntDecoder private constructor(
+/** CPU decoder/joiner shared by the GIPFormer-VI and Zipformer-EN HTP encoders. */
+internal class ZipformerFamilyRnntDecoder private constructor(
     private val environment: OrtEnvironment,
     private val decoder: OrtSession,
     private val joiner: OrtSession,
     private val tokens: List<String>,
+    private val vocabSize: Int,
 ) : Closeable {
     companion object {
         const val FEATURE_FRAMES = 1000
@@ -24,17 +26,19 @@ internal class GipformerRnntDecoder private constructor(
         const val ENCODER_DIM = 512
 
         private const val CONTEXT_SIZE = 2
-        private const val VOCAB_SIZE = 2000
         private const val BLANK_ID = 0
         private const val UNK_ID = 2
 
-        fun load(directionRoot: File): GipformerRnntDecoder {
-            val decoderFile = File(directionRoot, "asr_gipformer_decoder.onnx")
-            val joinerFile = File(directionRoot, "asr_gipformer_joiner.onnx")
-            val tokensFile = File(directionRoot, "asr_gipformer_tokens.txt")
+        fun load(directionRoot: File, artifactPrefix: String): ZipformerFamilyRnntDecoder {
+            require(artifactPrefix.matches(Regex("asr_[a-z0-9_]+"))) {
+                "Unsafe RNN-T artifact prefix: $artifactPrefix"
+            }
+            val decoderFile = File(directionRoot, "${artifactPrefix}_decoder.onnx")
+            val joinerFile = File(directionRoot, "${artifactPrefix}_joiner.onnx")
+            val tokensFile = File(directionRoot, "${artifactPrefix}_tokens.txt")
             listOf(decoderFile, joinerFile, tokensFile).forEach { file ->
                 require(file.isFile && file.length() > 0L) {
-                    "Missing Gipformer artifact: ${file.absolutePath}"
+                    "Missing RNN-T host artifact: ${file.absolutePath}"
                 }
             }
 
@@ -45,7 +49,7 @@ internal class GipformerRnntDecoder private constructor(
                 OrtSession.SessionOptions().use { options ->
                     // These two networks are only ~9 MB combined. One thread and
                     // no retained arena keep Hybrid memory bounded while HTP owns
-                    // the 65 M-parameter encoder.
+                    // the much larger encoder.
                     options.setIntraOpNumThreads(1)
                     options.setInterOpNumThreads(1)
                     options.setMemoryPatternOptimization(false)
@@ -55,14 +59,22 @@ internal class GipformerRnntDecoder private constructor(
                 }
                 val readyDecoder = checkNotNull(decoder)
                 val readyJoiner = checkNotNull(joiner)
-                validateDecoder(readyDecoder)
-                validateJoiner(readyJoiner)
                 val tokens = parseTokens(tokensFile)
-                return GipformerRnntDecoder(
+                val vocabSize = decoderVocabularySize(readyDecoder)
+                require(tokens.size >= vocabSize) {
+                    "RNN-T token table has ${tokens.size} rows, model needs $vocabSize"
+                }
+                validateDecoder(readyDecoder, vocabSize)
+                validateJoiner(readyJoiner, vocabSize)
+                return ZipformerFamilyRnntDecoder(
                     environment = environment,
                     decoder = readyDecoder,
                     joiner = readyJoiner,
-                    tokens = tokens,
+                    // Some icefall exports append disambiguation symbols such
+                    // as #0/#1 after the joiner vocabulary. They are tokenizer
+                    // metadata, not logits, and must never extend argmax.
+                    tokens = tokens.take(vocabSize),
+                    vocabSize = vocabSize,
                 )
             } catch (failure: Throwable) {
                 runCatching { joiner?.close() }
@@ -71,62 +83,85 @@ internal class GipformerRnntDecoder private constructor(
             }
         }
 
-        private fun validateDecoder(session: OrtSession) {
+        private fun validateDecoder(session: OrtSession, vocabSize: Int) {
             require(session.inputNames == setOf("y") &&
                 session.outputNames == setOf("decoder_out")) {
-                "Unexpected Gipformer decoder contract: ${session.inputNames} -> " +
+                "Unexpected RNN-T decoder contract: ${session.inputNames} -> " +
                     session.outputNames
             }
             val input = session.inputInfo.getValue("y").info as? TensorInfo
-                ?: error("Gipformer decoder y is not a tensor")
+                ?: error("RNN-T decoder y is not a tensor")
             val output = session.outputInfo.getValue("decoder_out").info as? TensorInfo
-                ?: error("Gipformer decoder_out is not a tensor")
-            require(input.shape.contentEquals(longArrayOf(-1L, CONTEXT_SIZE.toLong()))) {
-                "Unexpected Gipformer decoder input shape: ${input.shape.contentToString()}"
+                ?: error("RNN-T decoder_out is not a tensor")
+            require(input.type == OnnxJavaType.INT64 &&
+                input.shape.contentEquals(longArrayOf(-1L, CONTEXT_SIZE.toLong()))) {
+                "Unexpected RNN-T decoder input: type=${input.type} " +
+                    "shape=${input.shape.contentToString()}"
             }
-            require(output.shape.contentEquals(longArrayOf(-1L, ENCODER_DIM.toLong()))) {
-                "Unexpected Gipformer decoder output shape: ${output.shape.contentToString()}"
+            require(output.type == OnnxJavaType.FLOAT &&
+                output.shape.contentEquals(longArrayOf(-1L, ENCODER_DIM.toLong()))) {
+                "Unexpected RNN-T decoder output: type=${output.type} " +
+                    "shape=${output.shape.contentToString()}"
             }
             require(session.metadata.customMetadata["context_size"] == CONTEXT_SIZE.toString() &&
-                session.metadata.customMetadata["vocab_size"] == VOCAB_SIZE.toString()) {
-                "Unexpected Gipformer decoder metadata: ${session.metadata.customMetadata}"
+                session.metadata.customMetadata["vocab_size"] == vocabSize.toString()) {
+                "Unexpected RNN-T decoder metadata: ${session.metadata.customMetadata}"
             }
         }
 
-        private fun validateJoiner(session: OrtSession) {
+        private fun decoderVocabularySize(session: OrtSession): Int =
+            session.metadata.customMetadata["vocab_size"]?.toIntOrNull()
+                ?.takeIf { it > UNK_ID }
+                ?: error(
+                    "Missing/invalid RNN-T vocab_size metadata: " +
+                        session.metadata.customMetadata,
+                )
+
+        private fun validateJoiner(session: OrtSession, vocabSize: Int) {
             require(session.inputNames == setOf("encoder_out", "decoder_out") &&
                 session.outputNames == setOf("logit")) {
-                "Unexpected Gipformer joiner contract: ${session.inputNames} -> " +
+                "Unexpected RNN-T joiner contract: ${session.inputNames} -> " +
                     session.outputNames
             }
             session.inputInfo.forEach { (name, node) ->
                 val info = node.info as? TensorInfo
-                    ?: error("Gipformer joiner $name is not a tensor")
-                require(info.shape.contentEquals(longArrayOf(-1L, ENCODER_DIM.toLong()))) {
-                    "Unexpected Gipformer joiner $name shape: ${info.shape.contentToString()}"
+                    ?: error("RNN-T joiner $name is not a tensor")
+                require(info.type == OnnxJavaType.FLOAT &&
+                    info.shape.contentEquals(longArrayOf(-1L, ENCODER_DIM.toLong()))) {
+                    "Unexpected RNN-T joiner $name: type=${info.type} " +
+                        "shape=${info.shape.contentToString()}"
                 }
             }
             val output = session.outputInfo.getValue("logit").info as? TensorInfo
-                ?: error("Gipformer joiner logit is not a tensor")
-            require(output.shape.contentEquals(longArrayOf(-1L, VOCAB_SIZE.toLong()))) {
-                "Unexpected Gipformer joiner output shape: ${output.shape.contentToString()}"
+                ?: error("RNN-T joiner logit is not a tensor")
+            require(output.type == OnnxJavaType.FLOAT &&
+                output.shape.contentEquals(longArrayOf(-1L, vocabSize.toLong()))) {
+                "Unexpected RNN-T joiner output: type=${output.type} " +
+                    "shape=${output.shape.contentToString()}"
+            }
+            require(
+                session.metadata.customMetadata["joiner_dim"] == ENCODER_DIM.toString(),
+            ) {
+                "Unexpected RNN-T joiner metadata: ${session.metadata.customMetadata}"
             }
         }
 
         private fun parseTokens(file: File): List<String> {
-            val indexed = arrayOfNulls<String>(VOCAB_SIZE)
-            file.forEachLine { line ->
+            val rows = file.readLines().filter(String::isNotBlank)
+            require(rows.size >= 4) { "RNN-T vocabulary is empty: ${file.absolutePath}" }
+            val indexed = arrayOfNulls<String>(rows.size)
+            rows.forEach { line ->
                 val separator = line.lastIndexOf(' ')
-                require(separator > 0) { "Bad Gipformer token row: $line" }
+                require(separator > 0) { "Bad RNN-T token row: $line" }
                 val id = line.substring(separator + 1).trim().toInt()
                 require(id in indexed.indices && indexed[id] == null) {
-                    "Invalid/duplicate Gipformer token ID $id"
+                    "Invalid/duplicate RNN-T token ID $id"
                 }
                 indexed[id] = line.substring(0, separator)
             }
             require(indexed.all { it != null } && indexed[BLANK_ID] == "<blk>" &&
                 indexed[UNK_ID] == "<unk>") {
-                "Unexpected Gipformer vocabulary in ${file.absolutePath}"
+                "Unexpected RNN-T vocabulary in ${file.absolutePath}"
             }
             return indexed.map { checkNotNull(it) }
         }
@@ -158,10 +193,10 @@ internal class GipformerRnntDecoder private constructor(
     fun decode(encoderOutput: ByteBuffer, validFrames: Int): String {
         require(encoderOutput.isDirect &&
             encoderOutput.capacity() >= ENCODER_FRAMES * ENCODER_DIM * Float.SIZE_BYTES) {
-            "Gipformer encoder output must hold [1,248,512] FLOAT32"
+            "RNN-T encoder output must hold [1,248,512] FLOAT32"
         }
         require(validFrames in 1..ENCODER_FRAMES) {
-            "Invalid Gipformer encoder length $validFrames"
+            "Invalid RNN-T encoder length $validFrames"
         }
         val source = encoderOutput.order(ByteOrder.nativeOrder()).asFloatBuffer()
         val emitted = ArrayList<Int>(validFrames / 2)
@@ -200,10 +235,10 @@ internal class GipformerRnntDecoder private constructor(
     private fun runDecoder() {
         decoder.run(mapOf("y" to contextTensor)).use { result ->
             val output = result.get(0) as? OnnxTensor
-                ?: error("Gipformer decoder returned a non-tensor")
+                ?: error("RNN-T decoder returned a non-tensor")
             val values = output.floatBuffer
             require(values.remaining() == ENCODER_DIM) {
-                "Gipformer decoder returned ${values.remaining()} values"
+                "RNN-T decoder returned ${values.remaining()} values"
             }
             repeat(ENCODER_DIM) { index -> decoderFrame.put(index, values.get(index)) }
         }
@@ -213,14 +248,14 @@ internal class GipformerRnntDecoder private constructor(
         mapOf("encoder_out" to encoderTensor, "decoder_out" to decoderTensor),
     ).use { result ->
         val output = result.get(0) as? OnnxTensor
-            ?: error("Gipformer joiner returned a non-tensor")
+            ?: error("RNN-T joiner returned a non-tensor")
         val logits = output.floatBuffer
-        require(logits.remaining() == VOCAB_SIZE) {
-            "Gipformer joiner returned ${logits.remaining()} logits"
+        require(logits.remaining() == vocabSize) {
+            "RNN-T joiner returned ${logits.remaining()} logits"
         }
         var best = BLANK_ID
         var bestScore = Float.NEGATIVE_INFINITY
-        repeat(VOCAB_SIZE) { id ->
+        repeat(vocabSize) { id ->
             val score = logits.get(id)
             if (!score.isNaN() && score > bestScore) {
                 best = id

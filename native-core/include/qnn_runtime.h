@@ -124,10 +124,59 @@ public:
     bool executeCascade(const int16_t* input, std::size_t sampleCount,
                         std::vector<int16_t>& output);
 
+    // ---- Benchmarking -----------------------------------------------------
+
+    /** Per-execute accelerator timings harvested from a QNN profile handle. */
+    struct ProfileSample {
+        std::string stage;
+        uint64_t    wallUs        = 0;  // CLOCK_MONOTONIC around graphExecute
+        uint64_t    executeUs     = 0;  // QNN_PROFILE_EVENTTYPE_EXECUTE (400)
+        uint64_t    acceleratorUs = 0;  // ..._EXECUTE_DEVICE (407): time on HTP
+        uint64_t    queueWaitUs   = 0;  // ..._EXECUTE_QUEUE_WAIT (405)
+        bool        profiled      = false;
+    };
+
+    /**
+     * Turn per-execute QNN profiling on or off.
+     *
+     * Off by default: a profile handle costs real time inside graphExecute, so
+     * latency baselines must be measured in a cohort where this was never
+     * enabled. Only BASIC is exposed — DETAILED adds per-node events that cost
+     * far more than the numbers they explain.
+     *
+     * Returns false when the backend is down or the profile handle could not be
+     * created; profiling then stays off rather than half-enabled.
+     */
+    bool setProfilingEnabled(bool enabled);
+    bool profilingEnabled() const noexcept;
+
+    /**
+     * Move the accumulated samples out. Called from a benchmark thread between
+     * utterances, never from the audio path.
+     */
+    std::vector<ProfileSample> drainProfile();
+
+    /** Pin the HTP DVFS/latency knobs. Numbers measured without this are noise. */
+    struct PowerConfig {
+        // Mirrors QnnHtpPerfInfrastructure_PowerMode_t; the string is what ends
+        // up in the CSV so a reader can tell which mode produced a row.
+        std::string mode = "burst";
+        uint32_t    rpcControlLatencyUs = 100;
+        uint32_t    rpcPollingTimeUs    = 9999;
+    };
+    bool applyPowerConfig(const PowerConfig& config, std::string& error);
+    const std::string& activePowerMode() const noexcept;
+
 private:
     struct State;
     std::unique_ptr<State> state_;
     std::atomic<bool>      ready_{false};
+
+    // Defined only when the SDK is present; the declarations stay
+    // unconditional so the class layout does not depend on __has_include.
+    void collectProfile(const std::string& stage, uint64_t wallUs);
+    void foldProfileEvent(uint64_t eventId, ProfileSample& sample,
+                          bool logSchema, int depth);
 };
 
 }  // namespace onevoice

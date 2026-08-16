@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # ============================================================================
-# push-npu-models.sh — stage the QNN context binaries onto a connected device
+# push-npu-models.sh — stage the automatic Hybrid bundle onto a device
 # ----------------------------------------------------------------------------
-# Copies the deploy subset of onevoice-npu-bins/ into the layout the app expects:
+# Copies QNN contexts plus the required host-side models into the layout the app
+# expects. Hybrid is bidirectional and chooses a branch from SpeechFlow audio LID:
 #
-#   <filesDir>/models/npu/vi-en/{asr_parakeet_vi,asr_gipformer_encoder,
-#                                mt_encoder,mt_decoder,tts_encoder,
-#                                tts_prosody,tts_decoder}.bin
+#   <filesDir>/models/npu/shared/speechflow_langid.tflite
+#   <filesDir>/models/npu/shared/speechflow_{labels,contract}.json
+#   <filesDir>/models/npu/vi-en/{asr_gipformer_encoder,mt_encoder,mt_decoder}.bin
 #   <filesDir>/models/npu/vi-en/asr_gipformer_{decoder,joiner}.onnx
 #   <filesDir>/models/npu/vi-en/asr_gipformer_{tokens,bpe,config}.*
-#   <filesDir>/models/npu/en-vi/{mt_encoder,mt_decoder,tts_encoder,tts_decoder}.bin
+#   <filesDir>/models/npu/en-vi/{asr_zipformer_encoder,mt_encoder,mt_decoder}.bin
+#   <filesDir>/models/npu/en-vi/asr_zipformer_{decoder,joiner}.onnx
+#   <filesDir>/models/npu/en-vi/asr_zipformer_tokens.txt
+#
+# Each direction also gets Marian host tokenizers, a whole-utterance CPU Kokoro
+# model, voice/token files and exact eSpeak data. A complete CPU ASR+MT branch
+# lives under `fallback/` and is loaded only after that direction's HTP path
+# throws; recovery always restarts from the original bounded PCM utterance.
 #
 # WHY THE TWO-STEP COPY (and not a plain `adb push` to external storage):
 # on Android 11+ the app process cannot see files under its own
@@ -27,10 +35,11 @@
 # tools/models/gen_npu_manifest.py whenever the model team ships new binaries,
 # or graphRetrieve will fail.
 #
-# The same folder also receives the small tokenizer/voice assets needed by the
-# host glue. Learned inference remains in the QNN .bin contexts.
+# The manifest describes only QNN context binaries. SpeechFlow LID, transducer
+# decoder/joiner pieces and CPU Kokoro/ASR files must not be presented as HTP
+# stages merely because this script deploys them beside the contexts.
 #
-# Usage: tools/models/push-npu-models.sh [vi-en|en-vi|all] [adb-serial]
+# Usage: tools/models/push-npu-models.sh [auto|vi-en|en-vi|all] [adb-serial]
 # ============================================================================
 set -euo pipefail
 
@@ -38,9 +47,16 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BINS="$REPO/onevoice-npu-bins"
 PKG="com.onevoice.link"
 TMP="/data/local/tmp/onevoice_stage.part"
-WHICH="${1:-all}"
+WHICH="${1:-auto}"
 SERIAL="${2:-}"
 ADB="${ADB:-adb}"
+
+for command_name in tar sha256sum find stat awk grep; do
+  command -v "$command_name" >/dev/null 2>&1 || {
+    echo "!! required host command is missing: $command_name" >&2
+    exit 1
+  }
+done
 
 adb_cmd() {
   if [ -n "$SERIAL" ]; then
@@ -50,9 +66,14 @@ adb_cmd() {
   fi
 }
 
-# dest-relative-path <TAB> source-relative-path
+# dest-relative-path <TAB> source-relative-path (relative to onevoice-npu-bins)
+read -r -d '' SHARED <<'EOF' || true
+shared/speechflow_langid.tflite	../models-npu-generated/lid/speechflow_langid.tflite
+shared/speechflow_labels.json	../models-npu-generated/lid/speechflow_labels.json
+shared/speechflow_contract.json	../models-npu-generated/lid/speechflow_contract.json
+EOF
+
 read -r -d '' VI_EN <<'EOF' || true
-vi-en/asr_parakeet_vi.bin	asr/parakeet_ctc_vi__DEPLOY/logits.bin
 vi-en/asr_gipformer_encoder.bin	asr/gipformer_65m_rnnt-bundle/bin/encoder.bin
 vi-en/asr_gipformer_decoder.onnx	asr/gipformer_65m_rnnt-bundle/decode/decoder-epoch-35-avg-6.onnx
 vi-en/asr_gipformer_joiner.onnx	asr/gipformer_65m_rnnt-bundle/decode/joiner-epoch-35-avg-6.onnx
@@ -61,36 +82,93 @@ vi-en/asr_gipformer_bpe.model	asr/gipformer_65m_rnnt-bundle/decode/bpe.model
 vi-en/asr_gipformer_config.json	asr/gipformer_65m_rnnt-bundle/decode/config.json
 vi-en/mt_encoder.bin	mt/opus_mt_vi_en__float_8gen2/encoder_float.bin
 vi-en/mt_decoder.bin	mt/opus_mt_vi_en__float_8gen2/decoder_float.bin
-vi-en/tts_encoder.bin	tts/kokoro_en__encoder_8gen2/encoder.bin
-vi-en/tts_prosody.bin	../models-npu-generated/tts/kokoro_en_prosody_w8a8.bin
-vi-en/tts_decoder.bin	tts/kokoro_en__decoder_npu_8gen2/decoder_npu.bin
-vi-en/asr_tokens.txt	../models-hf/asr-vi/tokens.txt
 vi-en/mt_source.spm	../models-hf/mt-vi-en/source.spm
 vi-en/mt_target.spm	../models-hf/mt-vi-en/target.spm
 vi-en/mt_vocab.json	../models-hf/mt-vi-en/vocab.json
 vi-en/mt_config.json	../models-hf/mt-vi-en/mt_config.json
 vi-en/tts_tokens.txt	../models-hf/tts-en/tokens.txt
 vi-en/tts_voices.bin	../models-hf/tts-en/voices.bin
-vi-en/tts_frontend.onnx	../models-npu-generated/tts/kokoro_frontend_bridge.onnx
 vi-en/tts_cpu.onnx	../models-hf/tts-en/model.onnx
+vi-en/fallback/asr/model.onnx	../models-hf/asr-vi/model.int8.onnx
+vi-en/fallback/asr/tokens.txt	../models-hf/asr-vi/tokens.txt
+vi-en/fallback/mt/encoder_model.onnx	../models-hf/mt-vi-en/encoder_model.onnx
+vi-en/fallback/mt/decoder_model.onnx	../models-hf/mt-vi-en/decoder_model.onnx
+vi-en/fallback/mt/source.spm	../models-hf/mt-vi-en/source.spm
+vi-en/fallback/mt/vocab.json	../models-hf/mt-vi-en/vocab.json
+vi-en/fallback/mt/mt_config.json	../models-hf/mt-vi-en/mt_config.json
 EOF
 
-# NOTE: en-vi has no ASR entry on purpose — the package ships Vietnamese ASR
-# only, so this direction cannot run end-to-end yet (HANDOFF.md §4). The MT/TTS
-# halves are staged anyway so the app can load and verify them.
 read -r -d '' EN_VI <<'EOF' || true
+en-vi/asr_zipformer_encoder.bin	asr/zipformer_small_en-bundle/bin/encoder.bin
+en-vi/asr_zipformer_decoder.onnx	asr/zipformer_small_en-bundle/decode/decoder-epoch-99-avg-1.onnx
+en-vi/asr_zipformer_joiner.onnx	asr/zipformer_small_en-bundle/decode/joiner-epoch-99-avg-1.onnx
+en-vi/asr_zipformer_tokens.txt	asr/zipformer_small_en-bundle/decode/tokens.txt
 en-vi/mt_encoder.bin	mt/opus_mt_en_vi__float_8gen2/encoder_float.bin
 en-vi/mt_decoder.bin	mt/opus_mt_en_vi__float_8gen2/decoder_float.bin
-en-vi/tts_encoder.bin	tts/kokoro_vi__encoder_8gen2/encoder.bin
-en-vi/tts_decoder.bin	tts/kokoro_vi__decoder_npu_8gen2/decoder_npu.bin
+en-vi/mt_source.spm	../models-hf/mt-en-vi/source.spm
+en-vi/mt_target.spm	../models-hf/mt-en-vi/target.spm
+en-vi/mt_vocab.json	../models-hf/mt-en-vi/vocab.json
+en-vi/mt_config.json	../models-hf/mt-en-vi/mt_config.json
+en-vi/tts_tokens.txt	../models-hf/tts-vi/tokens.txt
+en-vi/tts_voices.bin	../models-hf/tts-vi/voices.bin
+en-vi/tts_cpu.onnx	../models-hf/tts-vi/model.onnx
+en-vi/fallback/asr/model.onnx	../models-hf/asr-en/model.int8.onnx
+en-vi/fallback/asr/tokens.txt	../models-hf/asr-en/tokens.txt
+en-vi/fallback/mt/encoder_model.onnx	../models-hf/mt-en-vi/encoder_model.onnx
+en-vi/fallback/mt/decoder_model.onnx	../models-hf/mt-en-vi/decoder_model.onnx
+en-vi/fallback/mt/source.spm	../models-hf/mt-en-vi/source.spm
+en-vi/fallback/mt/vocab.json	../models-hf/mt-en-vi/vocab.json
+en-vi/fallback/mt/mt_config.json	../models-hf/mt-en-vi/mt_config.json
 EOF
 
+STAGE_VI=0
+STAGE_EN=0
 case "$WHICH" in
-  vi-en) PLAN="$VI_EN" ;;
-  en-vi) PLAN="$EN_VI" ;;
-  all)   PLAN="$VI_EN"$'\n'"$EN_VI" ;;
-  *) echo "usage: $0 [vi-en|en-vi|all]" >&2; exit 2 ;;
+  vi-en) PLAN="$SHARED"$'\n'"$VI_EN"; STAGE_VI=1 ;;
+  en-vi) PLAN="$SHARED"$'\n'"$EN_VI"; STAGE_EN=1 ;;
+  auto|all)
+    PLAN="$SHARED"$'\n'"$VI_EN"$'\n'"$EN_VI"
+    STAGE_VI=1
+    STAGE_EN=1
+    ;;
+  *) echo "usage: $0 [auto|vi-en|en-vi|all] [adb-serial]" >&2; exit 2 ;;
 esac
+
+# Refuse a partial deployment before touching the phone. In particular,
+# convert_speechflow_lid.py writes the three shared files as one reviewed
+# contract; a .tflite without its exact labels/frontend metadata is not runnable
+# safely — the label order is what decides VI vs EN routing.
+missing_sources=0
+while IFS=$'\t' read -r dest src; do
+  [ -n "${dest:-}" ] || continue
+  local_file="$BINS/$src"
+  if [ ! -s "$local_file" ]; then
+    echo "  MISSING SOURCE  $src" >&2
+    missing_sources=$((missing_sources + 1))
+  fi
+done <<< "$PLAN"
+if [ "$missing_sources" -ne 0 ]; then
+  echo "!! $missing_sources required Hybrid artifact(s) are absent." >&2
+  echo "   Generate the LID trio with tools/models/convert_speechflow_lid.py and prepare" >&2
+  echo "   both direction bundles before retrying; the device was not modified." >&2
+  exit 1
+fi
+
+ESPEAK_SRC="$REPO/models-hf/espeak-ng-data"
+for required in phontab phondata phonindex en_dict vi_dict; do
+  if [ ! -s "$ESPEAK_SRC/$required" ]; then
+    echo "!! incomplete eSpeak data: $ESPEAK_SRC/$required" >&2
+    exit 1
+  fi
+done
+if find "$ESPEAK_SRC" -type f -empty -print -quit | grep -q .; then
+  echo "!! eSpeak data contains an empty file" >&2
+  exit 1
+fi
+if find "$ESPEAK_SRC" -type l -print -quit | grep -q .; then
+  echo "!! refusing to archive symlinks from $ESPEAK_SRC" >&2
+  exit 1
+fi
 
 # ---- Preflight: one device, the right chip, a debuggable install -----------
 if [ "$(adb_cmd devices | grep -c '\sdevice$')" -ne 1 ]; then
@@ -115,21 +193,26 @@ if ! adb_cmd shell run-as "$PKG" true </dev/null 2>/dev/null; then
   echo "!! run-as $PKG failed — install the debuggable build first." >&2
   exit 1
 fi
+for remote_tool in tar sha256sum; do
+  if ! adb_cmd shell run-as "$PKG" \
+      /system/bin/test -x "/system/bin/$remote_tool" </dev/null \
+      >/dev/null 2>&1; then
+    echo "!! device is missing /system/bin/$remote_tool" >&2
+    exit 1
+  fi
+done
 
 # run-as starts in the app's data dir (/data/user/0/<pkg>), NOT filesDir, so the
 # relative path has to include files/.
 ROOT="files/models/npu"
-adb_cmd shell run-as "$PKG" mkdir -p "$ROOT/vi-en" "$ROOT/en-vi" </dev/null
+adb_cmd shell run-as "$PKG" mkdir -p \
+  "$ROOT/shared" "$ROOT/vi-en" "$ROOT/en-vi" </dev/null
 
 pushed=0
 skipped=0
 while IFS=$'\t' read -r dest src; do
   [ -n "${dest:-}" ] || continue
   local_file="$BINS/$src"
-  if [ ! -f "$local_file" ]; then
-    echo "  MISSING SOURCE  $src" >&2
-    continue
-  fi
   local_size=$(stat -c%s "$local_file")
   local_sha=$(sha256sum "$local_file" | awk '{print $1}')
 
@@ -152,6 +235,8 @@ while IFS=$'\t' read -r dest src; do
     "$dest" "$((local_size / 1048576))" "${local_sha:0:12}"
   adb_cmd push "$local_file" "$TMP" >/dev/null </dev/null
   remote_part="$ROOT/$dest.part"
+  remote_parent="${remote_part%/*}"
+  adb_cmd shell run-as "$PKG" mkdir -p "$remote_parent" </dev/null
   adb_cmd shell run-as "$PKG" cp "$TMP" "$remote_part" </dev/null
 
   # Never expose a partial model under its final name. Verify the app-owned
@@ -177,32 +262,75 @@ while IFS=$'\t' read -r dest src; do
     adb_cmd shell rm -f "$TMP" </dev/null || true
     exit 1
   fi
-  # Free the shell-owned staging copy immediately: Parakeet is still retained
-  # side-by-side and is the largest single blob at roughly 1.15 GB.
+  # Free the shell-owned staging copy immediately so every large model needs at
+  # most one temporary duplicate regardless of the complete bundle size.
   adb_cmd shell rm -f "$TMP" </dev/null
   pushed=$((pushed + 1))
 done <<< "$PLAN"
 
-# Kokoro v0.19 expects eSpeak phonemes, not plain Latin characters. Stage the
-# shared 18 MB eSpeak data tree as one streaming tar only for the runnable
-# VI->EN pipeline. This adds no second archive on the laptop or phone.
-if [ "$WHICH" = "vi-en" ] || [ "$WHICH" = "all" ]; then
-  ESPEAK_PARENT="$REPO/models-hf"
-  ESPEAK_SRC="$ESPEAK_PARENT/espeak-ng-data"
-  if [ ! -f "$ESPEAK_SRC/phontab" ] ||
-     [ ! -f "$ESPEAK_SRC/phondata" ] ||
-     [ ! -f "$ESPEAK_SRC/phonindex" ] ||
-     [ ! -f "$ESPEAK_SRC/en_dict" ]; then
-    echo "!! incomplete eSpeak data under $ESPEAK_SRC" >&2
+emit_tree_checksums() {
+  local source_root="$1"
+  local remote_root="$2"
+  local local_file relative digest_line digest
+  while IFS= read -r -d '' local_file; do
+    relative="${local_file#"$source_root/"}"
+    case "$relative" in
+      *$'\n'*|*\\*)
+        echo "unsupported eSpeak path: $relative" >&2
+        return 1
+        ;;
+    esac
+    digest_line=$(sha256sum "$local_file")
+    digest="${digest_line%% *}"
+    printf '%s  %s/%s\n' "$digest" "$remote_root" "$relative"
+  done < <(find "$source_root" -type f -print0)
+}
+
+stage_espeak() {
+  local direction="$1"
+  local final="$ROOT/$direction/espeak-ng-data"
+  local part="$final.part"
+  local previous="$final.previous"
+
+  if emit_tree_checksums "$ESPEAK_SRC" "$final" |
+      adb_cmd shell -T run-as "$PKG" sha256sum -c - \
+        >/dev/null 2>&1; then
+    printf '  = %-36s verified tree sha256\n' "$direction/espeak-ng-data"
+    return
+  fi
+
+  printf '  → %-36s streaming + full SHA-256 verification\n' \
+    "$direction/espeak-ng-data"
+  adb_cmd shell run-as "$PKG" rm -rf "$part" "$previous" </dev/null
+  adb_cmd shell run-as "$PKG" mkdir -p "$part" </dev/null
+  tar -C "$ESPEAK_SRC" -cf - . |
+    adb_cmd shell -T run-as "$PKG" tar -C "$part" -xf -
+  emit_tree_checksums "$ESPEAK_SRC" "$part" |
+    adb_cmd shell -T run-as "$PKG" sha256sum -c - >/dev/null
+
+  # Publish only a fully verified tree. Renames remain inside filesDir's /data
+  # filesystem; the final part->destination operation is atomic.
+  if adb_cmd shell run-as "$PKG" test -d "$final" </dev/null; then
+    adb_cmd shell run-as "$PKG" mv "$final" "$previous" </dev/null
+  fi
+  if ! adb_cmd shell run-as "$PKG" mv "$part" "$final" </dev/null; then
+    if adb_cmd shell run-as "$PKG" test -d "$previous" </dev/null; then
+      adb_cmd shell run-as "$PKG" mv "$previous" "$final" </dev/null
+    fi
+    echo "!! failed to publish $direction/espeak-ng-data" >&2
     exit 1
   fi
-  echo "  → vi-en/espeak-ng-data       streaming frontend data"
-  tar -C "$ESPEAK_PARENT" -cf - espeak-ng-data |
-    adb_cmd shell run-as "$PKG" tar -C "$ROOT/vi-en" -xf -
-fi
+  adb_cmd shell run-as "$PKG" rm -rf "$previous" </dev/null
+  emit_tree_checksums "$ESPEAK_SRC" "$final" |
+    adb_cmd shell -T run-as "$PKG" sha256sum -c - >/dev/null
+}
+
+[ "$STAGE_VI" -eq 0 ] || stage_espeak vi-en
+[ "$STAGE_EN" -eq 0 ] || stage_espeak en-vi
 
 echo
 echo "pushed=$pushed skipped=$skipped"
-adb_cmd shell run-as "$PKG" du -sh "$ROOT/vi-en" "$ROOT/en-vi" </dev/null 2>/dev/null || true
+adb_cmd shell run-as "$PKG" du -sh \
+  "$ROOT/shared" "$ROOT/vi-en" "$ROOT/en-vi" </dev/null 2>/dev/null || true
 echo
-echo "Now open OneVoice Link, select QNN / Hexagon HTP, tap 'Load NPU Pipeline', then 'Start Translating'."
+echo "Now open OneVoice Link, load the Hybrid pipeline, then start automatic translation."

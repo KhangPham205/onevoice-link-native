@@ -21,28 +21,57 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import com.onevoice.link.R
+import com.onevoice.link.core.ExecutionPath
 import com.onevoice.link.core.TranslationDirection
 import com.onevoice.link.ui.theme.OverlineMono
 import com.onevoice.link.ui.theme.Spacing
+import kotlin.math.roundToInt
 
-/** Live ASR and MT text emitted by the complete offline backend. */
+/** Latest auto-routed utterance, its translation, and the route actually used. */
 @Composable
 fun TranslationCard(
     transcript: String?,
     translation: String?,
-    direction: TranslationDirection,
+    detectedDirection: TranslationDirection?,
+    lidConfidence: Float?,
+    executionPath: ExecutionPath?,
     canReplay: Boolean,
     onReplay: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val sourceLabel = stringResource(
-        if (direction == TranslationDirection.VI_TO_EN) R.string.lang_vi
-        else R.string.lang_en,
+        when (detectedDirection) {
+            TranslationDirection.VI_TO_EN -> R.string.lang_vi
+            TranslationDirection.EN_TO_VI -> R.string.lang_en
+            null -> R.string.lang_source
+        },
     )
     val targetLabel = stringResource(
-        if (direction == TranslationDirection.VI_TO_EN) R.string.lang_en
-        else R.string.lang_vi,
+        when (detectedDirection) {
+            TranslationDirection.VI_TO_EN -> R.string.lang_en
+            TranslationDirection.EN_TO_VI -> R.string.lang_vi
+            null -> R.string.lang_translation
+        },
     )
+    val detection = when (detectedDirection) {
+        TranslationDirection.VI_TO_EN -> stringResource(
+            R.string.language_detected_vi_en,
+            ((lidConfidence ?: 0f).coerceIn(0f, 1f) * 100f).roundToInt(),
+        )
+        TranslationDirection.EN_TO_VI -> stringResource(
+            R.string.language_detected_en_vi,
+            ((lidConfidence ?: 0f).coerceIn(0f, 1f) * 100f).roundToInt(),
+        )
+        null -> stringResource(R.string.language_auto_detecting)
+    }
+    val path = executionPath?.let {
+        stringResource(
+            when (it) {
+                ExecutionPath.HYBRID_NPU -> R.string.execution_path_hybrid_npu
+                ExecutionPath.CPU_FALLBACK -> R.string.execution_path_cpu_fallback
+            },
+        )
+    }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -68,6 +97,23 @@ fun TranslationCard(
                     )
                 }
             }
+            Text(
+                text = detection,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.semantics {
+                    liveRegion = LiveRegionMode.Polite
+                },
+            )
+            if (path != null) {
+                Spacer(Modifier.height(Spacing.xs))
+                Text(
+                    text = path,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(Spacing.md))
             TranslationLine(
                 language = sourceLabel,
                 text = transcript?.takeIf { it.isNotBlank() }
