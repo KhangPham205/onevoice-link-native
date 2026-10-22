@@ -29,6 +29,43 @@ val qnnPdMode = providers.gradleProperty("qnnPdMode").orElse("auto").get().also 
         "qnnPdMode must be auto, signed, or unsigned (got '$it')"
     }
 }
+val routingMode = providers.gradleProperty("routingMode").get().also {
+    require(it in setOf("DUAL_ASR", "LID")) {
+        "routingMode must be DUAL_ASR or LID (got '$it')"
+    }
+}
+val dualAsrMarginThreshold = providers.gradleProperty("dualAsrMarginThreshold")
+    .get()
+    .toDoubleOrNull()
+    ?.takeIf(Double::isFinite)
+    ?: error("dualAsrMarginThreshold must be a finite number")
+val dualAsrFloorThreshold = providers.gradleProperty("dualAsrFloorThreshold")
+    .get()
+    .toDoubleOrNull()
+    ?.takeIf(Double::isFinite)
+    ?: error("dualAsrFloorThreshold must be a finite number")
+val dualAsrPriorWeight = providers.gradleProperty("dualAsrPriorWeight")
+    .get()
+    .toDoubleOrNull()
+    ?.takeIf { it.isFinite() && it >= 0.0 }
+    ?: error("dualAsrPriorWeight must be a finite number >= 0")
+val vadMode = providers.gradleProperty("vadMode").orElse("SILERO").get().also {
+    require(it in setOf("SILERO", "ENERGY")) { "vadMode must be SILERO or ENERGY (got '$it')" }
+}
+val dualAsrEnOffset = providers.gradleProperty("dualAsrEnOffset").orElse("0.0").get()
+    .toDoubleOrNull()
+    ?.takeIf(Double::isFinite)
+    ?: error("dualAsrEnOffset must be a finite number")
+// ORT intra-op threads for each whole-utterance Kokoro session. SM8550 has one
+// X3 + four A715/A710 performance cores; the value is an A/B knob, not a
+// hidden decoder constant.
+val kokoroThreads = providers.gradleProperty("kokoroThreads").orElse("2").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..8 }
+    ?: error("kokoroThreads must be an integer in 1..8")
+require(dualAsrMarginThreshold >= 0.0) {
+    "dualAsrMarginThreshold must be >= 0 (got $dualAsrMarginThreshold)"
+}
 
 val copyQnnRuntimeLibs = tasks.register<Sync>("copyQnnRuntimeLibs") {
     description = "Stage the QNN runtime .so files that libonevoice_core.so " +
@@ -110,6 +147,28 @@ android {
         // supplied signed skeleton is staged. `signed` never falls back to an
         // unsigned/OEM-mismatched image.
         buildConfigField("String", "QNN_PD_MODE", "\"$qnnPdMode\"")
+        // Routing is a build-time experiment flag so A/B APKs are explicit and
+        // thresholds are recorded in BuildConfig instead of hidden in decoder code.
+        buildConfigField("String", "ROUTING_MODE", "\"$routingMode\"")
+        buildConfigField(
+            "double",
+            "DUAL_ASR_MARGIN_THRESHOLD",
+            dualAsrMarginThreshold.toString(),
+        )
+        buildConfigField(
+            "double",
+            "DUAL_ASR_FLOOR_THRESHOLD",
+            dualAsrFloorThreshold.toString(),
+        )
+
+        buildConfigField(
+            "double",
+            "DUAL_ASR_PRIOR_WEIGHT",
+            dualAsrPriorWeight.toString(),
+        )
+        buildConfigField("double", "DUAL_ASR_EN_OFFSET", dualAsrEnOffset.toString())
+        buildConfigField("int", "KOKORO_THREADS", kokoroThreads.toString())
+        buildConfigField("String", "VAD_MODE", "\"$vadMode\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

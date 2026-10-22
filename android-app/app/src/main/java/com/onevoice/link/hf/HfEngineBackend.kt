@@ -560,7 +560,6 @@ class HfEngineBackend(context: Context) : EngineBackend {
                     translation = translation,
                     direction = direction,
                     // This legacy reference backend has no acoustic router.
-                    lidConfidence = 1f,
                     executionPath = ExecutionPath.CPU_FALLBACK,
                 ),
             )

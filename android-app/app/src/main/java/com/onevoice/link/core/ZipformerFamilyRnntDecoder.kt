@@ -9,7 +9,25 @@ import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.Locale
+import kotlin.math.exp
+import kotlin.math.ln
+
+/**
+ * Greedy RNN-T hypothesis plus the length-normalized acoustic confidence used
+ * to compare the VI and EN recognizers.
+ *
+ * Only lexical tokens contribute to the score. Blank/unknown are
+ * non-emitting, while the combined `<sos/eos>` symbol is excluded from both
+ * text and confidence even if the joiner selects it.
+ */
+internal data class AsrHypothesis(
+    val transcript: String,
+    val rawLogProb: Double,
+    val tokenCount: Int,
+    val normalizedLogProb: Double,
+)
 
 /** CPU decoder/joiner shared by the GIPFormer-VI and Zipformer-EN HTP encoders. */
 internal class ZipformerFamilyRnntDecoder private constructor(
@@ -189,8 +207,12 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         longArrayOf(1L, ENCODER_DIM.toLong()),
     )
 
+    /** Compatibility wrapper for callers that only need the transcript. */
+    fun decode(encoderOutput: ByteBuffer, validFrames: Int): String =
+        decodeScored(encoderOutput, validFrames).transcript
+
     /** sherpa-compatible greedy search: at most one emitted symbol per frame. */
-    fun decode(encoderOutput: ByteBuffer, validFrames: Int): String {
+    fun decodeScored(encoderOutput: ByteBuffer, validFrames: Int): AsrHypothesis {
         require(encoderOutput.isDirect &&
             encoderOutput.capacity() >= ENCODER_FRAMES * ENCODER_DIM * Float.SIZE_BYTES) {
             "RNN-T encoder output must hold [1,248,512] FLOAT32"
@@ -200,6 +222,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         }
         val source = encoderOutput.order(ByteOrder.nativeOrder()).asFloatBuffer()
         val emitted = ArrayList<Int>(validFrames / 2)
+        var rawLogProb = 0.0
 
         // This is the exact stateless-transducer seed used by sherpa-onnx.
         // The exported decoder clips the leading -1 padding internally.
@@ -212,17 +235,24 @@ internal class ZipformerFamilyRnntDecoder private constructor(
             repeat(ENCODER_DIM) { index ->
                 encoderFrame.put(index, source.get(base + index))
             }
-            val token = runJoiner()
+            val selected = runJoiner()
+            val token = selected.id
             // sherpa treats both blank and unknown as non-emitting symbols.
             if (token != BLANK_ID && token != UNK_ID) {
-                emitted += token
+                // Preserve the decoder state transition used by the previous
+                // implementation, but never let a control symbol inflate the
+                // lexical token count or influence language routing.
+                if (tokens[token] != "<sos/eos>") {
+                    emitted += token
+                    rawLogProb += selected.logProbability
+                }
                 context.put(0, context.get(1))
                 context.put(1, token.toLong())
                 runDecoder()
             }
         }
 
-        return buildString {
+        val transcript = buildString {
             emitted.forEach { id ->
                 val piece = tokens[id]
                 if (piece != "<blk>" && piece != "<unk>" && piece != "<sos/eos>") {
@@ -230,6 +260,16 @@ internal class ZipformerFamilyRnntDecoder private constructor(
                 }
             }
         }.replace('▁', ' ').trim().lowercase(Locale.ROOT)
+        return AsrHypothesis(
+            transcript = transcript,
+            rawLogProb = rawLogProb,
+            tokenCount = emitted.size,
+            normalizedLogProb = if (emitted.isEmpty()) {
+                Double.NEGATIVE_INFINITY
+            } else {
+                rawLogProb / emitted.size
+            },
+        )
     }
 
     private fun runDecoder() {
@@ -244,7 +284,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         }
     }
 
-    private fun runJoiner(): Int = joiner.run(
+    private fun runJoiner(): RnntTokenScore = joiner.run(
         mapOf("encoder_out" to encoderTensor, "decoder_out" to decoderTensor),
     ).use { result ->
         val output = result.get(0) as? OnnxTensor
@@ -253,16 +293,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         require(logits.remaining() == vocabSize) {
             "RNN-T joiner returned ${logits.remaining()} logits"
         }
-        var best = BLANK_ID
-        var bestScore = Float.NEGATIVE_INFINITY
-        repeat(vocabSize) { id ->
-            val score = logits.get(id)
-            if (!score.isNaN() && score > bestScore) {
-                best = id
-                bestScore = score
-            }
-        }
-        best
+        argmaxLogProbability(logits, vocabSize)
     }
 
     override fun close() {
@@ -272,6 +303,47 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         joiner.close()
         decoder.close()
     }
+}
+
+internal data class RnntTokenScore(
+    val id: Int,
+    val logProbability: Double,
+)
+
+/**
+ * Returns the argmax token and its log-softmax probability without ever
+ * exponentiating an unshifted logit. Non-finite entries are ignored; an output
+ * with no finite entry is treated as an inference failure.
+ */
+internal fun argmaxLogProbability(logits: FloatBuffer, vocabSize: Int): RnntTokenScore {
+    require(vocabSize > 0 && logits.remaining() >= vocabSize) {
+        "RNN-T joiner needs $vocabSize logits, got ${logits.remaining()}"
+    }
+    val offset = logits.position()
+    var bestId = -1
+    var maximum = Double.NEGATIVE_INFINITY
+    repeat(vocabSize) { id ->
+        val value = logits.get(offset + id).toDouble()
+        if (value.isFinite() && value > maximum) {
+            bestId = id
+            maximum = value
+        }
+    }
+    check(bestId >= 0) { "RNN-T joiner returned no finite logit" }
+
+    var shiftedExpSum = 0.0
+    repeat(vocabSize) { id ->
+        val value = logits.get(offset + id).toDouble()
+        if (value.isFinite()) shiftedExpSum += exp(value - maximum)
+    }
+    check(shiftedExpSum.isFinite() && shiftedExpSum >= 1.0) {
+        "RNN-T joiner log-sum-exp is invalid: $shiftedExpSum"
+    }
+    val logNormalizer = maximum + ln(shiftedExpSum)
+    return RnntTokenScore(
+        id = bestId,
+        logProbability = maximum - logNormalizer,
+    )
 }
 
 private fun direct(bytes: Int): ByteBuffer =

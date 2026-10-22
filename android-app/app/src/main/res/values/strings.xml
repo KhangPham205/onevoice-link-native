@@ -8,28 +8,38 @@
     <!-- Navigation -->
     <string name="navigation_dashboard">Translation</string>
     <string name="navigation_settings">Settings</string>
-    <string name="navigation_hybrid_only">One automatic Hybrid pipeline. CPU remains a controlled fallback.</string>
+    <string name="navigation_hybrid_only">One dual-ASR Hybrid pipeline. CPU remains a controlled fallback.</string>
 
     <!-- Status card -->
     <string name="status_card_overline">ENGINE STATUS</string>
     <string name="stage_not_initialized">Not Initialized</string>
     <string name="stage_initialized">Ready</string>
-    <string name="stage_running">Listening · Auto routing</string>
+    <string name="stage_running">Listening · Half-duplex</string>
 
     <!-- Status messages -->
-    <string name="msg_idle_hybrid_auto">Auto Hybrid is idle — load the on-device pipeline to begin.</string>
-    <string name="msg_initializing_hybrid_auto">Loading automatic language detection and the Hybrid speech pipeline…</string>
-    <string name="msg_initialized_hybrid_auto">Auto Hybrid is ready for Vietnamese or English speech.</string>
+    <string name="msg_idle_hybrid_auto">Dual-ASR Hybrid is idle — load the on-device pipeline to begin.</string>
+    <string name="msg_initializing_hybrid_auto">Loading both Hybrid translation branches…</string>
+    <string name="msg_initialized_hybrid_auto">Hybrid is ready. Choose an audio route, then start translating.</string>
     <string name="msg_init_failed">Model loading failed.</string>
     <string name="msg_native_error">Native error: %1$s</string>
-    <string name="msg_starting_auto">Opening the microphone and starting automatic language routing…</string>
-    <string name="msg_live_auto">Listening. Speak Vietnamese or English; each utterance is routed automatically.</string>
+    <string name="msg_starting_auto">Opening the microphone for the next turn…</string>
+    <string name="msg_live_auto">Listening one turn at a time. Dual ASR selects Vietnamese or English after speech ends.</string>
     <string name="msg_start_failed">Failed to start the audio stream.</string>
     <string name="msg_stopping">Stopping stream…</string>
     <string name="msg_stopped">Stopped. Models stay resident.</string>
     <string name="msg_replaying">Replaying the last spoken translation.</string>
     <string name="msg_replay_unavailable">No synthesized translation is ready to replay yet.</string>
     <string name="msg_backend_error">%1$s</string>
+
+    <!-- Audio route -->
+    <string name="audio_route_title">Audio input / output</string>
+    <string name="audio_route_auto">Auto</string>
+    <string name="audio_route_phone">Phone</string>
+    <string name="audio_route_bluetooth">Bluetooth</string>
+    <string name="audio_route_auto_hint">Uses a connected Bluetooth headset; otherwise the phone microphone and loudspeaker.</string>
+    <string name="audio_route_phone_hint">Two people share this phone: speak toward the microphone, the translation plays from the loudspeaker.</string>
+    <string name="audio_route_bluetooth_hint">Headset microphone and earbuds only. Vietnamese plays on the left bud, English on the right.</string>
+    <string name="audio_route_active">Last turn: %1$s</string>
 
     <!-- Actions -->
     <string name="action_load_hybrid">Load Hybrid Pipeline</string>
@@ -43,15 +53,15 @@
     <string name="mic_denied_permanent_hint">Microphone was denied. Enable it for OneVoice Link in system settings.</string>
     <string name="warn_mic_required">Grant microphone access to start the stream.</string>
 
-    <!-- Latest utterance emitted by the auto-direction Hybrid pipeline -->
-    <string name="translation_card_overline">AUTO TRANSLATION</string>
+    <!-- Latest utterance emitted by the automatic Hybrid pipeline -->
+    <string name="translation_card_overline">AUTO-ROUTED TRANSLATION</string>
     <string name="lang_vi">VIETNAMESE</string>
     <string name="lang_en">ENGLISH</string>
     <string name="lang_source">SOURCE</string>
     <string name="lang_translation">TRANSLATION</string>
-    <string name="language_auto_detecting">Auto-detecting Vietnamese or English for each utterance</string>
-    <string name="language_detected_vi_en">Vietnamese detected · VI → EN · %1$d%%</string>
-    <string name="language_detected_en_vi">English detected · EN → VI · %1$d%%</string>
+    <string name="language_waiting_headset_route">Waiting for dual-ASR language routing</string>
+    <string name="language_routed_vi_en">Dual ASR selected Vietnamese · VI → EN</string>
+    <string name="language_routed_en_vi">Dual ASR selected English · EN → VI</string>
     <string name="execution_path_hybrid_npu">Hybrid · ASR and translation accelerated on NPU</string>
     <string name="execution_path_cpu_fallback">Degraded operation · CPU fallback</string>
     <string name="translation_waiting_source">Your speech will appear here.</string>
@@ -69,13 +79,17 @@
     <string name="stage_state_failed">failed</string>
 
     <!-- Capability boundary for the only user-facing pipeline -->
-    <string name="scope_notice_hybrid_auto">Automatic Hybrid path: acoustic language identification routes each utterance between Vietnamese and English. NPU acceleration is preferred; CPU is used only as a controlled fallback.</string>
+    <string name="scope_notice_hybrid_auto">Dual-ASR Hybrid: both on-device recognizers score each bounded turn, then margin/floor/prior policy selects VI → EN or EN → VI. Capture and stereo playback never overlap. NPU acceleration is preferred; CPU is a controlled fallback.</string>
 
     <!-- Connected audio endpoint settings -->
     <string name="settings_title">Headset settings</string>
-    <string name="settings_headset_intro">Assign the preferred language for each Bluetooth audio device currently connected to this phone. Unassigned devices are omitted from the saved recipient plan; no audio route is active yet.</string>
-    <string name="auracast_configuration_title">Auracast preparation</string>
-    <string name="auracast_configuration_only">These assignments are saved locally, but Auracast broadcast creation, receiver provisioning, and speaker-floor control are not active. Android cannot list passive Auracast listeners as individual connected devices.</string>
+    <string name="settings_headset_intro">Save a preferred listening language for connected audio endpoints. These assignments are reserved for future privileged Auracast provisioning; live source direction currently comes from dual-ASR confidence, not headset identity.</string>
+    <string name="auracast_configuration_title">Auracast system route</string>
+    <string name="auracast_configuration_only">Create and join the broadcast in Android Bluetooth settings. OneVoice plays completed target-language audio to the current system media route. A normal APK cannot create broadcasts, provision receivers, or enumerate passive listeners itself.</string>
+    <string name="auracast_capability_permission_required">Allow Nearby devices to check this phone’s LE Audio broadcast capability.</string>
+    <string name="auracast_capability_source_and_assistant">This phone reports Auracast Broadcast Source and Assistant support.</string>
+    <string name="auracast_capability_source">This phone reports Auracast Broadcast Source support.</string>
+    <string name="auracast_capability_unavailable">Auracast Broadcast Source support was not reported.</string>
     <string name="headset_loading">Reading connected Bluetooth audio devices…</string>
     <string name="headset_permission_required">Nearby devices permission is required to identify connected Bluetooth audio devices.</string>
     <string name="headset_bluetooth_off">Bluetooth is off. Enable it in Android settings, then refresh this list.</string>
@@ -84,10 +98,10 @@
     <string name="headset_inventory_error">Could not read connected Bluetooth audio devices: %1$s</string>
     <string name="headset_connected_count">Connected audio devices: %1$d</string>
     <string name="headset_unknown_name">Bluetooth audio device</string>
-    <string name="headset_preferred_receive_language">Preferred / receive language</string>
+    <string name="headset_preferred_receive_language">Preferred listening language (future routing)</string>
     <string name="headset_language_unassigned">Not assigned</string>
-    <string name="headset_language_vi">Receive Vietnamese (VI)</string>
-    <string name="headset_language_en">Receive English (EN)</string>
+    <string name="headset_language_vi">Vietnamese (VI)</string>
+    <string name="headset_language_en">English (EN)</string>
     <string name="headset_assignment_session_only">Android did not expose a stable Bluetooth identity. This assignment lasts only for the current app session.</string>
     <string name="headset_transport_bluetooth_call">Bluetooth call audio</string>
     <string name="headset_transport_bluetooth_media">Bluetooth media audio</string>
@@ -95,6 +109,7 @@
     <string name="headset_transport_hearing_aid">Bluetooth hearing aid</string>
     <string name="action_grant_nearby_devices">Allow nearby devices</string>
     <string name="action_refresh_headsets">Refresh devices</string>
+    <string name="action_open_bluetooth_settings">Open Bluetooth settings</string>
 
     <!-- Accessibility -->
     <string name="a11y_engine_status">Engine status: %1$s</string>

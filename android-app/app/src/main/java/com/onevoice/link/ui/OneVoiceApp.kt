@@ -24,6 +24,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import com.onevoice.link.R
 import com.onevoice.link.core.EngineBackend
+import com.onevoice.link.headset.AuracastCapabilityProbe
 import com.onevoice.link.headset.ConnectedHeadsetRepository
 import com.onevoice.link.headset.HeadsetInventoryState
 import com.onevoice.link.ui.screens.DashboardScreen
@@ -44,11 +45,15 @@ fun OneVoiceApp(
     engineController: EngineController,
     onRequestMic: () -> Unit,
     onRequestBluetoothConnect: () -> Unit,
+    onOpenBluetoothSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     val appContext = LocalContext.current.applicationContext
     val headsetRepository = remember(appContext) { ConnectedHeadsetRepository(appContext) }
+    val auracastCapability = remember(bluetoothConnectGranted) {
+        AuracastCapabilityProbe.read(appContext)
+    }
     var headsetState by remember {
         mutableStateOf<HeadsetInventoryState>(HeadsetInventoryState.Loading)
     }
@@ -126,6 +131,8 @@ fun OneVoiceApp(
                 onRequestBluetoothConnect = onRequestBluetoothConnect,
                 onRefresh = headsetRepository::refresh,
                 onLanguageChanged = headsetRepository::setLanguage,
+                auracastCapability = auracastCapability,
+                onOpenBluetoothSettings = onOpenBluetoothSettings,
             )
         }
     }

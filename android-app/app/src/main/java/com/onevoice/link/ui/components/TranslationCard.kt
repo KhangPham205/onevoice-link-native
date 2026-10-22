@@ -25,44 +25,35 @@ import com.onevoice.link.core.ExecutionPath
 import com.onevoice.link.core.TranslationDirection
 import com.onevoice.link.ui.theme.OverlineMono
 import com.onevoice.link.ui.theme.Spacing
-import kotlin.math.roundToInt
-
-/** Latest auto-routed utterance, its translation, and the route actually used. */
+/** Latest headset-routed utterance, its translation, and compute path. */
 @Composable
 fun TranslationCard(
     transcript: String?,
     translation: String?,
-    detectedDirection: TranslationDirection?,
-    lidConfidence: Float?,
+    routedDirection: TranslationDirection?,
     executionPath: ExecutionPath?,
     canReplay: Boolean,
     onReplay: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val sourceLabel = stringResource(
-        when (detectedDirection) {
+        when (routedDirection) {
             TranslationDirection.VI_TO_EN -> R.string.lang_vi
             TranslationDirection.EN_TO_VI -> R.string.lang_en
             null -> R.string.lang_source
         },
     )
     val targetLabel = stringResource(
-        when (detectedDirection) {
+        when (routedDirection) {
             TranslationDirection.VI_TO_EN -> R.string.lang_en
             TranslationDirection.EN_TO_VI -> R.string.lang_vi
             null -> R.string.lang_translation
         },
     )
-    val detection = when (detectedDirection) {
-        TranslationDirection.VI_TO_EN -> stringResource(
-            R.string.language_detected_vi_en,
-            ((lidConfidence ?: 0f).coerceIn(0f, 1f) * 100f).roundToInt(),
-        )
-        TranslationDirection.EN_TO_VI -> stringResource(
-            R.string.language_detected_en_vi,
-            ((lidConfidence ?: 0f).coerceIn(0f, 1f) * 100f).roundToInt(),
-        )
-        null -> stringResource(R.string.language_auto_detecting)
+    val route = when (routedDirection) {
+        TranslationDirection.VI_TO_EN -> stringResource(R.string.language_routed_vi_en)
+        TranslationDirection.EN_TO_VI -> stringResource(R.string.language_routed_en_vi)
+        null -> stringResource(R.string.language_waiting_headset_route)
     }
     val path = executionPath?.let {
         stringResource(
@@ -98,7 +89,7 @@ fun TranslationCard(
                 }
             }
             Text(
-                text = detection,
+                text = route,
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.semantics {

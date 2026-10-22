@@ -1,90 +1,100 @@
-# Headset language assignment and future Auracast routing
+# Headset-routed direction and Auracast output
 
-## Current scope
+## Current runtime contract
 
-The Android app can currently:
+There is no acoustic language-classifier model and no default translation
+direction. The app:
 
-- list Bluetooth audio output endpoints that Android reports as connected;
-- persist a preferred listening language (`VI` or `EN`) for an endpoint whose
-  Bluetooth address is visible;
-- construct an immutable one-speaker/many-listener route plan;
-- reject a plan when the active speaker is missing, ambiguous or unassigned.
+- lists connected Bluetooth audio endpoints exposed by Android;
+- persists a spoken/preferred language (`VI` or `EN`) using a hash of the
+  Bluetooth address;
+- selects the sole assigned HFP/LE Audio communication endpoint;
+- verifies the actual `AudioRecord` input identity when VAD opens an utterance;
+- snapshots that identity and assignment until the utterance completes;
+- fails closed for a built-in mic, missing permission, redacted identity,
+  missing assignment or ambiguous speaker route.
 
-This code is configuration and a routing contract only. It does **not** claim
-that an endpoint is an individual Auracast listener and it does not send PCM to
-several headsets yet. Until an authenticated headset/floor integration supplies
-the active speaker, acoustic LID remains the working direction fallback.
-
-## One speaker, many listeners
-
-At an utterance boundary, the future floor-control layer supplies exactly one
-stable `activeSpeakerId`. The app snapshots the connected assignments once and
-keeps that snapshot until the utterance has completed:
-
-The first routing contract assumes a person's configured receive language is
-also the language they speak. If bilingual users need independent preferences,
-the persisted model must be split into `spokenLanguage` and `listeningLanguage`
-before enabling real delivery; the planner must not infer one from the other.
+The verified speaker assignment selects the branch:
 
 ```text
-active speaker assigned VI
-  -> route VI -> EN
-  -> translated EN audio targets endpoints assigned EN
-
-active speaker assigned EN
-  -> route EN -> VI
-  -> translated VI audio targets endpoints assigned VI
+speaker assigned VI -> VI -> EN -> English target waveform
+speaker assigned EN -> EN -> VI -> Vietnamese target waveform
 ```
 
-No active speaker, more than one active speaker, an unknown endpoint, an
-unassigned speaker or no target-language listener all fail closed. A Settings
-change made during ASR/MT/TTS applies to the next utterance, never the current
-one.
+`BluetoothSpeakerRouteResolver` owns public communication-device selection and
+input verification. `HeadsetRoutePlanner` is the pure one-speaker/many-listener
+recipient policy. Neither calls hidden Auracast APIs.
 
-The pure policy lives in `headset/HeadsetRoutePlanner.kt`. It intentionally does
-not open Bluetooth, change an `AudioRecord` route or call hidden APIs.
+## Why the input is unicast
 
-## Why Auracast alone cannot select the input language
+Auracast is a one-to-many LE Audio downlink. It does not provide a microphone
+uplink and does not identify which listener is speaking. The sole talker must
+therefore use HFP or LE Audio unicast for the microphone. `AudioRecord` is the
+proof of that route; an Auracast receiver list cannot replace it.
 
-Auracast is a one-to-many LE Audio **downlink**. It does not provide the phone
-with a microphone uplink or identify which listener is currently speaking. The
-speaker identity must therefore come from a separate, exclusive floor-control
-channel and an actual microphone route (for example HFP/LE Audio unicast). The
-app must verify the routed input endpoint before trusting its language
-assignment; an unknown route must not silently fall back to VI or EN.
+Passive Auracast listeners are connectionless. `AudioManager.getDevices()` may
+show a logical broadcast route, but it cannot enumerate every person listening.
+Settings assignments are intended recipient policy, not delivery receipts.
 
-`AudioManager.getDevices()` and `AudioDeviceCallback` expose Android audio
-endpoints, not the membership of a connectionless Auracast broadcast. A logical
-`TYPE_BLE_BROADCAST` route is not a list of all people listening to it.
+## Android API 36 privilege boundary
 
-## Android privilege boundary
+Verified on the connected Galaxy Z Flip5 (`SM-F731B`, `SM8550`, Android 16/API
+36):
 
-An ordinary target-SDK-36 APK can inventory connected audio endpoints and query
-public LE Audio capabilities with the user's `BLUETOOTH_CONNECT` permission.
-It cannot create or provision production Auracast sessions using
-`BluetoothLeBroadcast` / `BluetoothLeBroadcastAssistant`: those APIs are system
-APIs and require `BLUETOOTH_PRIVILEGED`, which a normally installed APK cannot
-obtain. `BLUETOOTH_ADVERTISE` and a normal BLE advertiser are not substitutes
-for LE Audio broadcast.
+- LE Audio, Broadcast Source and Broadcast Assistant report
+  `FEATURE_SUPPORTED`;
+- Samsung's Bluetooth service contains both broadcast source and assistant
+  profiles;
+- public capability probes and `BluetoothLeAudio.getGroupId()` are available;
+- a normally installed target-36 APK is denied `BLUETOOTH_PRIVILEGED`;
+- `BluetoothLeBroadcast` and `BluetoothLeBroadcastAssistant` are absent from
+  public SDK stubs, even though the framework contains them.
 
-Production per-group delivery therefore needs an OEM/system component:
+Therefore OneVoice cannot create/update/stop a broadcast or provision receivers
+directly. `BLUETOOTH_ADVERTISE` and a normal BLE advertiser are not substitutes.
+The current app asks only for `BLUETOOTH_CONNECT` and sends completed target PCM
+to Android's current media route.
+
+Full per-group control needs a preinstalled OEM component:
 
 ```text
 OneVoice inference app
-  -> signature-protected Binder/AIDL route request
-  -> preinstalled privileged Auracast service
-  -> LE Audio broadcast(s) / sink provisioning
+  -> signature-protected Binder/AIDL request
+  -> privileged OEM Auracast service
+  -> broadcast lifecycle, keys and receiver provisioning
 ```
 
-The inference app should send only a language, immutable recipient assignment
-snapshot and completed PCM buffer. The privileged service owns broadcast keys,
-session lifecycle, provisioning and the distinction between assigned,
-provisioned and listening-unknown states.
+## Using Auracast on this phone now
 
-Public Android references:
+The device dump shows Samsung `BluetoothCast`, with audio sharing disabled until
+the operator starts a broadcast. On One UI 8.0 and earlier:
 
+1. Open **Settings -> Connections -> Bluetooth**.
+2. Open the three-dot menu and choose **Broadcast sound using Auracast**.
+3. Set a name/password and tap **Start broadcast**.
+4. On each compatible LE Audio receiver, choose **Listen to Auracast broadcast**
+   and join the stream.
+5. In OneVoice Settings, assign the unicast speaking headset VI or EN, then
+   start translation. OneVoice's media `AudioTrack` follows the system route.
+
+Samsung calls the feature **Audio broadcast** on newer One UI releases. The
+currently paired JBL Wave Beam exposes classic HFP/A2DP rather than an Auracast
+sink: it can provide the speaker microphone, but it cannot be a passive
+Auracast listener.
+
+One practical session needs two roles:
+
+- one assigned unicast headset for the sole speaker microphone;
+- one or more Auracast-compatible receivers for the translated downlink.
+
+Some Samsung releases do not support using a Bluetooth microphone while media
+Auracast is active. This concurrency must be validated with the exact production
+headset; if it fails, the uplink needs a USB microphone or an OEM audio policy.
+
+Official references:
+
+- <https://www.samsung.com/us/support/answer/ANS10001042/>
 - <https://developer.android.com/develop/connectivity/bluetooth/ble-audio/overview>
 - <https://developer.android.com/reference/android/media/AudioManager>
-- <https://developer.android.com/reference/android/media/AudioDeviceInfo>
+- <https://developer.android.com/reference/android/media/AudioRecord>
 - <https://developer.android.com/develop/connectivity/bluetooth/bt-permissions>
-- <https://android.googlesource.com/platform/packages/modules/Bluetooth/+/refs/heads/main/framework/java/android/bluetooth/BluetoothLeBroadcast.java>

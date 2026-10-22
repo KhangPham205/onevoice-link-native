@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -53,9 +55,9 @@ class MainActivity : ComponentActivity() {
         micGranted = hasMicPermission()
         bluetoothConnectGranted = hasBluetoothConnectPermission()
 
-        // Hybrid is the only user-facing pipeline. It automatically detects the
-        // source language per utterance; CPU execution is an internal degraded
-        // path, never a mode the user has to choose.
+        // Hybrid is the only user-facing pipeline. The verified Bluetooth mic
+        // route and headset assignment select direction; CPU execution is an
+        // internal degraded path, never a user-selectable mode.
         val hybridEngine = NpuEngine(
             applicationContext,
             NpuTtsMode.CPU_WHOLE_UTTERANCE,
@@ -81,6 +83,9 @@ class MainActivity : ComponentActivity() {
                         } else {
                             bluetoothConnectGranted = true
                         }
+                    },
+                    onOpenBluetoothSettings = {
+                        startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
                     },
                 )
             }

@@ -15,7 +15,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
-import java.security.MessageDigest
 import java.util.Locale
 
 /**
@@ -166,19 +165,12 @@ class ConnectedHeadsetRepository(context: Context) {
 
     private fun toDiscoveredDevice(device: AudioDeviceInfo): DiscoveredDevice? {
         val transport = transportFor(device.type) ?: return null
-        val rawAddress = device.address.trim().lowercase(Locale.ROOT)
-            .takeUnless(::isRedactedAddress)
-        val assignmentPersistent = rawAddress != null
-        val identityMaterial = if (rawAddress != null) {
-            "bluetooth-address:$rawAddress"
-        } else {
-            // Session-only fallback: never persist by transient Android device id.
-            "audio-session:${device.id}"
-        }
+        val stableId = HeadsetIdentity.stableId(device)
+        val assignmentPersistent = stableId != null
         val name = device.productName.toString().trim()
             .ifEmpty { appContext.getString(com.onevoice.link.R.string.headset_unknown_name) }
         return DiscoveredDevice(
-            identityHash = sha256(identityMaterial),
+            identityHash = stableId ?: HeadsetIdentity.sessionId(device),
             displayName = name,
             transport = transport,
             assignmentPersistent = assignmentPersistent,
@@ -263,22 +255,5 @@ class ConnectedHeadsetRepository(context: Context) {
             else -> null
         }
 
-        fun isRedactedAddress(address: String): Boolean =
-            address.isBlank() ||
-                address == "00:00:00:00:00:00" ||
-                address == "02:00:00:00:00:00"
-
-        fun sha256(value: String): String {
-            val bytes = MessageDigest.getInstance("SHA-256")
-                .digest(value.toByteArray(Charsets.UTF_8))
-            val alphabet = "0123456789abcdef"
-            return buildString(bytes.size * 2) {
-                bytes.forEach { byte ->
-                    val unsigned = byte.toInt() and 0xff
-                    append(alphabet[unsigned ushr 4])
-                    append(alphabet[unsigned and 0x0f])
-                }
-            }
-        }
     }
 }

@@ -24,9 +24,9 @@ internal data class LanguageDecision(
 /**
  * SpeechFlow spoken-language identification on CPU/TFLite.
  *
- * Chosen over the 107-class AmberNet export because this classifier only has to
- * separate the two languages the product serves: 13 languages plus an explicit
- * "other" class, from a 1.2 MB graph instead of 115 MB.
+ * Retained as the lightweight LID side of the DUAL_ASR/LID A/B switch. The
+ * production default is dual-ASR confidence routing, so this interpreter is
+ * loaded only by an APK built with `-ProutingMode=LID`.
  *
  * Three properties of this graph differ from the AmberNet one and are enforced
  * here rather than assumed:

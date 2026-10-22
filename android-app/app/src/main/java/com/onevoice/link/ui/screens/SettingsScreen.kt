@@ -39,6 +39,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.onevoice.link.R
+import com.onevoice.link.headset.AuracastCapability
 import com.onevoice.link.headset.ConnectedHeadset
 import com.onevoice.link.headset.HeadsetInventoryState
 import com.onevoice.link.headset.HeadsetLanguage
@@ -54,6 +55,8 @@ fun SettingsScreen(
     onRequestBluetoothConnect: () -> Unit,
     onRefresh: () -> Unit,
     onLanguageChanged: (String, HeadsetLanguage?) -> Unit,
+    auracastCapability: AuracastCapability,
+    onOpenBluetoothSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Scaffold(
@@ -82,6 +85,8 @@ fun SettingsScreen(
             onRequestBluetoothConnect = onRequestBluetoothConnect,
             onRefresh = onRefresh,
             onLanguageChanged = onLanguageChanged,
+            auracastCapability = auracastCapability,
+            onOpenBluetoothSettings = onOpenBluetoothSettings,
             modifier = Modifier.padding(innerPadding),
         )
     }
@@ -93,6 +98,8 @@ fun SettingsContent(
     onRequestBluetoothConnect: () -> Unit,
     onRefresh: () -> Unit,
     onLanguageChanged: (String, HeadsetLanguage?) -> Unit,
+    auracastCapability: AuracastCapability,
+    onOpenBluetoothSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(
@@ -112,7 +119,12 @@ fun SettingsContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        item { AuracastBoundaryCard() }
+        item {
+            AuracastBoundaryCard(
+                capability = auracastCapability,
+                onOpenBluetoothSettings = onOpenBluetoothSettings,
+            )
+        }
 
         when (state) {
             HeadsetInventoryState.Loading -> item {
@@ -179,7 +191,11 @@ fun SettingsContent(
 }
 
 @Composable
-private fun AuracastBoundaryCard(modifier: Modifier = Modifier) {
+private fun AuracastBoundaryCard(
+    capability: AuracastCapability,
+    onOpenBluetoothSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Card(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -199,6 +215,22 @@ private fun AuracastBoundaryCard(modifier: Modifier = Modifier) {
                 text = stringResource(R.string.auracast_configuration_only),
                 style = MaterialTheme.typography.bodyMedium,
             )
+            Text(
+                text = stringResource(
+                    when {
+                        !capability.permissionGranted ->
+                            R.string.auracast_capability_permission_required
+                        capability.sourceSupported && capability.assistantSupported ->
+                            R.string.auracast_capability_source_and_assistant
+                        capability.sourceSupported -> R.string.auracast_capability_source
+                        else -> R.string.auracast_capability_unavailable
+                    },
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Button(onClick = onOpenBluetoothSettings) {
+                Text(stringResource(R.string.action_open_bluetooth_settings))
+            }
         }
     }
 }

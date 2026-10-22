@@ -246,29 +246,6 @@ Java_com_onevoice_link_core_OneVoiceNative_nativeExtractGipformerFeatures(
     return nullptr;
 }
 
-// ---- nativeExtractAmberNetFeatures(samples, directOutput) : String? ------
-JNIEXPORT jstring JNICALL
-Java_com_onevoice_link_core_OneVoiceNative_nativeExtractAmberNetFeatures(
-        JNIEnv* env, jclass /*clazz*/, jfloatArray samples, jobject outputBuffer) {
-    if (!samples || !outputBuffer) return env->NewStringUTF("null AmberNet frontend buffer");
-    const jsize count = env->GetArrayLength(samples);
-    float* output = static_cast<float*>(env->GetDirectBufferAddress(outputBuffer));
-    const jlong capacity = env->GetDirectBufferCapacity(outputBuffer);
-    if (!output || capacity < 0) {
-        return env->NewStringUTF("AmberNet output is not a direct ByteBuffer");
-    }
-    std::vector<float> waveform(static_cast<std::size_t>(count));
-    env->GetFloatArrayRegion(samples, 0, count, waveform.data());
-    if (env->ExceptionCheck()) return env->NewStringUTF("cannot read AmberNet samples");
-    std::string error;
-    if (!onevoice::makeAmberNetFeatures(
-            waveform.data(), waveform.size(), output,
-            static_cast<std::size_t>(capacity) / sizeof(float), error)) {
-        return env->NewStringUTF(error.c_str());
-    }
-    return nullptr;
-}
-
 // ---- nativeExtractSpeechFlowFeatures(samples, directOutput, outFrames) ----
 // outFrames receives the unpadded frame count the classifier masks with; the
 // caller must forward it as input_2 or attention pools over the zero padding.

@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import com.onevoice.link.R
+import com.onevoice.link.core.AudioRoutePreference
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.ExecutionPath
 import com.onevoice.link.core.NpuEngine
@@ -56,10 +57,8 @@ data class DashboardUiState(
     val transcript: String? = null,
     val translation: String? = null,
     val replayAvailable: Boolean = false,
-    /** Null until acoustic language identification accepts an utterance. */
-    val detectedDirection: TranslationDirection? = null,
-    /** Calibrated language-identification score for [detectedDirection]. */
-    val lidConfidence: Float? = null,
+    /** Null until the utterance router accepts VI or EN. */
+    val routedDirection: TranslationDirection? = null,
     /** Actual route used for the latest utterance, not a user-selectable mode. */
     val executionPath: ExecutionPath? = null,
     /** QNN contexts needed by the Hybrid pipeline. */
@@ -67,6 +66,9 @@ data class DashboardUiState(
     val targetSoc: String = "",
     val hexagon: String = "",
     val modelRootPath: String = "",
+    val audioRoute: AudioRoutePreference = AudioRoutePreference.AUTO,
+    /** Device route of the most recent turn; null before the first capture. */
+    val activeRouteLabel: String? = null,
 ) {
     val running: Boolean get() = stage == EngineStage.RUNNING
 
@@ -81,6 +83,9 @@ data class DashboardUiState(
         supportsLiveTranslation && stage != EngineStage.NOT_INITIALIZED &&
             !micGranted && !running
 
+    /** A route change applies at the next turn, but not while a start/stop is busy. */
+    val canChangeAudioRoute: Boolean get() = supportsLiveTranslation && !busy
+
     val showTranslationCard: Boolean get() = supportsLiveTranslation
     val canReplay: Boolean get() =
         supportsLiveTranslation && replayAvailable && !busy
@@ -90,8 +95,7 @@ data class DashboardUiState(
  * Activity-scoped state holder for the single Hybrid engine.
  *
  * Language routing happens per utterance inside the engine. The controller only
- * presents the route selected by LID; it never unloads models in response to a
- * UI direction change.
+ * presents the direction committed with the resulting transcript.
  */
 @Stable
 class EngineController(
@@ -116,13 +120,17 @@ class EngineController(
         private set
     var replayAvailable by mutableStateOf(false)
         private set
-    var detectedDirection by mutableStateOf<TranslationDirection?>(null)
-        private set
-    var lidConfidence by mutableStateOf<Float?>(null)
+    var routedDirection by mutableStateOf<TranslationDirection?>(null)
         private set
     var executionPath by mutableStateOf<ExecutionPath?>(null)
         private set
     var stages by mutableStateOf<List<StageStatus>>(emptyList())
+        private set
+    var audioRoute by mutableStateOf(
+        (backend as? NpuEngine)?.audioRoutePreference ?: AudioRoutePreference.AUTO,
+    )
+        private set
+    var activeRouteLabel by mutableStateOf<String?>(null)
         private set
 
     val supportsLiveTranslation: Boolean get() = backend.supportsLiveTranslation
@@ -148,6 +156,13 @@ class EngineController(
             stage = EngineStage.NOT_INITIALIZED
             message = nativeFailure(failure)
         }
+    }
+
+    /** Persisted by the engine and resolved again at the next IDLE -> CAPTURING edge. */
+    fun selectAudioRoute(route: AudioRoutePreference) {
+        if (busy || shutdownRequested) return
+        (backend as? NpuEngine)?.audioRoutePreference = route
+        audioRoute = route
     }
 
     fun toggleTranslation() {
@@ -202,8 +217,7 @@ class EngineController(
             transcript = null
             translation = null
             replayAvailable = false
-            detectedDirection = null
-            lidConfidence = null
+            routedDirection = null
             executionPath = null
             val result = withContext(Dispatchers.IO) { runCatching { backend.start() } }
             result.onSuccess { started ->
@@ -237,11 +251,11 @@ class EngineController(
                     if (shutdownRequested) return@launch
                     transcript = segment.transcript
                     translation = segment.translation
-                    detectedDirection = segment.direction
-                    lidConfidence = segment.lidConfidence
+                    routedDirection = segment.direction
                     executionPath = segment.executionPath
+                    activeRouteLabel = (backend as? NpuEngine)?.lastRouteLabel
                     if (stage == EngineStage.RUNNING) {
-                        // A valid next utterance clears a recoverable low-LID or
+                        // A valid next utterance clears a recoverable routing or
                         // per-segment inference error from the status banner.
                         message = UiMessage(R.string.msg_live_auto)
                     }
@@ -261,7 +275,7 @@ class EngineController(
             override fun onPipelineError(message: String) {
                 scope.launch {
                     if (shutdownRequested) return@launch
-                    // Per-utterance LID/MT/TTS failures are recoverable; the
+                    // Per-utterance route/MT/TTS failures are recoverable; the
                     // capture worker may still be listening for the next turn.
                     this@EngineController.message = UiMessage(
                         R.string.msg_backend_error,

@@ -3,7 +3,7 @@ package com.onevoice.link.core
 /**
  * Common lifecycle for an offline speech-to-speech engine.
  *
- * Production uses one auto-routing Hybrid engine. The CPU implementation is
+ * Production uses one automatic dual-ASR Hybrid engine. The CPU implementation is
  * retained as a failover/reference implementation but is not user-selectable.
  */
 interface EngineBackend {
@@ -44,13 +44,12 @@ enum class ExecutionPath {
 }
 
 /**
- * Atomic per-utterance result. Direction and confidence travel with the text,
- * preventing an asynchronous language update from relabeling another turn.
+ * Atomic per-utterance result. Direction is committed by the router together
+ * with the transcript so a later turn cannot relabel an earlier result.
  */
 data class PipelineSegment(
     val transcript: String,
     val translation: String?,
     val direction: TranslationDirection,
-    val lidConfidence: Float,
     val executionPath: ExecutionPath,
 )

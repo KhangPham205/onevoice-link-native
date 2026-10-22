@@ -31,17 +31,16 @@ private const val TAG = "OneVoiceBench"
  */
 internal data class UtteranceMetrics(
     val direction: String,
-    val lidDecision: String,
-    val lidConfidence: Float,
+    val routeSource: String,
+    val speakerLanguage: String,
     val speechDurationS: Double,
     val forcedBoundary: Boolean,
     val executionPath: String,
-    val lidMs: Long,
     val asrMs: Long,
     val mtMs: Long,
     val ttsMs: Long,
     val queueWaitMs: Long,
-    /** Compute only: LID + ASR + MT + TTS. Whole-utterance TTS makes this TTFA. */
+    /** Compute only: ASR + MT + TTS. Whole-utterance TTS makes this TTFA. */
     val ttfaMs: Long,
     /** TTFA plus the synthesized audio's own duration. */
     val e2eMs: Long,
@@ -72,9 +71,9 @@ internal data class UtteranceMetrics(
         if (ttsOutputAudioS > 0.0) ttsMs / (ttsOutputAudioS * 1000.0) else Double.NaN
 
     fun toCsvRow(): String = listOf(
-        direction, lidDecision, "%.4f".format(lidConfidence),
+        direction, routeSource, speakerLanguage,
         "%.3f".format(speechDurationS), forcedBoundary, executionPath,
-        lidMs, asrMs, mtMs, ttsMs, queueWaitMs, ttfaMs, e2eMs,
+        asrMs, mtMs, ttsMs, queueWaitMs, ttfaMs, e2eMs,
         hangoverMs, echoGuardMs, e2eMs - hangoverMs - echoGuardMs,
         mtOutputTokens, ttsOutputChars, "%.3f".format(ttsOutputAudioS),
         "%.4f".format(asrRtf()), "%.4f".format(ttsRtf()),
@@ -83,9 +82,9 @@ internal data class UtteranceMetrics(
 
     companion object {
         val CSV_HEADER = listOf(
-            "direction", "lid_decision", "lid_confidence",
+            "direction", "route_source", "speaker_language",
             "speech_duration_s", "forced_boundary", "execution_path",
-            "lid_ms", "asr_ms", "mt_ms", "tts_ms", "queue_wait_ms",
+            "asr_ms", "mt_ms", "tts_ms", "queue_wait_ms",
             "ttfa_ms", "e2e_ms",
             "hangover_ms", "echo_guard_ms", "e2e_minus_hangover_ms",
             "mt_output_tokens", "tts_output_chars", "tts_output_audio_s",

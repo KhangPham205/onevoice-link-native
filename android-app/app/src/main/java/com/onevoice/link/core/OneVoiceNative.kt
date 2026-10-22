@@ -73,12 +73,6 @@ object OneVoiceNative {
         output: ByteBuffer,
     ): String?
 
-    /** NeMo AmberNet 16 kHz PCM float -> direct [1,80,1008] FLOAT32. */
-    external fun nativeExtractAmberNetFeatures(
-        samples: FloatArray,
-        output: ByteBuffer,
-    ): String?
-
     // ---- Benchmark surface -------------------------------------------------
     // Kept off the execute path on purpose: an out-parameter on
     // nativeExecuteGraph would add work to the hot call and change an arity
@@ -129,8 +123,8 @@ object OneVoiceNative {
      * SpeechFlow LID 16 kHz PCM float -> direct [1,1000,80] FLOAT32.
      *
      * Time-major, whole-utterance normalized — deliberately not the same
-     * contract as [nativeExtractAmberNetFeatures]. `outFrames[0]` receives the
-     * unpadded frame count that must be passed to the model as `input_2`.
+     * contract as the ASR frontend. `outFrames[0]` receives the unpadded frame
+     * count that must be passed to the model as `input_2`.
      */
     external fun nativeExtractSpeechFlowFeatures(
         samples: FloatArray,

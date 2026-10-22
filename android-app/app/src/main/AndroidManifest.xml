@@ -2,22 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Low-latency full-duplex capture for the S2ST pipeline. -->
+    <!-- Microphone capture for the utterance-based S2ST pipeline. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="true" />
 
-    <!-- P2P off-grid networking over Bluetooth / BLE. -->
-    <!-- Android 12+ (API 31) split the old BLUETOOTH permission into runtime grants. -->
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="s" />
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_ADVERTISE"
-        tools:targetApi="s" />
+    <!-- Connected headset identity and public LE Audio capability probes. A
+         normal BLE advertiser is not an Auracast transport, so this app does
+         not request SCAN or ADVERTISE. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="s" />

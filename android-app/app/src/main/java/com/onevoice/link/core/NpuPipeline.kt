@@ -6,6 +6,7 @@ import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.onevoice.link.BuildConfig
 import com.onevoice.link.hf.SentencePieceUnigram
 import org.json.JSONObject
 import java.io.Closeable
@@ -25,6 +26,9 @@ internal class NpuPipeline private constructor(
     private val asrArtifactPrefix: String,
     private val asrMode: NpuAsrMode,
     private val asrTokens: List<String>,
+    /** UFIXED_16 encodings of the Parakeet CTC graph; null for float graphs. */
+    private val asrInputQuant: Q16Params?,
+    private val asrOutputQuant: Q16Params?,
     private val rnntDecoder: ZipformerFamilyRnntDecoder?,
     private val translator: QnnMarianTranslator,
     private val ttsTokenIds: Set<Int>,
@@ -35,6 +39,11 @@ internal class NpuPipeline private constructor(
     companion object {
         private const val PARAKEET_FEATURE_BYTES = 1 * 1001 * 80 * Float.SIZE_BYTES
         private const val PARAKEET_LOGIT_BYTES = 1 * 126 * 1025 * Float.SIZE_BYTES
+        private const val PARAKEET_Q16_INPUT_BYTES =
+            ParakeetCtcContract.FEATURE_FRAMES * ParakeetCtcContract.FEATURE_DIM * Short.SIZE_BYTES
+        private const val PARAKEET_Q16_OUTPUT_BYTES =
+            ParakeetCtcContract.OUTPUT_FRAMES * ParakeetCtcContract.VOCAB_SIZE * Short.SIZE_BYTES
+        private const val PARAKEET_UNK_ID = 0
         private const val RNNT_FEATURE_BYTES =
             1 * ZipformerFamilyRnntDecoder.FEATURE_FRAMES *
                 ZipformerFamilyRnntDecoder.FEATURE_DIM *
@@ -55,6 +64,34 @@ internal class NpuPipeline private constructor(
         private const val TTS_SAMPLES_PER_FRAME = 600
         private const val BETWEEN_CHUNK_SILENCE_SAMPLES = 2_880 // 120 ms at 24 kHz
         private const val TAG = "OneVoiceNpuPipeline"
+
+        /** Allocate the one [1,1000,80] FP32 frontend tensor shared by both RNN-Ts. */
+        fun allocateSharedRnntFeatures(): ByteBuffer = direct(RNNT_FEATURE_BYTES)
+
+        /**
+         * Run the common Kaldi/icefall frontend exactly once for an utterance.
+         * The returned frame count must travel with [destination] to both
+         * [recognizeSharedRnntFeatures] calls.
+         */
+        fun prepareSharedRnntFeatures(
+            samples: FloatArray,
+            destination: ByteBuffer,
+        ): Int {
+            require(samples.isNotEmpty() && samples.size <= 160_000) {
+                "NPU ASR accepts 1..160000 samples"
+            }
+            require(destination.isDirect && destination.capacity() >= RNNT_FEATURE_BYTES) {
+                "Shared RNN-T features must hold [1,1000,80] FLOAT32"
+            }
+            val writableView = destination.duplicate().order(ByteOrder.nativeOrder()).apply {
+                clear()
+            }
+            val error = OneVoiceNative.nativeExtractGipformerFeatures(samples, writableView)
+            check(error == null) { error ?: "unknown RNN-T frontend error" }
+            // Kaldi snip_edges=false creates round(sampleCount / 160) frames.
+            return ((samples.size + ASR_HOP_SAMPLES / 2) / ASR_HOP_SAMPLES)
+                .coerceIn(1, ZipformerFamilyRnntDecoder.FEATURE_FRAMES)
+        }
 
         fun load(
             directionRoot: File,
@@ -77,6 +114,7 @@ internal class NpuPipeline private constructor(
                 )
                 when (asrMode) {
                     NpuAsrMode.PARAKEET_CTC -> add("asr_tokens.txt")
+                    NpuAsrMode.PARAKEET_CTC_Q16 -> add("${asrArtifactPrefix}_tokens.txt")
                     NpuAsrMode.ZIPFORMER_FAMILY_RNNT -> addAll(
                         listOf(
                             "${asrArtifactPrefix}_decoder.onnx",
@@ -117,8 +155,27 @@ internal class NpuPipeline private constructor(
                     "Unexpected ASR vocabulary (${indexed.size} tokens)"
                 }
                 indexed.map { it ?: "<unk>" }
+            } else if (asrMode == NpuAsrMode.PARAKEET_CTC_Q16) {
+                val index = parseIndexedTokens(File(directionRoot, "${asrArtifactPrefix}_tokens.txt"))
+                val indexed = arrayOfNulls<String>(index.size)
+                index.forEach { (token, id) -> if (id in indexed.indices) indexed[id] = token }
+                require(
+                    indexed.size == ParakeetCtcContract.VOCAB_SIZE &&
+                        indexed[ParakeetCtcContract.BLANK_ID] == "<blk>",
+                ) { "Unexpected Parakeet CTC vocabulary (${indexed.size} tokens)" }
+                indexed.map { it ?: "<unk>" }
             } else {
                 emptyList()
+            }
+            val (asrInputQuant, asrOutputQuant) = if (asrMode == NpuAsrMode.PARAKEET_CTC_Q16) {
+                // From the manifest, which records them from the binary itself.
+                requireNotNull(asrStage.quantization["x"]) {
+                    "Manifest lacks the Parakeet input encoding; regenerate npu_manifest.json"
+                } to requireNotNull(asrStage.quantization["log_probs"]) {
+                    "Manifest lacks the Parakeet output encoding; regenerate npu_manifest.json"
+                }
+            } else {
+                null to null
             }
             val ttsTokens = parseIndexedTokens(File(directionRoot, "tts_tokens.txt"))
             val kokoroConfig = { modelPath: String ->
@@ -130,7 +187,7 @@ internal class NpuPipeline private constructor(
                             tokens = File(directionRoot, "tts_tokens.txt").absolutePath,
                             dataDir = espeakData.absolutePath,
                         ),
-                        numThreads = if (useCpuTts) 2 else 1,
+                        numThreads = if (useCpuTts) BuildConfig.KOKORO_THREADS else 1,
                     ),
                     maxNumSentences = 1,
                     silenceScale = 1.0f,
@@ -166,6 +223,8 @@ internal class NpuPipeline private constructor(
                     asrArtifactPrefix = asrArtifactPrefix,
                     asrMode = asrMode,
                     asrTokens = asrTokens,
+                    asrInputQuant = asrInputQuant,
+                    asrOutputQuant = asrOutputQuant,
                     rnntDecoder = rnntDecoder,
                     translator = checkNotNull(translator),
                     ttsTokenIds = ttsTokens.values.toSet(),
@@ -198,16 +257,23 @@ internal class NpuPipeline private constructor(
         if (asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
             RNNT_FEATURE_BYTES
         } else {
+            // Both Parakeet paths take the NeMo [1001,80] float frontend.
             PARAKEET_FEATURE_BYTES
         },
     )
     private val asrOutput = direct(
-        if (asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
-            RNNT_OUTPUT_BYTES
-        } else {
-            PARAKEET_LOGIT_BYTES
+        when (asrMode) {
+            NpuAsrMode.ZIPFORMER_FAMILY_RNNT -> RNNT_OUTPUT_BYTES
+            NpuAsrMode.PARAKEET_CTC -> PARAKEET_LOGIT_BYTES
+            NpuAsrMode.PARAKEET_CTC_Q16 -> PARAKEET_Q16_OUTPUT_BYTES
         },
     )
+    /** Quantized graph input; only the 16-bit Parakeet CTC graph needs it. */
+    private val asrQuantizedInput: ByteBuffer? =
+        if (asrMode == NpuAsrMode.PARAKEET_CTC_Q16) direct(PARAKEET_Q16_INPUT_BYTES) else null
+
+    /** True when this branch consumes the shared Kaldi fbank tensor. */
+    val usesSharedRnntFeatures: Boolean get() = asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT
     private val ttsIds = direct(512 * Int.SIZE_BYTES)
     private val ttsStyle = direct(256 * Float.SIZE_BYTES)
     private val ttsD = direct(512 * 640 * Float.SIZE_BYTES)
@@ -229,31 +295,127 @@ internal class NpuPipeline private constructor(
         }
         return when (asrMode) {
             NpuAsrMode.PARAKEET_CTC -> recognizeParakeet(samples)
-            NpuAsrMode.ZIPFORMER_FAMILY_RNNT -> recognizeRnnt(samples)
+            NpuAsrMode.ZIPFORMER_FAMILY_RNNT,
+            NpuAsrMode.PARAKEET_CTC_Q16,
+            -> recognizeScored(samples).transcript
         }
     }
 
-    private fun recognizeRnnt(samples: FloatArray): String {
-        // The JNI name predates the English bundle. Both deployed encoders use
-        // the same Kaldi/icefall feature contract, so this frontend is shared.
-        checkNative(OneVoiceNative.nativeExtractGipformerFeatures(samples, asrFeatures))
-        execute("$stagePrefix/asr", arrayOf(asrFeatures), arrayOf(asrOutput))
-        // Kaldi snip_edges=false creates round(sampleCount / 160) frames. The
-        // encoder's exported length graph is (((T - 7) / 2) + 1) / 2.
-        val validFeatureFrames = ((samples.size + ASR_HOP_SAMPLES / 2) /
-            ASR_HOP_SAMPLES).coerceIn(1, ZipformerFamilyRnntDecoder.FEATURE_FRAMES)
-        val validEncoderFrames = ((((validFeatureFrames - 7).coerceAtLeast(0) / 2) + 1) / 2)
-            .coerceIn(1, ZipformerFamilyRnntDecoder.ENCODER_FRAMES)
-        val transcript = checkNotNull(rnntDecoder) {
-            "RNN-T host decoder is unavailable"
-        }.decode(asrOutput, validEncoderFrames)
+    /**
+     * Scored recognition from PCM. RNN-T callers in the dual router should
+     * prepare the shared frontend once instead; Parakeet always needs its own
+     * NeMo frontend, so this is also its dual-router entry point.
+     */
+    fun recognizeScored(samples: FloatArray): AsrHypothesis {
+        require(samples.isNotEmpty() && samples.size <= 160_000) {
+            "NPU ASR accepts 1..160000 samples"
+        }
+        return when (asrMode) {
+            NpuAsrMode.ZIPFORMER_FAMILY_RNNT -> {
+                val validFeatureFrames = prepareSharedRnntFeatures(samples, asrFeatures)
+                recognizeSharedRnntFeatures(asrFeatures, validFeatureFrames)
+            }
+            NpuAsrMode.PARAKEET_CTC_Q16 -> recognizeParakeetQ16(samples)
+            NpuAsrMode.PARAKEET_CTC -> error("The float Parakeet CTC graph is not scored")
+        }
+    }
+
+    /**
+     * sherpa-onnx's SM8550 Parakeet-TDT-CTC-110M (CTC head): NeMo log-mel,
+     * per-feature normalized over the real frames and zero padded, quantized
+     * to UFIXED_16; the graph emits quantized log-softmax per 80 ms step.
+     */
+    private fun recognizeParakeetQ16(samples: FloatArray): AsrHypothesis {
+        val inputQuant = checkNotNull(asrInputQuant)
+        val outputQuant = checkNotNull(asrOutputQuant)
+        val quantized = checkNotNull(asrQuantizedInput)
+        // [1001,80] NeMo center=true frames; for <=10 s the 1001st frame is
+        // always zero padding, so the graph's first 1000 rows are exact.
+        checkNative(OneVoiceNative.nativeExtractAsrFeatures(samples, asrFeatures))
+        val features = asrFeatures.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
+        val codes = quantized.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
+        val values = ParakeetCtcContract.FEATURE_FRAMES * ParakeetCtcContract.FEATURE_DIM
+        for (index in 0 until values) {
+            codes.put(index, inputQuant.quantize(features.get(index)).toShort())
+        }
+        execute("$stagePrefix/asr", arrayOf(quantized), arrayOf(asrOutput))
+
+        // Steps that cover only the zero-padded tail are not decoded: a CTC
+        // head can repeat an earlier phrase there after the speaker stopped.
+        val validFeatureFrames = ((samples.size + ASR_HOP_SAMPLES - 1) / ASR_HOP_SAMPLES)
+            .coerceIn(1, ParakeetCtcContract.FEATURE_FRAMES)
+        val validSteps = ((validFeatureFrames + ParakeetCtcContract.SUBSAMPLING - 1) /
+            ParakeetCtcContract.SUBSAMPLING).coerceIn(1, ParakeetCtcContract.OUTPUT_FRAMES)
+        val decoded = ctcGreedyDecodeQ16(
+            logProbs = asrOutput.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer(),
+            frames = validSteps,
+            vocabSize = ParakeetCtcContract.VOCAB_SIZE,
+            blankId = ParakeetCtcContract.BLANK_ID,
+            params = outputQuant,
+            skippedIds = setOf(PARAKEET_UNK_ID),
+        )
+        val transcript = detokenizeSentencePiece(decoded.ids, asrTokens)
+        val tokenCount = decoded.ids.size
+        val hypothesis = AsrHypothesis(
+            transcript = transcript,
+            rawLogProb = decoded.rawLogProb,
+            tokenCount = tokenCount,
+            normalizedLogProb = if (tokenCount == 0) {
+                Double.NEGATIVE_INFINITY
+            } else {
+                decoded.rawLogProb / tokenCount
+            },
+        )
         Log.i(
             TAG,
-            "ASR model=$asrArtifactPrefix samples=${samples.size} " +
-                "featureFrames=$validFeatureFrames encoderFrames=$validEncoderFrames " +
+            "ASR model=$asrArtifactPrefix featureFrames=$validFeatureFrames " +
+                "ctcSteps=$validSteps rawLogProb=${hypothesis.rawLogProb} " +
+                // Calibration candidates: CTC peak scores are overconfident.
+                "frameMeanLogProb=${decoded.frameLogProbSum / validSteps} " +
+                "nonBlankFrames=${decoded.nonBlankFrames} " +
+                "tokenCount=$tokenCount normalizedLogProb=${hypothesis.normalizedLogProb} " +
                 "transcript=\"$transcript\"",
         )
-        return transcript
+        return hypothesis
+    }
+
+    /**
+     * Execute this branch's encoder and CPU decoder against a shared frontend
+     * tensor. A read-only direct duplicate prevents either branch from changing
+     * the shared buffer cursor while retaining the same underlying allocation.
+     */
+    fun recognizeSharedRnntFeatures(
+        features: ByteBuffer,
+        validFeatureFrames: Int,
+    ): AsrHypothesis {
+        check(asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
+            "Shared features require an RNN-T encoder"
+        }
+        require(features.isDirect && features.capacity() >= RNNT_FEATURE_BYTES) {
+            "Shared RNN-T features must hold [1,1000,80] FLOAT32"
+        }
+        require(validFeatureFrames in 1..ZipformerFamilyRnntDecoder.FEATURE_FRAMES) {
+            "Invalid RNN-T feature length $validFeatureFrames"
+        }
+        val branchInput = features.asReadOnlyBuffer().order(ByteOrder.nativeOrder()).apply {
+            clear()
+        }
+        execute("$stagePrefix/asr", arrayOf(branchInput), arrayOf(asrOutput))
+        // The encoder's exported length graph is (((T - 7) / 2) + 1) / 2.
+        val validEncoderFrames = ((((validFeatureFrames - 7).coerceAtLeast(0) / 2) + 1) / 2)
+            .coerceIn(1, ZipformerFamilyRnntDecoder.ENCODER_FRAMES)
+        val hypothesis = checkNotNull(rnntDecoder) {
+            "RNN-T host decoder is unavailable"
+        }.decodeScored(asrOutput, validEncoderFrames)
+        Log.i(
+            TAG,
+            "ASR model=$asrArtifactPrefix featureFrames=$validFeatureFrames " +
+                "encoderFrames=$validEncoderFrames rawLogProb=${hypothesis.rawLogProb} " +
+                "tokenCount=${hypothesis.tokenCount} " +
+                "normalizedLogProb=${hypothesis.normalizedLogProb} " +
+                "transcript=\"${hypothesis.transcript}\"",
+        )
+        return hypothesis
     }
 
     private fun recognizeParakeet(samples: FloatArray): String {
@@ -563,6 +725,8 @@ internal class NpuPipeline private constructor(
 
 private enum class NpuAsrMode {
     PARAKEET_CTC,
+    /** sherpa-onnx SM8550 Parakeet-TDT-CTC-110M CTC head, UFIXED_16 I/O. */
+    PARAKEET_CTC_Q16,
     ZIPFORMER_FAMILY_RNNT;
 
     companion object {
@@ -579,6 +743,19 @@ private enum class NpuAsrMode {
                     input.dims == listOf(1, 1001, 80) &&
                     output?.name == "output_0" && output.dtype == "FLOAT_32" &&
                     output.dims == listOf(1, 126, 1025) -> PARAKEET_CTC
+
+                input?.name == "x" && input.dtype == "UFIXED_16" &&
+                    input.dims == listOf(
+                        1,
+                        ParakeetCtcContract.FEATURE_FRAMES,
+                        ParakeetCtcContract.FEATURE_DIM,
+                    ) &&
+                    output?.name == "log_probs" && output.dtype == "UFIXED_16" &&
+                    output.dims == listOf(
+                        1,
+                        ParakeetCtcContract.OUTPUT_FRAMES,
+                        ParakeetCtcContract.VOCAB_SIZE,
+                    ) -> PARAKEET_CTC_Q16
 
                 else -> error(
                     "Unsupported NPU ASR contract: ${stage.inputs} -> ${stage.outputs}",

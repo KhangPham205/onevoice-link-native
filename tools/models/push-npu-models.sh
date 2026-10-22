@@ -3,16 +3,16 @@
 # push-npu-models.sh — stage the automatic Hybrid bundle onto a device
 # ----------------------------------------------------------------------------
 # Copies QNN contexts plus the required host-side models into the layout the app
-# expects. Hybrid is bidirectional and chooses a branch from SpeechFlow audio LID:
+# expects. Hybrid defaults to dual-ASR confidence routing; SpeechFlow remains
+# staged so `routingMode=LID` can be built for A/B comparison:
 #
 #   <filesDir>/models/npu/shared/speechflow_langid.tflite
 #   <filesDir>/models/npu/shared/speechflow_{labels,contract}.json
 #   <filesDir>/models/npu/vi-en/{asr_gipformer_encoder,mt_encoder,mt_decoder}.bin
 #   <filesDir>/models/npu/vi-en/asr_gipformer_{decoder,joiner}.onnx
 #   <filesDir>/models/npu/vi-en/asr_gipformer_{tokens,bpe,config}.*
-#   <filesDir>/models/npu/en-vi/{asr_zipformer_encoder,mt_encoder,mt_decoder}.bin
-#   <filesDir>/models/npu/en-vi/asr_zipformer_{decoder,joiner}.onnx
-#   <filesDir>/models/npu/en-vi/asr_zipformer_tokens.txt
+#   <filesDir>/models/npu/en-vi/{asr_parakeet_ctc,mt_encoder,mt_decoder}.bin
+#   <filesDir>/models/npu/en-vi/asr_parakeet_tokens.txt
 #
 # Each direction also gets Marian host tokenizers, a whole-utterance CPU Kokoro
 # model, voice/token files and exact eSpeak data. A complete CPU ASR+MT branch
@@ -73,6 +73,12 @@ shared/speechflow_labels.json	../models-npu-generated/lid/speechflow_labels.json
 shared/speechflow_contract.json	../models-npu-generated/lid/speechflow_contract.json
 EOF
 
+# en-vi/tts_tokens.txt is NOT the upstream Kokoro-Vietnamese token table.
+# sherpa-onnx phonemizes with espeak-ng `vi`, which writes tones as digits
+# (1/7 ngang, 2 huyền, 3->ɜ sắc, 4 hỏi, 5 ngã, 6 nặng) and đ as ɗ. None exist in
+# the model's vocab, so sherpa silently dropped every tone. The tracked table
+# aliases them to the vig2p tone arrows the model was trained on (ngã/nặng lose
+# their glottal ʔ). Measured: TTS->GIPFormer round-trip CER 9.8% -> 0.0%.
 read -r -d '' VI_EN <<'EOF' || true
 vi-en/asr_gipformer_encoder.bin	asr/gipformer_65m_rnnt-bundle/bin/encoder.bin
 vi-en/asr_gipformer_decoder.onnx	asr/gipformer_65m_rnnt-bundle/decode/decoder-epoch-35-avg-6.onnx
@@ -99,17 +105,15 @@ vi-en/fallback/mt/mt_config.json	../models-hf/mt-vi-en/mt_config.json
 EOF
 
 read -r -d '' EN_VI <<'EOF' || true
-en-vi/asr_zipformer_encoder.bin	asr/zipformer_small_en-bundle/bin/encoder.bin
-en-vi/asr_zipformer_decoder.onnx	asr/zipformer_small_en-bundle/decode/decoder-epoch-99-avg-1.onnx
-en-vi/asr_zipformer_joiner.onnx	asr/zipformer_small_en-bundle/decode/joiner-epoch-99-avg-1.onnx
-en-vi/asr_zipformer_tokens.txt	asr/zipformer_small_en-bundle/decode/tokens.txt
+en-vi/asr_parakeet_ctc.bin	asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/model.bin
+en-vi/asr_parakeet_tokens.txt	asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/tokens.txt
 en-vi/mt_encoder.bin	mt/opus_mt_en_vi__float_8gen2/encoder_float.bin
 en-vi/mt_decoder.bin	mt/opus_mt_en_vi__float_8gen2/decoder_float.bin
 en-vi/mt_source.spm	../models-hf/mt-en-vi/source.spm
 en-vi/mt_target.spm	../models-hf/mt-en-vi/target.spm
 en-vi/mt_vocab.json	../models-hf/mt-en-vi/vocab.json
 en-vi/mt_config.json	../models-hf/mt-en-vi/mt_config.json
-en-vi/tts_tokens.txt	../models-hf/tts-vi/tokens.txt
+en-vi/tts_tokens.txt	../tools/models/kokoro-vi-espeak-tokens.txt
 en-vi/tts_voices.bin	../models-hf/tts-vi/voices.bin
 en-vi/tts_cpu.onnx	../models-hf/tts-vi/model.onnx
 en-vi/fallback/asr/model.onnx	../models-hf/asr-en/model.int8.onnx
@@ -134,10 +138,9 @@ case "$WHICH" in
   *) echo "usage: $0 [auto|vi-en|en-vi|all] [adb-serial]" >&2; exit 2 ;;
 esac
 
-# Refuse a partial deployment before touching the phone. In particular,
-# convert_speechflow_lid.py writes the three shared files as one reviewed
-# contract; a .tflite without its exact labels/frontend metadata is not runnable
-# safely — the label order is what decides VI vs EN routing.
+# Refuse a partial deployment before touching the phone. The converter writes
+# the three shared files as one reviewed contract; a model without its exact
+# labels/frontend metadata is not safe to use for LID A/B.
 missing_sources=0
 while IFS=$'\t' read -r dest src; do
   [ -n "${dest:-}" ] || continue

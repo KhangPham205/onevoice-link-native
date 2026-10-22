@@ -1,0 +1,7 @@
+cohort,iteration,fixture,direction,lid_decision,lid_confidence,speech_duration_s,forced_boundary,execution_path,lid_ms,asr_ms,mt_ms,tts_ms,queue_wait_ms,ttfa_ms,e2e_ms,hangover_ms,echo_guard_ms,e2e_minus_hangover_ms,mt_output_tokens,tts_output_chars,tts_output_audio_s,asr_rtf,tts_rtf,thermal_status,power_mode,underruns,frames_requested,frames_written,energy_valid,charge_counter_delta_uah,avg_power_w,energy_j,energy_per_utterance_j,energy_per_audio_s_j
+baseline,0,vi_real_3.0s.f32,vi-en,vietnamese,1.0000,3.040,false,HYBRID_NPU,39,134,71,2069,0,2313,5563,1000,300,4263,8,30,3.250,0.0441,0.6366,0,burst,3,315600,315600,false,,,,,
+baseline,1,vi_synth_1.6s.f32,vi-en,vietnamese,1.0000,1.625,false,HYBRID_NPU,46,128,48,1445,1158,1667,3967,1000,300,2667,4,18,2.300,0.0788,0.6283,0,burst,4,393600,393600,false,,,,,
+baseline,2,vi_synth_5.8s.f32,vi-en,vietnamese,1.0000,5.800,false,HYBRID_NPU,52,158,164,5231,0,5605,13205,1000,300,11905,24,116,7.600,0.0272,0.6883,0,burst,4,448800,448800,false,,,,,
+baseline,3,vi_real_3.0s.f32,vi-en,vietnamese,1.0000,3.040,false,HYBRID_NPU,46,143,73,2105,0,2367,5617,1000,300,4317,8,30,3.250,0.0470,0.6477,0,burst,4,631200,631200,false,,,,,
+baseline,4,vi_synth_1.6s.f32,vi-en,vietnamese,1.0000,1.625,false,HYBRID_NPU,31,125,50,1498,0,1704,4004,1000,300,2704,4,18,2.300,0.0769,0.6513,0,burst,5,709200,709200,false,,,,,
+baseline,5,vi_synth_5.8s.f32,vi-en,vietnamese,1.0000,5.800,false,HYBRID_NPU,35,146,163,5283,0,5627,13227,1000,300,11927,24,116,7.600,0.0252,0.6951,0,burst,5,764400,764400,false,,,,,

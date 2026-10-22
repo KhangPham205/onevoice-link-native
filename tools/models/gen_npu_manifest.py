@@ -37,9 +37,10 @@ TARGET_SOC = {"qnnSocModel": 43, "socModel": "SM8550",
               "marketing": "Snapdragon 8 Gen 2", "hexagon": "v73"}
 
 # (direction, stage, deployed filename, path under onevoice-npu-bins/)
-# Both ASR models are transducer bundles: only their encoders are QNN contexts,
-# while the small decoder + joiner stay as host-side ONNX models staged by
-# push-npu-models.sh. This manifest intentionally lists QNN contexts only;
+# The VI ASR is a transducer bundle: only its encoder is a QNN context, while
+# the small decoder + joiner stay as host-side ONNX models staged by
+# push-npu-models.sh. The EN ASR is sherpa-onnx's SM8550 Parakeet-TDT-CTC-110M
+# CTC-head binary: one quantized graph, decoded greedily on the host. This manifest intentionally lists QNN contexts only;
 # Direction-routing state, host transducer pieces, CPU ASR fallback, and
 # whole-utterance Kokoro are deployment assets rather than graphRetrieve targets.
 #
@@ -50,14 +51,14 @@ DEPLOY = [
     ("vi-en", "asr",         "asr_gipformer_encoder.bin", "asr/gipformer_65m_rnnt-bundle/bin/encoder.bin"),
     ("vi-en", "mt_encoder",  "mt_encoder.bin",      "mt/opus_mt_vi_en__float_8gen2/encoder_float.bin"),
     ("vi-en", "mt_decoder",  "mt_decoder.bin",      "mt/opus_mt_vi_en__float_8gen2/decoder_float.bin"),
-    ("en-vi", "asr",         "asr_zipformer_encoder.bin", "asr/zipformer_small_en-bundle/bin/encoder.bin"),
+    ("en-vi", "asr",         "asr_parakeet_ctc.bin", "asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/model.bin"),
     ("en-vi", "mt_encoder",  "mt_encoder.bin",      "mt/opus_mt_en_vi__float_8gen2/encoder_float.bin"),
     ("en-vi", "mt_decoder",  "mt_decoder.bin",      "mt/opus_mt_en_vi__float_8gen2/decoder_float.bin"),
 ]
 
 LABELS = {
     ("vi-en", "asr"): "ASR · GIPFormer-65M RNN-T vi",
-    ("en-vi", "asr"): "ASR · Zipformer-small RNN-T en",
+    ("en-vi", "asr"): "ASR · Parakeet-TDT-CTC-110M en (CTC)",
     ("vi-en", "mt_encoder"): "MT encoder · opus-mt vi→en",
     ("vi-en", "mt_decoder"): "MT decoder · opus-mt vi→en",
     ("en-vi", "mt_encoder"): "MT encoder · opus-mt en→vi",
@@ -94,9 +95,16 @@ def dump(src: str) -> dict:
 
 def tensor(t: dict) -> dict:
     i = t["info"]
-    return {"name": i["name"],
-            "dtype": i["dataType"].replace("QNN_DATATYPE_", ""),
-            "dims": i["dimensions"]}
+    out = {"name": i["name"],
+           "dtype": i["dataType"].replace("QNN_DATATYPE_", "").replace("_POINT", ""),
+           "dims": i["dimensions"]}
+    # Fixed-point tensors are useless to the host without their encoding:
+    # real = scale * (q + offset). Recorded from the binary, never hand-copied.
+    q = i.get("quantizeParams") or {}
+    if q.get("quantizationEncoding") == "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET":
+        out["scale"] = q["scaleOffset"]["scale"]
+        out["offset"] = q["scaleOffset"]["offset"]
+    return out
 
 
 def main() -> int:

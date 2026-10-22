@@ -3,6 +3,7 @@ package com.onevoice.link.ui.screens
 import android.content.res.Configuration
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
+import com.onevoice.link.headset.AuracastCapability
 import com.onevoice.link.headset.ConnectedHeadset
 import com.onevoice.link.headset.HeadsetInventoryState
 import com.onevoice.link.headset.HeadsetLanguage
@@ -36,6 +37,12 @@ private val SETTINGS_HEADSETS = listOf(
     ),
 )
 
+private val AURACAST_SUPPORTED = AuracastCapability(
+    sourceSupported = true,
+    assistantSupported = true,
+    permissionGranted = true,
+)
+
 @Preview(name = "Connected headsets", showBackground = true)
 @Preview(
     name = "Connected headsets dark",
@@ -51,6 +58,8 @@ private fun ConnectedHeadsetsPreview() {
             onRequestBluetoothConnect = {},
             onRefresh = {},
             onLanguageChanged = { _, _ -> },
+            auracastCapability = AURACAST_SUPPORTED,
+            onOpenBluetoothSettings = {},
         )
     }
 }
@@ -65,6 +74,8 @@ private fun HeadsetPermissionPreview() {
             onRequestBluetoothConnect = {},
             onRefresh = {},
             onLanguageChanged = { _, _ -> },
+            auracastCapability = AuracastCapability(false, false, false),
+            onOpenBluetoothSettings = {},
         )
     }
 }
@@ -79,6 +90,8 @@ private fun HeadsetLargeFontPreview() {
             onRequestBluetoothConnect = {},
             onRefresh = {},
             onLanguageChanged = { _, _ -> },
+            auracastCapability = AURACAST_SUPPORTED,
+            onOpenBluetoothSettings = {},
         )
     }
 }

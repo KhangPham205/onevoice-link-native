@@ -126,7 +126,7 @@ class BenchControlReceiver : BroadcastReceiver() {
                     return
                 }
                 // Integer 3:2 decimation with a short box filter. Crude, but the
-                // fixture only has to be intelligible to LID and ASR, and a
+                // fixture only has to be intelligible to ASR, and a
                 // sharper filter would add a dependency for no measurable gain.
                 val decimated = FloatArray(result.size * 2 / 3)
                 for (i in decimated.indices) {
@@ -146,6 +146,40 @@ class BenchControlReceiver : BroadcastReceiver() {
                             "seconds=${"%.2f".format(decimated.size / 16000.0)}")
                     }
                     .onFailure { Log.w(TAG, "synth write failed", it) }
+            }
+
+            "vadprobe" -> {
+                // Run the capture VAD over a fixture, bypassing the microphone,
+                // so a weak live result can be split into "detector" versus
+                // "acoustic path" causes. Logs the per-second peak score.
+                val path = intent.getStringExtra(EXTRA_PATH) ?: return
+                val bytes = runCatching { File(path).readBytes() }.getOrElse {
+                    Log.w(TAG, "vadprobe failed to read $path", it)
+                    return
+                }
+                val samples = FloatArray(bytes.size / Float.SIZE_BYTES)
+                ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(samples)
+                val mode = VadMode.parse(intent.getStringExtra(EXTRA_MODE) ?: "SILERO")
+                createSpeechDetector(mode, context.assets, NpuEngine.VAD_RMS_THRESHOLD).use { vad ->
+                    val frame = ShortArray(NpuEngine.FRAME_SAMPLES)
+                    var offset = 0
+                    var second = 0
+                    while (offset < samples.size) {
+                        var peak = 0f
+                        var speech = 0
+                        repeat(50) {
+                            val count = minOf(frame.size, samples.size - offset)
+                            if (count <= 0) return@repeat
+                            for (i in 0 until count) {
+                                frame[i] = (samples[offset + i].coerceIn(-1f, 1f) * 32_767f).toInt().toShort()
+                            }
+                            offset += count
+                            if (vad.isSpeech(frame, count)) speech++
+                            peak = maxOf(peak, vad.lastScore)
+                        }
+                        Log.i(TAG, "vadprobe ${vad.name} t=${second++}s peak=${"%.3f".format(peak)} speechFrames=$speech")
+                    }
+                }
             }
 
             "feed" -> {
@@ -172,8 +206,19 @@ class BenchControlReceiver : BroadcastReceiver() {
                 val samples = FloatArray(bytes.size / Float.SIZE_BYTES)
                 ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
                     .asFloatBuffer().get(samples)
+                val direction = when (intent.getStringExtra(EXTRA_DIRECTION) ?: "vi-en") {
+                    "vi-en" -> TranslationDirection.VI_TO_EN
+                    "en-vi" -> TranslationDirection.EN_TO_VI
+                    // Production routing: the router, not the harness, picks the branch.
+                    "auto" -> null
+                    else -> {
+                        Log.w(TAG, "feed ignored: invalid direction")
+                        return
+                    }
+                }
                 val accepted = engine.benchFeed(
                     samples,
+                    direction = direction,
                     forcedBoundary = intent.getBooleanExtra(EXTRA_FORCED, false),
                 )
                 Log.i(TAG, "feed ${file.name} samples=${samples.size} accepted=$accepted")

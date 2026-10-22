@@ -1,129 +1,310 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with
+code in this repository.
 
 ## What this is
 
-On-device speech-to-speech translation (Vietnamese ↔ English) for Snapdragon phones. The app exposes one production backend: **automatic Hybrid**. A CPU SpeechFlow LID classifier (TFLite) identifies each completed utterance, then the app routes it without user input:
+OneVoice Link is on-device, utterance-bounded speech-to-speech translation
+(Vietnamese ↔ English) for Snapdragon phones. The app exposes one user backend:
+**Hybrid**.
 
-- VI→EN: GIPFormer encoder and MarianMT execute on Hexagon HTP; the small RNN-T decoder/joiner and whole-utterance Kokoro EN run on CPU.
-- EN→VI: Zipformer-small encoder and MarianMT execute on Hexagon HTP; the small RNN-T decoder/joiner and whole-utterance Kokoro VI run on CPU.
-- Unknown/low-confidence language: fail closed, emit no translation or audio.
+- VI→EN: GIPFormer ASR encoder and MarianMT execute on Hexagon HTP; the
+  RNN-T decoder/joiner and whole-utterance Kokoro EN execute on CPU.
+- EN→VI: Parakeet-TDT-CTC-110M (CTC head, sherpa-onnx SM8550 binary,
+  UFIXED_16 I/O) and MarianMT execute on Hexagon HTP; greedy CTC decoding and
+  whole-utterance Kokoro VI execute on CPU. It replaced the LibriSpeech-only
+  Zipformer-small, which failed on Vietnamese-accented English.
+- The default source-language router is dual ASR, not a headset assignment:
+  both ASRs score every bounded utterance and the app compares average emitted-
+  token log-probability.
+- SpeechFlow LID is retained only for build-time A/B testing with
+  `-ProutingMode=LID`. Its assets, JNI frontend and TFLite Select Ops dependency
+  must not be removed until the experiment is complete.
 
-CPU models may be retained as cold, whole-utterance failover assets, but there is no user-facing CPU or Full-QNN mode. The old fixed-window QNN Kokoro work remains historical evidence only.
+The live product premise is two people sharing one JBL stereo TWS pair, one bud
+each, and speaking in turns. Android exposes the pair as one communication mic;
+it cannot identify which bud supplied an utterance. Connected-headset inventory
+and saved VI/EN preferences may remain in Settings, but they do not select the
+source direction. Auracast is a possible one-to-many downlink, not source
+language evidence. See `docs/AURACAST_ROUTING.md`.
 
-The Settings screen inventories connected Bluetooth audio endpoints and stores
-their preferred VI/EN listening language. This is future Auracast provisioning,
-not an active audio route. Auracast is downlink-only and does not identify the
-speaker; keep acoustic LID until an authenticated, exclusive speaker-floor plus
-verified microphone route supplies an endpoint ID. Route planning must snapshot
-one speaker and all listeners at the utterance boundary and fail closed on an
-unknown/ambiguous speaker. See `docs/AURACAST_ROUTING.md`.
+Audio I/O is a persisted Dashboard choice (`AudioRoutePreference`), resolved at
+every IDLE → CAPTURING edge: **Auto** (default) uses Bluetooth when exactly one
+communication headset is usable, otherwise the phone; **Phone** uses the
+built-in mic (`VOICE_RECOGNITION`) and loudspeaker so two people can share one
+handset and developers/judges need no headset; **Bluetooth** keeps the HFP/A2DP
+contract below and fails closed without a headset. The route selects devices
+only, never the translation direction.
 
-Target hardware is fixed: **arm64-v8a, Snapdragon 8 Gen 2** (`SM8550` / `kalama` / Hexagon **v73**, `qnnSocModel` 43). No other ABI is built.
+CPU fallback ASR/MT models remain cold, whole-utterance recovery assets; CPU
+Kokoro is the active target-speech renderer. There is no user-facing CPU-only
+or Full-QNN mode. The old fixed-window QNN Kokoro path remains historical
+evidence only.
 
-## Build & deploy
+Target hardware is fixed: **arm64-v8a, Snapdragon 8 Gen 2**
+(`SM8550` / `kalama` / Hexagon **v73**, `qnnSocModel` 43). No other ABI is built.
+
+## Build and deploy
 
 ```bash
 cd android-app
-./gradlew :app:assembleDebug          # → app/build/outputs/apk/debug/app-debug.apk (~177 MB)
+./gradlew :app:assembleDebug
 ./gradlew :app:installDebug
-./gradlew :app:testDebugUnitTest      # unit tests (JVM)
-./gradlew :app:test --tests '*ExampleUnitTest*'   # single test
+./gradlew :app:testDebugUnitTest
+./gradlew :app:test --tests '*ExampleUnitTest*'
 ```
 
-Model binaries are **not** in the APK — push them separately (needs a debuggable build for `run-as`):
+Model binaries are not in the APK. Stage both Hybrid directions and the retained
+SpeechFlow A/B files separately; a debuggable build is required for `run-as`:
 
 ```bash
-python3 tools/models/convert_speechflow_lid.py models-src/speechflow-lid
-tools/models/push-npu-models.sh auto R5CW72TP4EP  # LID + both Hybrid directions
-adb logcat -s OneVoiceNpu:* OneVoiceQNN:* OneVoiceCore:* adsprpc:V
+tools/models/push-npu-models.sh auto R5CW72TP4EP
+adb logcat -s OneVoiceNpu:* OneVoiceRouting:* OneVoiceHalfDuplex:* OneVoiceQNN:* OneVoiceCore:* adsprpc:V
 ```
 
 Gradle properties that change runtime behavior:
 
 ```bash
--PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so   # inject an OEM/test-signed Hexagon skeleton
--PqnnPdMode=auto|signed|unsigned                    # process-domain selection (default auto)
+-ProutingMode=DUAL_ASR                 # DUAL_ASR (default) or LID
+-PdualAsrMarginThreshold=0.15          # provisional natural-log-prob/token margin
+-PdualAsrFloorThreshold=-5.0           # provisional per-branch acceptance floor
+-PdualAsrEnOffset=-0.08                # EN (CTC) score calibration offset
+-PdualAsrPriorWeight=0.15              # soft turn prior, nats/token (>= margin = hard prior)
+-PkokoroThreads=4                      # ORT threads per Kokoro session (2/4/5 measured)
+-PvadMode=SILERO                       # SILERO (bundled asset) or legacy ENERGY RMS gate
+-PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
+-PqnnPdMode=auto                        # auto (default), signed or unsigned
 ```
 
-### Build environment gotchas (these will bite)
+Routing values come from `android-app/gradle.properties` and are embedded in
+`BuildConfig`, so each tuning APK records its policy. Do not hide threshold
+defaults in decoder code.
 
-- **Pin the JDK.** Gradle otherwise may pick a VS Code extension JRE without `jlink`:
-  `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew --no-daemon --no-parallel --max-workers=1 :app:assembleDebug`
-- **VS Code's Gradle/Java extensions hold Gradle locks** and auto-restart when killed, which hangs terminal builds with `Timeout waiting to lock … Owner PID: …`. Either disable those extensions, build in Android Studio, or isolate: `GRADLE_USER_HOME=/tmp/gradle-isolated ./gradlew --no-daemon …`.
-- Do not delete `.cxx` or run `clean` routinely. Prefer an incremental build. A clean LTO link may need 3–4 GB free RAM.
-- `android-app/gradle.properties` deliberately caps Gradle at a 1 GiB heap, one worker, no parallel execution, and in-process Kotlin. Do not raise those limits casually: a former 4 GiB Gradle + 2 GiB Kotlin-daemon configuration caused the development laptop to be OOM-killed.
-- Open the Android Studio project at `android-app/` (that is where `gradle.xml` lives), not the repo root.
+### Build environment gotchas
+
+- Pin the JDK. Gradle may otherwise pick a VS Code extension JRE without
+  `jlink`:
+  `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew --no-daemon --no-parallel --max-workers=1 :app:assembleDebug`.
+- VS Code Gradle/Java extensions hold Gradle locks and auto-restart when killed.
+  Disable them, build in Android Studio, or isolate with
+  `GRADLE_USER_HOME=/tmp/gradle-isolated`.
+- Do not delete `.cxx` or run `clean` routinely. Prefer incremental builds; a
+  clean LTO link may need 3–4 GB free RAM.
+- `android-app/gradle.properties` caps Gradle at a 1 GiB heap, one worker, no
+  parallel execution and in-process Kotlin. Do not raise these casually: the
+  former 4 GiB Gradle plus 2 GiB Kotlin daemon caused the development laptop to
+  be OOM-killed.
+- Open the Android Studio project at `android-app/`, not the repo root.
 
 ## Architecture
 
-Read `docs/ARCHITECTURE.md` for the threading model. The essentials:
+`docs/ARCHITECTURE.md` is authoritative. The essential invariants follow.
 
-**Live audio is bounded.** Hybrid uses `AudioRecord` and `AudioTrack` from capture and inference workers: 20 ms VAD frames, 300 ms pre-roll, one-second end hangover, a 10-second static ASR window, 500 ms overlap at forced window boundaries, and a queue of two utterances. LID and all learned inference run after a complete segment, never on the audio read loop.
+### Dual-ASR confidence routing
 
-**JNI is confined to one file.** `native-core/src/main_jni.cpp` binds Kotlin direct buffers to the generic `QnnRuntime::executeGraph` and runs the exact ASR/LID feature frontends. `core/OneVoiceNative.kt` is the Kotlin mirror — changing arity/order on either side breaks the other silently. The old Oboe `executeCascade()` worker is not used by Hybrid.
+Every accepted utterance is bounded before inference. In default `DUAL_ASR`
+mode, `AutoHybridPipeline` submits both ASR branches concurrently:
 
-**The two branches use six separate QNN context binaries, not one graph.** Each direction owns ASR encoder → MT encoder → MT decoder. `QnnRuntime` creates the backend/device **once** and one context **per stage** (`native-core/src/qnn_runtime.cpp`). Direction-qualified runtime keys are mandatory because both Marian directions embed the graph names `opus_mt_encoder` and `opus_mt_decoder`. Loading each stage is a 3-step proof, reported separately so failures are diagnosable:
+- VI: the Kaldi fbank `[1,1000,80]` FP32 frontend is computed once into a
+  shared direct buffer; GIPFormer graph `graph_oa00nu3e`, then CPU RNN-T
+  decode/join.
+- EN: Parakeet needs NeMo log-mel instead, so its task builds its own
+  (`nativeExtractAsrFeatures`, per-feature normalized, first 1000 of 1001
+  frames), quantizes to UFIXED_16 with the manifest's scale/offset, runs graph
+  `model`, and greedy-decodes the quantized `log_probs [1,125,1025]`.
 
-1. `QnnSystemContext_getBinaryInfo` — parse blob, read graph name + I/O contract + `socModel`, no hardware.
-2. `contextCreateFromBinary` — place graphs on the HTP (fails on wrong Hexagon arch or DSP-access denial).
-3. `graphRetrieve(graphName)` — confirm graph identity.
+Both report the raw sum of emitted lexical-token log-probabilities (blank and
+unknown excluded; for CTC, one term per token run, its peak frame), token count
+and `normalizedLogProb = rawLogProb / tokenCount`. CTC peak scores run closer to
+zero than RNN-T scores, so `dualAsrEnOffset` is added to the EN score before any
+comparison. The decision policy is:
 
-**Graph names are not guessable and not in the shipped metadata.** `assets/npu_manifest.json` is the single source of truth, generated from the binaries themselves via `python3 tools/models/gen_npu_manifest.py`. Regenerate it whenever the model team ships new `.bin`, or `graphRetrieve` fails.
+1. Both scores below `dualAsrFloorThreshold`: fail closed.
+2. Absolute score difference at least `dualAsrMarginThreshold`: select the
+   higher branch.
+3. Smaller difference with no prior: fail closed.
+4. Smaller difference with a prior: add `dualAsrPriorWeight` toward the expected
+   language and take the sign (`soft_margin` when the scores overrule the
+   prior, `prior` otherwise). A hard prior discarded real score leads.
 
-**QNN libraries are `dlopen`'d, never linked.** `libonevoice_core.so` deliberately has no QNN `DT_NEEDED` entries, because `ADSP_LIBRARY_PATH` must be published *before* `libQnnHtp.so` first loads — an ELF NEEDED entry would load it too early and make the later `setenv` useless. `openQnnLib()` tries soname first, absolute path second (`useLegacyPackaging = false` keeps `.so` mmap'd inside the APK, so absolute paths may not exist on disk).
+The expected language is the opposite of the last successfully translated turn,
+except after a hard 10-second boundary: that speaker was cut mid-thought, so
+the same language is expected next. Length
+normalization removes short-string bias, but it does not calibrate two models
+with different token vocabularies or model families. The defaults (`0.15`
+margin, `-0.08` EN offset, `-5.0` floor) were fit on 21 synthetic on-device
+fixtures and are provisional; tune them from labeled real-speaker logs.
 
-**The Hexagon skeleton ships as an asset, not a jniLib.** `libQnnHtpV73Skel.so` is a DSP6 binary; putting it in `jniLibs/arm64-v8a` would make the Android linker misread it as ARM64. It is extracted to `<filesDir>/dsp/{signed,unsigned}/` at runtime and that directory is prepended to `ADSP_LIBRARY_PATH`.
+If either dual-routing ASR branch throws, confidence comparison is incomplete
+and the utterance fails closed. Do not fabricate a CPU confidence. Once routing
+has selected a direction, a selected Marian text-path failure quarantines that
+NPU text path and cold-restarts CPU ASR+MT from the original bounded PCM. Do not
+splice partial NPU and CPU output. If recovery also fails, fail closed.
 
-**Models live in internal `filesDir`, not external storage.** On Android 11+ (verified on Android 16 / One UI) an app cannot see files under its own `Android/data/<pkg>/files/` created by another uid — `adb shell` lists them, the path matches byte-for-byte, and the app still gets `exists() == false`; chowning does not help. `NpuEngine.candidateRoots` checks both and uses whichever actually holds models.
+`-ProutingMode=LID` loads the retained SpeechFlow TFLite model from `shared` and
+selects a direction before the normal Hybrid branch. LID is an APK-level A/B
+flag, not a UI mode, and all six QNN contexts remain resident in either mode.
 
-**Automatic routing is Kotlin/native-library orchestration, not the old C++ cascade worker.** SpeechFlow LID decides VI, EN or unknown for each bounded utterance. The chosen branch owns its QNN ASR/MT contexts and CPU transducer/Kokoro host glue. An unknown decision never falls back to a default language. Transcript, translation and replay are published with the actual per-utterance route; replay becomes available only after TTS publishes a complete waveform.
+### Strict half-duplex audio
 
-**Headset assignments do not currently replace LID.** The public Android
-inventory cannot identify an individual Auracast listener or the active talker,
-and an ordinary APK cannot manage Auracast broadcasts without a privileged OEM
-service. `headset/HeadsetRoutePlanner.kt` is a pure future policy boundary; it
-must not be interpreted as proof that audio was routed.
+The production state machine is:
 
-## Current status — read before debugging inference
+`IDLE → CAPTURING → PROCESSING → PLAYING → IDLE`
 
-Keep the capability boundary explicit when debugging:
+- `CAPTURING`: Bluetooth route: select the shared communication device, open
+  SCO and `AudioRecord(VOICE_COMMUNICATION)`. Phone route: prefer the built-in
+  mic with `AudioRecord(VOICE_RECOGNITION)` and discard the first 300 ms so the
+  loudspeaker tail cannot open a turn. Either way, verify the actual input
+  route. There is no playback.
+- `PROCESSING`: stop/release `AudioRecord`; on the Bluetooth route call
+  `clearCommunicationDevice()` to close SCO (the phone route never claims one).
+  Then run ASR→routing→MT→TTS. Before submitting translated PCM, start a stereo
+  `AudioTrack` on 100 ms of silence and poll `getRoutedDevice()`: Bluetooth
+  must confirm the matching A2DP sink or fail closed; the phone route logs a
+  non-speaker route instead of dropping the turn. Content is appended behind
+  that silence (no pause/flush: the loudspeaker path applied flush late).
+- `PLAYING`: drain the whole stereo waveform. Capture cannot reopen until the
+  state returns to `IDLE`.
 
-- **Automatic Hybrid is the only user-facing path.** SpeechFlow LID runs on CPU/TFLite before ASR. Its SavedModel export excludes the audio frontend, so `models-npu-generated/lid/speechflow_contract.json` and `speechflow_labels.json` are as mandatory as the `.tflite` itself. Three traps, all silent: features are **time-major** `[1,1000,80]` (AmberNet was channel-first), normalization is **whole-utterance** (`normalize_per_feature: false`), and `output_1` is **raw logits despite being all-negative** — `exp()` over the vector sums to ~0.27, so softmax is required. The 14th class `other` is not a guard; gaussian noise ranks `italian` at p≈0.72. Two of 83 nodes need `tensorflow-lite-select-tf-ops`, which costs ~68 MB of APK.
-- **Both Hybrid directions have QNN ASR encoders.** VI uses GIPFormer graph `graph_oa00nu3e`; EN uses Zipformer-small graph `graph_shbblv7u`. Both contracts are FP32 `[1,1000,80]` → `[1,248,512]` on SM8550/v73. Their decoder/joiner ONNX files remain CPU host glue.
-- **Both Marian directions execute on HTP.** Their embedded graph names repeat, so never use the raw logical role as the sole loaded-context key when both directions are resident.
-- **Kokoro remains whole-utterance CPU by design.** This preserves continuous prosody and avoids the old fixed-window QNN decoder seams. Do not restore the former Full-QNN selector.
-- **CPU recovery is lazy and atomic at the utterance boundary.** An ASR/MT exception quarantines that direction's HTP text path; the cold CPU ASR+Marian bundle restarts from captured PCM rather than splicing partial results. An uncertain LID decision always fails closed even if CPU assets exist.
-- **The former `contextCreateFromBinary` `0x36b1` failure is resolved.** `0x36b1`
-  is `QNN_DEVICE_ERROR_INVALID_CONFIG`; it did not prove a signature-policy
-  failure. The real log chain was `libcdsprpc.so not found` → FastRPC remote
-  symbols/transport failed → QNN surfaced 14001. Because the app targets API
-  36, Android only exposes this public vendor non-NDK library when the manifest
-  declares `<uses-native-library android:name="libcdsprpc.so">`.
-  - Verified on the connected SM8550 device on 2026-08-08: unsigned-PD control
-    returned 0, the QNN backend initialized, and all five VI→EN contexts loaded
-    (`socModel=43`, binary build v2.45.0).
-  - The working path uses QAIRT's **unsigned** v73 skeleton. A testsig is not
-    required for this app path. Hexagon TestSig is for debug-fused/test devices;
-    it is not a production trust anchor for a locked OEM retail phone.
-  - If 14001 recurs, inspect the preceding QNN/FastRPC transport logs first.
-    Check `libcdsprpc` visibility, unsigned-control result, skeleton lookup and
-    stub/skel versions; never infer “needs signed skel” from the number alone.
-  - The real DSP serial comes from `adb shell cat /sys/devices/soc0/serial_number`
-    or the SDK's `getserial` — **not** from the ADB/USB serial string.
-  - `ADSP_LIBRARY_PATH` only controls DSP-side lookup. It does not grant SELinux
-    permissions or bypass signature validation.
+There is one in-flight turn and a queue capacity of one. Capture and playback
+must never overlap. Capture uses 20 ms frames labelled by Silero VAD (32 ms
+windows, 0.5 onset / 0.35 offset; legacy RMS gate via `-PvadMode=ENERGY`),
+300 ms pre-roll, a one-second end hangover and a hard 10-second ceiling. The strict half-duplex path has no
+forced-boundary overlap or carried tail.
 
-  Full postmortem: `docs/incidents/2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md`.
-  See also `docs/QNN_SIGNED_DSP.md` (signed skeleton vs. testsig, and the HTP
-  signed-PD device config) and `docs/NPU_DEPLOY.md`.
+Kokoro returns whole-utterance mono at 24 kHz. On the Bluetooth route,
+interleave it into stereo with the unused channel set to zero: target
+Vietnamese (`en-vi`) is **left** and target English (`vi-en`) is **right**. On
+the phone route both channels carry the waveform.
 
-Full offline runtime/deployment notes: `docs/OFFLINE_PIPELINE.md`.
+### Resident QNN contexts and threading
+
+The two directions use exactly six resident context binaries:
+
+- `vi-en/asr`, `vi-en/mt_encoder`, `vi-en/mt_decoder`
+- `en-vi/asr`, `en-vi/mt_encoder`, `en-vi/mt_decoder`
+
+Direction-qualified runtime keys are mandatory because both Marian directions
+embed `opus_mt_encoder` and `opus_mt_decoder`. Initialization fails and releases
+partial state unless all six load.
+
+The two ASR host tasks are submitted concurrently. `QnnRuntime` still guards
+all `graphExecute` calls with one global `executionMutex`; encoder execution on
+HTP is therefore serial, while one branch's CPU RNN-T decoder can overlap the
+other branch's HTP encoder. This is intentional. `qnn_runtime.cpp` was not
+changed to assert QNN concurrency that the current shared profiling/lifecycle
+state cannot safely support.
+
+`OneVoiceNpu` logs a memory snapshot after six contexts load and another after
+host glue loads. `peak_rss_kb` is app-process `VmHWM`; it does not include all
+DSP-private memory.
+
+### JNI and QNN loading
+
+`native-core/src/main_jni.cpp` binds Kotlin direct buffers to
+`QnnRuntime::executeGraph` and implements the ASR frontends.
+`core/OneVoiceNative.kt` is its mirror. Changing JNI arity or argument order on
+one side without the other is an ABI break. The obsolete Oboe
+`executeCascade()` worker is not used by Hybrid.
+
+`QnnRuntime` creates the backend/device once and one context per stage. Each
+load reports three distinct checks:
+
+1. `QnnSystemContext_getBinaryInfo`: parse graph name, tensor contract,
+   `socModel` and build metadata without touching hardware.
+2. `contextCreateFromBinary`: place the context on HTP.
+3. `graphRetrieve(graphName)`: prove graph identity.
+
+Graph names are not guessable and are not guaranteed by filenames.
+`assets/npu_manifest.json` is generated from the binaries with
+`python3 tools/models/gen_npu_manifest.py`; regenerate it for every model drop.
+
+QNN libraries are `dlopen`'d, never linked. `ADSP_LIBRARY_PATH` must be set
+before `libQnnHtp.so` first loads. The Hexagon skeleton is a DSP6 asset extracted
+to `<filesDir>/dsp/{signed,unsigned}/`, not an arm64 `jniLib`. Models live under
+internal `filesDir`, and the deploy script uses `run-as`; files placed under
+external `Android/data` by another uid may be invisible on Android 16 even when
+the printed path and ownership appear correct.
+
+### Logs required for routing work
+
+`OneVoiceRouting` writes one JSON row per bounded utterance, including rejected
+turns: timestamp, audio duration, VI/EN raw score, token count and normalized
+score, current prior, final decision and reason, execution path/error, plus
+capture setup, SCO close, queue wait, frontend, dual-ASR wall, MT, TTS, A2DP
+restore, route poll, playback and total post-bound latency.
+
+`OneVoiceHalfDuplex` writes every state edge with turn id, monotonic timestamp,
+dwell time and reason, plus route-switch measurements. Keep these tags stable;
+they are the calibration contract.
+
+## Current status: read before debugging inference
+
+- Hybrid is the only user-facing backend. `DUAL_ASR` is the default router;
+  SpeechFlow remains staged for `LID` A/B builds. Do not reintroduce a runtime
+  mode picker or use headset language assignments as source direction.
+- VI ASR is GIPFormer `graph_oa00nu3e` (FP32 `[1,1000,80]` → `[1,248,512]`)
+  with CPU RNN-T decoder/joiner ONNX host glue. EN ASR is Parakeet graph
+  `model` (UFIXED_16 `[1,1000,80]` → `[1,125,1025]`, QAIRT 2.40 binary that
+  loads on the 2.45 runtime). The manifest records fixed-point scale/offset
+  from the binary; `StageSpec.quantization` carries them to the host.
+- Kokoro VI was trained on vig2p phonemes (tones as arrows) but sherpa-onnx
+  feeds espeak-ng `vi` (tones as digits, đ as ɗ), which it silently dropped.
+  `tools/models/kokoro-vi-espeak-tokens.txt` aliases them (round-trip CER
+  9.8% → 0.0%). Deploy that table, never the upstream tokens.txt.
+- Both Marian directions execute on HTP. Their repeated logical graph names
+  require direction-qualified loaded-context keys.
+- Kokoro is whole-utterance CPU by design to preserve continuous prosody. Do
+  not restore the old fixed-window Full-QNN TTS selector.
+- With the Bluetooth route selected, a missing/ambiguous communication headset
+  fails closed before capture; Auto falls back to the phone route instead. A floor/no-prior/ASR-branch failure fails closed after capture. A
+  selected MT failure may take the atomic CPU whole-utterance recovery path.
+- Output is stereo within one shared TWS pair: Vietnamese left, English right.
+  This does not prove per-bud mic identity or independent output to unrelated
+  headsets.
+
+### QNN `0x36b1` incident guidance
+
+The former `contextCreateFromBinary` `0x36b1` failure is resolved. `0x36b1` is
+`QNN_DEVICE_ERROR_INVALID_CONFIG`; it did not prove a signature-policy failure.
+The observed chain was `libcdsprpc.so not found` → FastRPC remote
+symbols/transport failed → QNN surfaced 14001. Because the app targets API
+36, the manifest must declare:
+
+```xml
+<uses-native-library android:name="libcdsprpc.so" />
+```
+
+- Verified on the connected SM8550 device on 2026-08-08: unsigned-PD control
+  returned 0 and the then-current QNN contexts loaded (`socModel=43`, binary
+  build v2.45.0).
+- The working path uses QAIRT's unsigned v73 skeleton. A testsig is not required
+  for this app path. Hexagon TestSig is for debug-fused/test devices; it is not
+  a production trust anchor for a locked retail phone.
+- If 14001 recurs, inspect preceding QNN/FastRPC transport logs first. Check
+  `libcdsprpc` visibility, unsigned-control result, skeleton lookup and
+  stub/skel versions; never infer "needs signed skel" from the number alone.
+- The DSP serial comes from
+  `adb shell cat /sys/devices/soc0/serial_number` or the SDK's `getserial`, not
+  the ADB/USB serial.
+- `ADSP_LIBRARY_PATH` controls DSP-side lookup. It does not grant SELinux
+  permission or bypass signature validation.
+
+Full postmortem:
+`docs/incidents/2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md`. See also
+`docs/QNN_SIGNED_DSP.md` and `docs/NPU_DEPLOY.md`.
+
+Full offline runtime and deployment notes: `docs/OFFLINE_PIPELINE.md`.
 
 ## Conventions
 
-- The QNN SDK (`native-core/third_party/qnn_sdk/`) and model binaries (`onevoice-npu-bins/`, `models-*/`) are git-ignored — large and license-restricted. The core still compiles without the SDK: every QNN call degrades to a logged stub behind `#if __has_include(<QnnInterface.h>)`.
-- Header stays SDK-agnostic — QNN handles live behind the `State` pimpl in the `.cpp` so callers need no QNN headers.
-- Comments here explain *why*, especially where behavior looks wrong without device context (uid visibility, dlopen ordering, non-fatal `deviceCreate`). Match that when editing.
+- The QNN SDK (`native-core/third_party/qnn_sdk/`) and model binaries
+  (`onevoice-npu-bins/`, `models-*/`) are git-ignored, large and
+  license-restricted. The core still compiles without the SDK; QNN calls become
+  logged stubs behind `#if __has_include(<QnnInterface.h>)`.
+- Keep headers SDK-agnostic. QNN handles live behind the `State` pimpl in the
+  `.cpp`, so callers need no QNN headers.
+- Comments should explain why, especially uid visibility, `dlopen` ordering,
+  fail-closed routing, half-duplex route proof and non-fatal `deviceCreate`.
 - Work happens on `dev`; `main` is the PR target.

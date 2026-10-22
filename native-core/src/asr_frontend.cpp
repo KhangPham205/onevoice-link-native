@@ -27,18 +27,13 @@ constexpr float kGipLowHz = 20.0f;
 constexpr float kGipHighHz = 7600.0f;  // Kaldi high_freq=-400 at 16 kHz.
 constexpr float kPoveyExponent = 0.85f;
 
-// Ten seconds produce 1001 center-padded STFT frames in NeMo. The checkpoint
-// uses pad_to=16, so its exported AmberNet input is [1,80,1008].
-constexpr std::size_t kAmberFrames = 1008;
-constexpr std::size_t kAmberMaxValidFrames = 1001;
-
-// SpeechFlow's TFLite export is specialized for a fixed 1000-frame window
-// (configs/config.yml caps training at 2000); shorter turns are zero-padded and
-// masked through input_2.
+// SpeechFlow's TFLite export is specialized for a fixed 1000-frame window;
+// shorter turns are zero-padded and masked through its scalar length input.
 constexpr std::size_t kSpeechFlowFrames = 1000;
 // librosa.power_to_db defaults, which the upstream featurizer does not override.
 constexpr float kPowerToDbAmin = 1.0e-10f;
 constexpr float kPowerToDbTopDb = 80.0f;
+
 
 float hzToMel(float hz) {
     constexpr float fSp = 200.0f / 3.0f;
@@ -333,103 +328,6 @@ bool makeGipformerFeatures(const float* samples, std::size_t sampleCount,
     return true;
 }
 
-bool makeAmberNetFeatures(const float* samples, std::size_t sampleCount,
-                          float* output, std::size_t outputCount,
-                          std::string& error) {
-    error.clear();
-    if (!samples || !output) {
-        error = "AmberNet frontend received a null buffer";
-        return false;
-    }
-    // torch.stft's center padding is 256 samples in reflect mode and requires
-    // the waveform to be longer than the pad. VAD utterances are much longer,
-    // but rejecting tiny inputs here avoids an ill-defined reflection loop.
-    if (sampleCount <= kFft / 2 || sampleCount > kSamples) {
-        error = "AmberNet segment must contain 257..160000 samples";
-        return false;
-    }
-    if (outputCount < kAmberFrames * kMels) {
-        error = "AmberNet feature buffer is smaller than [1,80,1008]";
-        return false;
-    }
-
-    std::fill(output, output + kAmberFrames * kMels, 0.0f);
-
-    // NeMo applies pre-emphasis before torch.stft center/reflection padding.
-    // AmberNet is evaluated with deterministic dither=0 at runtime.
-    std::vector<float> waveform(sampleCount);
-    waveform[0] = samples[0];
-    for (std::size_t i = 1; i < sampleCount; ++i) {
-        waveform[i] = samples[i] - kPreemphasis * samples[i - 1];
-    }
-
-    static const MelBank melBank = makeMelBank();  // librosa/Slaney 0..8 kHz.
-    static const std::array<float, kWindow> window = [] {
-        std::array<float, kWindow> values{};
-        for (std::size_t i = 0; i < kWindow; ++i) {
-            // NeMo uses torch.hann_window(win_length, periodic=false).
-            values[i] = 0.5f - 0.5f * std::cos(
-                2.0f * kPi * static_cast<float>(i) /
-                static_cast<float>(kWindow - 1));
-        }
-        return values;
-    }();
-
-    const std::size_t validFrames = std::min(
-        kAmberMaxValidFrames, sampleCount / kHop + 1);
-    std::array<std::complex<float>, kFft> spectrum{};
-    std::array<float, kBins> power{};
-    constexpr std::size_t windowOffset = (kFft - kWindow) / 2;
-
-    for (std::size_t frame = 0; frame < validFrames; ++frame) {
-        spectrum.fill({0.0f, 0.0f});
-        const long start = static_cast<long>(frame * kHop) -
-            static_cast<long>(kFft / 2);
-        for (std::size_t i = 0; i < kWindow; ++i) {
-            const std::size_t fftIndex = windowOffset + i;
-            const long source = start + static_cast<long>(fftIndex);
-            const std::size_t reflected = torchReflectIndex(source, sampleCount);
-            spectrum[fftIndex] = waveform[reflected] * window[i];
-        }
-        fft(spectrum);
-        for (std::size_t bin = 0; bin < kBins; ++bin) {
-            power[bin] = std::norm(spectrum[bin]);
-        }
-        for (std::size_t mel = 0; mel < kMels; ++mel) {
-            double energy = 0.0;
-            for (std::size_t bin = 0; bin < kBins; ++bin) {
-                energy += static_cast<double>(melBank[mel][bin]) * power[bin];
-            }
-            output[mel * kAmberFrames + frame] =
-                std::log(static_cast<float>(energy) + kLogGuard);
-        }
-    }
-
-    // NeMo normalize="per_feature" uses the unbiased sample std and adds
-    // 1e-5 after sqrt. Only valid frames contribute; the padded tail remains 0.
-    for (std::size_t mel = 0; mel < kMels; ++mel) {
-        float* feature = output + mel * kAmberFrames;
-        double sum = 0.0;
-        for (std::size_t frame = 0; frame < validFrames; ++frame) {
-            sum += feature[frame];
-        }
-        const double mean = sum / static_cast<double>(validFrames);
-        double squared = 0.0;
-        for (std::size_t frame = 0; frame < validFrames; ++frame) {
-            const double delta = feature[frame] - mean;
-            squared += delta * delta;
-        }
-        const float scale = static_cast<float>(
-            std::sqrt(squared / static_cast<double>(validFrames - 1)) +
-            1.0e-5);
-        for (std::size_t frame = 0; frame < validFrames; ++frame) {
-            feature[frame] =
-                (feature[frame] - static_cast<float>(mean)) / scale;
-        }
-    }
-    return true;
-}
-
 bool makeSpeechFlowFeatures(const float* samples, std::size_t sampleCount,
                             float* output, std::size_t outputCount,
                             std::size_t* validFrames, std::string& error) {
@@ -472,8 +370,7 @@ bool makeSpeechFlowFeatures(const float* samples, std::size_t sampleCount,
         for (std::size_t i = 0; i < kWindow; ++i) {
             // librosa.stft(window="hann") goes through scipy get_window, which
             // is PERIODIC (fftbins=True) — divide by kWindow. NeMo's
-            // torch.hann_window(periodic=false) above divides by kWindow-1;
-            // reusing that constant here is a real, silent mismatch.
+            // torch.hann_window(periodic=false) divides by kWindow-1.
             values[i] = 0.5f - 0.5f * std::cos(
                 2.0f * kPi * static_cast<float>(i) /
                 static_cast<float>(kWindow));
@@ -511,8 +408,7 @@ bool makeSpeechFlowFeatures(const float* samples, std::size_t sampleCount,
                 energy += static_cast<double>(melBank[mel][bin]) * power[bin];
             }
             // librosa.power_to_db, not a natural log: 10*log10 with amin
-            // clamping. The scale difference alone (10/ln10 ≈ 4.34x) would
-            // change every downstream statistic.
+            // clamping. The scale difference changes every downstream statistic.
             row[mel] = 10.0f * std::log10(
                 std::max(static_cast<float>(energy), kPowerToDbAmin));
         }
@@ -521,8 +417,7 @@ bool makeSpeechFlowFeatures(const float* samples, std::size_t sampleCount,
     const std::size_t cells = frames * kMels;
 
     // power_to_db(ref=1.0, top_db=80): clamp the whole utterance to 80 dB below
-    // its own peak. Without this the near-silent frames of a quiet recording
-    // dominate the global mean and shift every normalized feature.
+    // its own peak before global normalization.
     float peakDb = output[0];
     for (std::size_t i = 1; i < cells; ++i) peakDb = std::max(peakDb, output[i]);
     const float floorDb = peakDb - kPowerToDbTopDb;
@@ -530,11 +425,8 @@ bool makeSpeechFlowFeatures(const float* samples, std::size_t sampleCount,
         output[i] = std::max(output[i], floorDb);
     }
 
-    // normalize_per_feature: false — a single mean/std over every valid
-    // (frame, mel) cell, matching np.mean/np.std with axis=None. np.std is the
-    // biased (population) estimator, and the epsilon is 1e-9, not AmberNet's
-    // 1e-5. Reusing the per-bin path here still yields finite features, so this
-    // has to be kept correct by construction rather than caught at runtime.
+    // normalize_per_feature=false: a single population mean/std over every
+    // valid (frame, mel) cell. Padded cells remain zero for attention masking.
     double sum = 0.0;
     for (std::size_t i = 0; i < cells; ++i) sum += output[i];
     const double mean = sum / static_cast<double>(cells);

@@ -139,6 +139,12 @@ data class StageSpec(
     val sizeBytes: Long,
     val inputs: List<TensorSpec> = emptyList(),
     val outputs: List<TensorSpec> = emptyList(),
+    /**
+     * Fixed-point encodings by tensor name, recorded from the binary. Kept out
+     * of [TensorSpec] because the native load report cannot see them and the
+     * contract check compares those specs for equality.
+     */
+    val quantization: Map<String, Q16Params> = emptyMap(),
 ) {
     fun resolve(root: File): File = File(root, file)
 
@@ -151,7 +157,20 @@ data class StageSpec(
             sizeBytes = o.optLong("sizeBytes"),
             inputs = tensors(o, "inputs"),
             outputs = tensors(o, "outputs"),
+            quantization = quantization(o, "inputs") + quantization(o, "outputs"),
         )
+
+        private fun quantization(o: JSONObject, key: String): Map<String, Q16Params> {
+            val array = o.optJSONArray(key) ?: return emptyMap()
+            return (0 until array.length()).mapNotNull { index ->
+                val tensor = array.getJSONObject(index)
+                if (!tensor.has("scale") || !tensor.has("offset")) return@mapNotNull null
+                tensor.getString("name") to Q16Params(
+                    scale = tensor.getDouble("scale").toFloat(),
+                    offset = tensor.getInt("offset"),
+                )
+            }.toMap()
+        }
 
         private fun tensors(o: JSONObject, key: String): List<TensorSpec> {
             val array = o.optJSONArray(key) ?: return emptyList()

@@ -5,8 +5,8 @@ package com.onevoice.link.core
  *
  * Both direction-qualified ASR/MT context sets stay resident in the production
  * Hybrid engine. Selecting a direction therefore never unloads or swaps models.
- * Today the route comes from acoustic LID; a future authenticated headset-floor
- * controller can supply the same enum without changing the ASR/MT/TTS branches.
+ * The default router compares length-normalized VI/EN RNN-T confidence for the
+ * bounded utterance. SpeechFlow remains available behind an A/B build flag.
  */
 enum class TranslationDirection {
     VI_TO_EN,

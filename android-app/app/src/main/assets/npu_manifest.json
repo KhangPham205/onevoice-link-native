@@ -604,30 +604,34 @@
       "stages": [
         {
           "stage": "asr",
-          "label": "ASR · Zipformer-small RNN-T en",
-          "file": "en-vi/asr_zipformer_encoder.bin",
-          "graph": "graph_shbblv7u",
-          "sizeBytes": 64933888,
+          "label": "ASR · Parakeet-TDT-CTC-110M en (CTC)",
+          "file": "en-vi/asr_parakeet_ctc.bin",
+          "graph": "model",
+          "sizeBytes": 115240960,
           "inputs": [
             {
               "name": "x",
-              "dtype": "FLOAT_32",
+              "dtype": "UFIXED_16",
               "dims": [
                 1,
                 1000,
                 80
-              ]
+              ],
+              "scale": 0.00012464652536436915,
+              "offset": -31906
             }
           ],
           "outputs": [
             {
-              "name": "output_0",
-              "dtype": "FLOAT_32",
+              "name": "log_probs",
+              "dtype": "UFIXED_16",
               "dims": [
                 1,
-                248,
-                512
-              ]
+                125,
+                1025
+              ],
+              "scale": 0.0006816668901592493,
+              "offset": -65535
             }
           ]
         },

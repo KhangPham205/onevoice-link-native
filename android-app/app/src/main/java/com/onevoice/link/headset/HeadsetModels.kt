@@ -3,14 +3,14 @@ package com.onevoice.link.headset
 import androidx.compose.runtime.Immutable
 
 /**
- * The language a person associated with an audio endpoint prefers to hear.
+ * The language associated with a headset owner for speaking and listening.
  *
  * Route-planning v1 also treats this as that person's spoken/source language.
  * If bilingual users need different values, split the persisted contract into
  * spokenLanguage and listeningLanguage before enabling real delivery.
  *
- * This is deliberately not a translation-mode switch. Until a future speaker-floor
- * transport identifies the one active talker, the value is configuration only.
+ * Direction is selected only when AudioRecord verifies that this exact headset
+ * is the active Bluetooth microphone. Auracast itself never identifies a talker.
  */
 enum class HeadsetLanguage(val persistedValue: String) {
     VI("vi"),

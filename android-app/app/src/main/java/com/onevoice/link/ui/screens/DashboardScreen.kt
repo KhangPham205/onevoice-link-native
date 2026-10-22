@@ -28,9 +28,11 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.onevoice.link.R
+import com.onevoice.link.core.AudioRoutePreference
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.NpuEngine
 import com.onevoice.link.ui.components.AppHeader
+import com.onevoice.link.ui.components.AudioRouteSelector
 import com.onevoice.link.ui.components.EngineControls
 import com.onevoice.link.ui.components.MicPermissionRow
 import com.onevoice.link.ui.components.ModelCascadeCard
@@ -67,19 +69,21 @@ fun DashboardScreen(
                 transcript = controller.transcript,
                 translation = controller.translation,
                 replayAvailable = controller.replayAvailable,
-                detectedDirection = controller.detectedDirection,
-                lidConfidence = controller.lidConfidence,
+                routedDirection = controller.routedDirection,
                 executionPath = controller.executionPath,
                 stages = controller.stages,
                 targetSoc = npuEngine?.manifest?.targetMarketing.orEmpty(),
                 hexagon = npuEngine?.manifest?.hexagon.orEmpty(),
                 modelRootPath = npuEngine?.modelRootPath.orEmpty(),
+                audioRoute = controller.audioRoute,
+                activeRouteLabel = controller.activeRouteLabel,
             ),
             onInitialize = controller::initialize,
             onToggleTranslation = controller::toggleTranslation,
             onRequestMic = onRequestMic,
             onReplay = controller::replayLast,
             onOpenMenu = onOpenMenu,
+            onAudioRouteSelected = controller::selectAudioRoute,
             modifier = Modifier.padding(innerPadding),
         )
     }
@@ -95,6 +99,7 @@ fun DashboardContent(
     modifier: Modifier = Modifier,
     onReplay: () -> Unit = {},
     onOpenMenu: () -> Unit = {},
+    onAudioRouteSelected: (AudioRoutePreference) -> Unit = {},
 ) {
     Column(
         modifier
@@ -119,12 +124,19 @@ fun DashboardContent(
                 message = state.message.resolve(),
                 isError = state.message.kind == MessageKind.Error,
             )
+            if (state.supportsLiveTranslation) {
+                AudioRouteSelector(
+                    selected = state.audioRoute,
+                    activeRouteLabel = state.activeRouteLabel,
+                    enabled = state.canChangeAudioRoute,
+                    onSelected = onAudioRouteSelected,
+                )
+            }
             if (state.showTranslationCard) {
                 TranslationCard(
                     transcript = state.transcript,
                     translation = state.translation,
-                    detectedDirection = state.detectedDirection,
-                    lidConfidence = state.lidConfidence,
+                    routedDirection = state.routedDirection,
                     executionPath = state.executionPath,
                     canReplay = state.canReplay,
                     onReplay = onReplay,

@@ -6,9 +6,10 @@
 >
 > **Production hiện tại chỉ dùng sáu QNN context:** mỗi chiều có ASR encoder,
 > Marian encoder và Marian decoder. RNN-T decoder/joiner và Kokoro chạy CPU.
-> Routing hướng dịch nằm ngoài QNN model manifest; có thể được cấp bởi classifier
-> hoặc một speaker-floor/headset identity đã xác thực mà không làm thay đổi tensor
-> contract dưới đây. Auracast tự nó là downlink và không xác định người đang nói.
+> Routing hướng dịch nằm ngoài QNN model manifest và hiện chỉ được cấp bởi
+> headset identity của microphone Bluetooth đã xác thực cùng assignment VI/EN.
+> Không còn model classifier. Auracast tự nó là downlink và không xác định người
+> đang nói.
 
 ## 1. Nguồn chân lý và target
 
@@ -43,16 +44,36 @@ Thông tin chung của **sáu context production**:
 | `vi-en/asr` | `vi-en/asr_gipformer_encoder.bin` | `graph_oa00nu3e` | 157,634,560 B |
 | `vi-en/mt_encoder` | `vi-en/mt_encoder.bin` | `opus_mt_encoder` | 100,048,896 B |
 | `vi-en/mt_decoder` | `vi-en/mt_decoder.bin` | `opus_mt_decoder` | 156,549,120 B |
-| `en-vi/asr` | `en-vi/asr_zipformer_encoder.bin` | `graph_shbblv7u` | 64,933,888 B |
+| `en-vi/asr` | `en-vi/asr_parakeet_ctc.bin` | `model` | 115,240,960 B |
 | `en-vi/mt_encoder` | `en-vi/mt_encoder.bin` | `opus_mt_encoder` | 99,991,552 B |
 | `en-vi/mt_decoder` | `en-vi/mt_decoder.bin` | `opus_mt_decoder` | 156,426,240 B |
 
 Hai Marian bundle lặp graph name. Vì vậy runtime key bắt buộc có prefix hướng
 `vi-en/` hoặc `en-vi/`; chỉ dùng `mt_encoder`/`mt_decoder` sẽ đụng context.
 
-### 2.1 ASR encoder — VI GIPFormer và EN Zipformer-small
+### 2.1 ASR — VI GIPFormer (RNN-T) và EN Parakeet-TDT-CTC-110M (CTC)
 
-Hai encoder có cùng tensor contract nhưng khác graph/trọng số/ngôn ngữ:
+> Từ 2026-10-22, EN dùng `nvidia/parakeet-tdt_ctc-110m` (CC-BY-4.0) qua binary
+> SM8550 do sherpa-onnx biên dịch sẵn (release `asr-models-qnn-binary-2`,
+> bản `-10s` đầu CTC). Zipformer-small EN cũ chỉ huấn luyện trên LibriSpeech
+> nên nhận rất kém tiếng Anh giọng Việt.
+
+Parakeet EN (graph `model`, QAIRT build v2.40, nạp được trên runtime 2.45):
+
+```text
+INPUT   x          UFIXED_POINT_16 [1,1000,80]  scale 1.2464652536e-4 offset -31906
+OUTPUT  log_probs  UFIXED_POINT_16 [1,125,1025] scale 6.816668902e-4  offset -65535
+```
+
+- Feature: NeMo log-mel (pre-emphasis 0.97, Hann 400/160, FFT 512, mel Slaney
+  0–8 kHz, `log(x+2^-24)`), chuẩn hoá mean/std theo từng kênh trên frame thật,
+  đệm 0; lấy 1000 frame đầu của bản `[1001,80]`.
+- Đầu ra đã là log-softmax; blank id 1024; subsampling 8; token table 1024
+  SentencePiece + `<blk>`. Scale/offset được ghi vào `npu_manifest.json` từ
+  chính binary, không chép tay.
+- Nguồn: `asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/`.
+
+GIPFormer VI encoder (Zipformer-small EN cũ có cùng contract này):
 
 ```text
 INPUT
@@ -68,7 +89,7 @@ OUTPUT
 - `.bin` chỉ chứa encoder. Một pipeline chạy được còn cần ONNX prediction
   network, ONNX joiner và token table đi cùng đúng bundle.
 - VI source: `asr/gipformer_65m_rnnt-bundle/`.
-- EN source: `asr/zipformer_small_en-bundle/`.
+- EN cũ (đã thay, giữ trong catalog): `asr/zipformer_small_en-bundle/`.
 
 ### 2.2 Host RNN-T decoder/joiner — contract chính xác
 
@@ -165,6 +186,14 @@ sherpa-onnx `OfflineTts` một lần cho toàn bộ câu để giữ prosody li�
 
 Hai model khai sample rate 24 kHz. Runtime kiểm tra sample rate, toàn bộ waveform
 phải hữu hạn, rồi scale toàn câu nếu peak vượt 0.90 trước khi phát PCM float.
+
+**Token table VI phải là `tools/models/kokoro-vi-espeak-tokens.txt`, không phải
+`tokens.txt` gốc.** Kokoro-Vietnamese được huấn luyện với G2P `vig2p` (thanh
+điệu là mũi tên `→ ↘ ↗ ↓`), còn sherpa-onnx phiên âm bằng espeak-ng `vi` (thanh
+điệu là chữ số, đ là `ɗ`). Ký hiệu lạ bị sherpa bỏ âm thầm, nên mọi thanh điệu
+biến mất. Bảng đã vá thêm alias chữ số → mũi tên, `ɗ → d`, `ʐ → ʒ`. Đo bằng
+vòng TTS → GIPFormer trên 6 câu: CER 9.8% → 0.0%. Còn thiếu: ngã/nặng mất `ʔ`,
+cặp s/x, tr/ch, gi/d chưa phân biệt; muốn triệt để phải dùng G2P `vig2p`.
 
 ## 4. Catalog lịch sử/thử nghiệm — không tự động đưa vào production
 
@@ -263,10 +292,6 @@ Lưu ý:
 
 ```text
 <filesDir>/models/npu/
-├── shared/
-│   ├── speechflow_langid.tflite
-│   ├── speechflow_labels.json
-│   └── speechflow_contract.json
 ├── vi-en/
 │   ├── asr_gipformer_encoder.bin
 │   ├── asr_gipformer_{decoder,joiner}.onnx
@@ -280,9 +305,8 @@ Lưu ý:
 │   ├── tts_voices.bin
 │   └── fallback/...
 └── en-vi/
-    ├── asr_zipformer_encoder.bin
-    ├── asr_zipformer_{decoder,joiner}.onnx
-    ├── asr_zipformer_tokens.txt
+    ├── asr_parakeet_ctc.bin
+    ├── asr_parakeet_tokens.txt
     ├── mt_{encoder,decoder}.bin
     ├── mt_source.spm
     ├── mt_vocab.json

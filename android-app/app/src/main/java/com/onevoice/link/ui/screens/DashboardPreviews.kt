@@ -14,8 +14,8 @@ import com.onevoice.link.core.StageStatus
 import com.onevoice.link.core.TranslationDirection
 import com.onevoice.link.ui.theme.OneVoiceLinkTheme
 
-// Hybrid keeps only the continuous-contract QNN stages resident. LID and
-// whole-utterance Kokoro are host-side components and do not appear as contexts.
+// Hybrid keeps only the continuous-contract QNN stages resident. Headset route
+// resolution and whole-utterance Kokoro do not appear as QNN contexts.
 private val SPECS = listOf(
     StageSpec(
         "asr",
@@ -80,7 +80,6 @@ private fun base(
     micGranted: Boolean = true,
     micPermanentlyDenied: Boolean = false,
     direction: TranslationDirection? = null,
-    confidence: Float? = null,
     executionPath: ExecutionPath? = null,
     transcript: String? = null,
     translation: String? = null,
@@ -94,8 +93,7 @@ private fun base(
     transcript = transcript,
     translation = translation,
     replayAvailable = !translation.isNullOrBlank(),
-    detectedDirection = direction,
-    lidConfidence = confidence,
+    routedDirection = direction,
     executionPath = executionPath,
     stages = stages,
     targetSoc = "Snapdragon 8 Gen 2",
@@ -110,7 +108,6 @@ private class DashboardStateProvider : PreviewParameterProvider<DashboardUiState
             UiMessage(R.string.msg_live_auto),
             ALL_LOADED,
             direction = TranslationDirection.VI_TO_EN,
-            confidence = 0.97f,
             executionPath = ExecutionPath.HYBRID_NPU,
             transcript = "Xin chào, rất vui được gặp bạn.",
             translation = "Hello, it is nice to meet you.",
@@ -120,7 +117,6 @@ private class DashboardStateProvider : PreviewParameterProvider<DashboardUiState
             UiMessage(R.string.msg_live_auto),
             ALL_LOADED,
             direction = TranslationDirection.EN_TO_VI,
-            confidence = 0.93f,
             executionPath = ExecutionPath.CPU_FALLBACK,
             transcript = "Where is the nearest station?",
             translation = "Nhà ga gần nhất ở đâu?",
@@ -188,7 +184,6 @@ private fun DashboardLargeFontPreview() {
                 UiMessage(R.string.msg_live_auto),
                 ALL_LOADED,
                 direction = TranslationDirection.VI_TO_EN,
-                confidence = 0.96f,
                 executionPath = ExecutionPath.HYBRID_NPU,
                 transcript = "Tôi cần một phiên dịch hoàn toàn ngoại tuyến.",
                 translation = "I need a completely offline interpreter.",
