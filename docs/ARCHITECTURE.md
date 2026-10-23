@@ -30,7 +30,7 @@ flowchart LR
   Router -->|VI selected| VIMT["VI→EN MarianMT<br/>encoder + decoder / HTP"]
   Router -->|EN selected| ENMT["EN→VI MarianMT<br/>encoder + decoder / HTP"]
   VIMT --> ENTTS["Kokoro EN<br/>whole utterance / CPU"]
-  ENMT --> VITTS["Kokoro VI<br/>whole utterance / CPU"]
+  ENMT --> VITTS["Kokoro VI or Supertonic-3<br/>whole utterance / CPU"]
   ENTTS --> Right["Stereo AudioTrack<br/>EN target = right"]
   VITTS --> Left["Stereo AudioTrack<br/>VI target = left"]
   Right --> Buds([Shared TWS pair])
@@ -67,8 +67,10 @@ stateDiagram-v2
   this turn (`AudioRoutePreference`: Auto, Phone or Bluetooth). Bluetooth
   selects Android's communication device and `AudioRecord(VOICE_COMMUNICATION)`
   owns the SCO/LE microphone. Phone prefers the built-in mic with
-  `AudioRecord(VOICE_RECOGNITION)`, drops a 300 ms loudspeaker-echo guard and
-  rejects a Bluetooth input. The app verifies `AudioRecord.getRoutedDevice()`
+  `AudioRecord(VOICE_RECOGNITION)`, holds a 300 ms loudspeaker-echo guard and
+  rejects a Bluetooth input. Guarded audio runs through Silero (state stays
+  warm, the speech latch stays closed) and into the pre-roll ring, so it cannot
+  open a turn but an immediate answer keeps its onset. The app verifies `AudioRecord.getRoutedDevice()`
   before accepting samples.
 - `PROCESSING`: `AudioRecord` is stopped and released; on the Bluetooth route
   `clearCommunicationDevice()` has closed the app-owned SCO route. ASR, routing,
@@ -86,7 +88,8 @@ The capture worker waits for the active turn to finish and the segment queue is
 bounded to one. Capture and playback therefore never overlap. Live capture uses
 20 ms frames labelled by Silero VAD (32 ms windows with onset/offset
 hysteresis, sherpa-onnx runtime, bundled `assets/vad/silero_vad.onnx`), 300 ms
-pre-roll and a one-second end hangover. Ten seconds is
+pre-roll and a one-second end hangover; `core/UtteranceSegmenter.kt` owns this
+policy without AudioRecord so it is unit-tested. Ten seconds is
 a hard forced boundary: there is no 500 ms overlap, no carried tail and no
 second segment captured while the first is processing or playing. A forced
 boundary sets the turn prior to the same language, because the cut speaker is
@@ -144,6 +147,11 @@ dualAsrEnOffset=-0.08
 dualAsrPriorWeight=0.15
 kokoroThreads=4
 vadMode=SILERO
+viTtsEngine=KOKORO
+supertonicVoice=F1
+supertonicSteps=5
+supertonicSpeed=1.15
+supertonicThreads=4
 ```
 
 Override them per build with `-ProutingMode=...`,
@@ -198,7 +206,10 @@ figures; DSP-private allocations require separate device telemetry.
 
 ## Target-channel output
 
-Kokoro produces one continuous mono waveform. Playback converts it to
+The CPU TTS (Kokoro, or Supertonic-3 for Vietnamese with
+`viTtsEngine=SUPERTONIC`) produces one continuous mono waveform at 24 kHz;
+Supertonic's 44.1 kHz output is band-limited resampled and its silence padding
+trimmed in `NpuPipeline.synthesize`. Playback converts it to
 interleaved stereo float PCM and fills the unused channel with zero:
 
 | Source direction | Target speech | Channel |

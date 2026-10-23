@@ -35,6 +35,9 @@ internal class NpuPipeline private constructor(
     private val voices: FileChannel?,
     private val ttsFrontend: OfflineTts?,
     private val cpuTts: OfflineTts?,
+    /** Which model [cpuTts] holds; Supertonic also needs [cpuTtsGeneration]. */
+    private val cpuTtsEngine: CpuTtsEngine,
+    private val cpuTtsGeneration: GenerationConfig?,
 ) : Closeable {
     companion object {
         private const val PARAKEET_FEATURE_BYTES = 1 * 1001 * 80 * Float.SIZE_BYTES
@@ -64,6 +67,7 @@ internal class NpuPipeline private constructor(
         private const val TTS_SAMPLES_PER_FRAME = 600
         private const val BETWEEN_CHUNK_SILENCE_SAMPLES = 2_880 // 120 ms at 24 kHz
         private const val TAG = "OneVoiceNpuPipeline"
+        private const val PLAYBACK_SAMPLE_RATE = NpuEngine.TTS_SAMPLE_RATE
 
         /** Allocate the one [1,1000,80] FP32 frontend tensor shared by both RNN-Ts. */
         fun allocateSharedRnntFeatures(): ByteBuffer = direct(RNNT_FEATURE_BYTES)
@@ -100,18 +104,23 @@ internal class NpuPipeline private constructor(
             asrArtifactPrefix: String,
             useCpuTts: Boolean = false,
             cpuTtsModel: File? = null,
+            cpuTtsEngine: CpuTtsEngine = CpuTtsEngine.KOKORO,
         ): NpuPipeline {
             require(stagePrefix in setOf("vi-en", "en-vi")) {
                 "Unsupported Hybrid direction key: $stagePrefix"
             }
             val asrMode = NpuAsrMode.from(asrStage)
+            require(useCpuTts || cpuTtsEngine == CpuTtsEngine.KOKORO) {
+                "Only CPU TTS can use ${cpuTtsEngine.name}"
+            }
+            val supertonic = cpuTtsEngine == CpuTtsEngine.SUPERTONIC
             val requiredNames = buildList {
-                addAll(
-                    listOf(
-                        "mt_source.spm", "mt_vocab.json", "mt_config.json",
-                        "tts_tokens.txt", "tts_voices.bin",
-                    ),
-                )
+                addAll(listOf("mt_source.spm", "mt_vocab.json", "mt_config.json"))
+                if (supertonic) {
+                    SupertonicFiles.ALL.forEach { add("${SupertonicFiles.DIR}/$it") }
+                } else {
+                    addAll(listOf("tts_tokens.txt", "tts_voices.bin"))
+                }
                 when (asrMode) {
                     NpuAsrMode.PARAKEET_CTC -> add("asr_tokens.txt")
                     NpuAsrMode.PARAKEET_CTC_Q16 -> add("${asrArtifactPrefix}_tokens.txt")
@@ -126,15 +135,20 @@ internal class NpuPipeline private constructor(
                 if (!useCpuTts) add("tts_frontend.onnx")
             }
             val required = requiredNames.map { File(directionRoot, it) }.toMutableList()
-            if (useCpuTts) {
+            if (useCpuTts && !supertonic) {
                 required += cpuTtsModel ?: File(directionRoot, "tts_cpu.onnx")
             }
             val missing = required.filterNot(File::isFile)
             val espeakData = File(directionRoot, "espeak-ng-data")
             val targetDictionary = if (stagePrefix == "vi-en") "en_dict" else "vi_dict"
-            val espeakMissing = listOf("phontab", "phondata", "phonindex", targetDictionary)
-                .map { File(espeakData, it) }
-                .filterNot(File::isFile)
+            // Supertonic reads graphemes; only Kokoro needs the eSpeak frontend.
+            val espeakMissing = if (supertonic) {
+                emptyList()
+            } else {
+                listOf("phontab", "phondata", "phonindex", targetDictionary)
+                    .map { File(espeakData, it) }
+                    .filterNot(File::isFile)
+            }
             require(missing.isEmpty()) {
                 "Missing NPU frontend assets: ${missing.joinToString { it.name }}. " +
                     "Run tools/models/push-npu-models.sh auto <adb-serial> " +
@@ -177,7 +191,11 @@ internal class NpuPipeline private constructor(
             } else {
                 null to null
             }
-            val ttsTokens = parseIndexedTokens(File(directionRoot, "tts_tokens.txt"))
+            val ttsTokens = if (supertonic) {
+                emptyMap()
+            } else {
+                parseIndexedTokens(File(directionRoot, "tts_tokens.txt"))
+            }
             val kokoroConfig = { modelPath: String ->
                 OfflineTtsConfig(
                     model = OfflineTtsModelConfig(
@@ -198,6 +216,7 @@ internal class NpuPipeline private constructor(
             var voices: FileChannel? = null
             var ttsFrontend: OfflineTts? = null
             var cpuTts: OfflineTts? = null
+            var cpuTtsGeneration: GenerationConfig? = null
             try {
                 if (asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
                     rnntDecoder = ZipformerFamilyRnntDecoder.load(
@@ -206,7 +225,32 @@ internal class NpuPipeline private constructor(
                     )
                 }
                 translator = QnnMarianTranslator.load(directionRoot, stagePrefix)
-                if (useCpuTts) {
+                if (supertonic) {
+                    val synthesizer = OfflineTts(
+                        config = SupertonicFiles.config(directionRoot, BuildConfig.SUPERTONIC_THREADS),
+                    )
+                    cpuTts = synthesizer
+                    val generation = SupertonicFiles.generation(
+                        stagePrefix,
+                        BuildConfig.SUPERTONIC_VOICE,
+                        BuildConfig.SUPERTONIC_STEPS,
+                        BuildConfig.SUPERTONIC_SPEED,
+                    )
+                    // A voice.bin with fewer styles would silently remap sids.
+                    check(generation.sid < synthesizer.numSpeakers()) {
+                        "Supertonic voice.bin holds ${synthesizer.numSpeakers()} styles; " +
+                            "${BuildConfig.SUPERTONIC_VOICE} needs sid ${generation.sid}"
+                    }
+                    cpuTtsGeneration = generation
+                    Log.i(
+                        TAG,
+                        "Supertonic TTS loaded direction=$stagePrefix " +
+                            "voice=${BuildConfig.SUPERTONIC_VOICE} sid=${generation.sid} " +
+                            "steps=${generation.numSteps} speed=${generation.speed} " +
+                            "threads=${BuildConfig.SUPERTONIC_THREADS} " +
+                            "sampleRate=${synthesizer.sampleRate()} styles=${synthesizer.numSpeakers()}",
+                    )
+                } else if (useCpuTts) {
                     cpuTts = OfflineTts(
                         config = kokoroConfig(requireNotNull(cpuTtsModel).absolutePath),
                     )
@@ -231,6 +275,8 @@ internal class NpuPipeline private constructor(
                     voices = voices,
                     ttsFrontend = ttsFrontend,
                     cpuTts = cpuTts,
+                    cpuTtsEngine = cpuTtsEngine,
+                    cpuTtsGeneration = cpuTtsGeneration,
                 )
             } catch (failure: Throwable) {
                 runCatching { cpuTts?.release() }
@@ -490,26 +536,46 @@ internal class NpuPipeline private constructor(
         return peak
     }
 
+    /** Whole-utterance target speech at [PLAYBACK_SAMPLE_RATE], mono. */
     fun synthesize(text: String): FloatArray {
         cpuTts?.let { synthesizer ->
             val startedNs = System.nanoTime()
-            val generated = synthesizer.generate(text, 0, 1.0f)
-            require(generated.sampleRate == 24_000) {
-                "CPU Kokoro returned ${generated.sampleRate} Hz, expected 24000 Hz"
+            val generated = cpuTtsGeneration
+                ?.let { synthesizer.generateWithConfig(SupertonicFiles.prepareText(text), it) }
+                ?: synthesizer.generate(text, 0, 1.0f)
+            val inferenceMs = (System.nanoTime() - startedNs) / 1_000_000L
+            require(cpuTtsEngine != CpuTtsEngine.KOKORO || generated.sampleRate == PLAYBACK_SAMPLE_RATE) {
+                "CPU Kokoro returned ${generated.sampleRate} Hz, expected $PLAYBACK_SAMPLE_RATE Hz"
             }
             require(generated.samples.all(Float::isFinite)) {
-                "CPU Kokoro returned non-finite waveform samples"
+                "CPU ${cpuTtsEngine.name} returned non-finite waveform samples"
             }
-            val peak = limitPeak(generated.samples)
+            // Playback, route priming and latency accounting all run at 24 kHz.
+            val resampled = if (generated.sampleRate == PLAYBACK_SAMPLE_RATE) {
+                generated.samples
+            } else {
+                resamplePcm(generated.samples, generated.sampleRate, PLAYBACK_SAMPLE_RATE)
+            }
+            // Kokoro's ~0.2 s natural lead is left alone; Supertonic's padding is not.
+            val samples = if (cpuTtsEngine == CpuTtsEngine.SUPERTONIC) {
+                trimSilence(resampled, PLAYBACK_SAMPLE_RATE)
+            } else {
+                resampled
+            }
+            val peak = limitPeak(samples)
             Log.i(
                 TAG,
-                "CPU whole-utterance TTS textChars=${text.length} " +
-                    "audioSamples=${generated.samples.size} " +
-                    "durationMs=${generated.samples.size * 1_000L / generated.sampleRate} " +
+                "CPU whole-utterance TTS engine=${cpuTtsEngine.name.lowercase()} " +
+                    "textChars=${text.length} " +
+                    "audioSamples=${samples.size} " +
+                    "durationMs=${samples.size * 1_000L / PLAYBACK_SAMPLE_RATE} " +
+                    "sourceRate=${generated.sampleRate} " +
+                    "untrimmedMs=${resampled.size * 1_000L / PLAYBACK_SAMPLE_RATE} " +
                     "rawPeak=${"%.3f".format(peak)} " +
-                    "inferenceMs=${(System.nanoTime() - startedNs) / 1_000_000L}",
+                    "inferenceMs=$inferenceMs " +
+                    "totalMs=${(System.nanoTime() - startedNs) / 1_000_000L}",
             )
-            return generated.samples
+            return samples
         }
         val tokenChunks = tokenizeTts(text)
         if (tokenChunks.isEmpty()) return FloatArray(0)

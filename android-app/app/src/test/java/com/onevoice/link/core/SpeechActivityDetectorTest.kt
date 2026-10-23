@@ -43,6 +43,21 @@ class SpeechActivityDetectorTest {
     }
 
     @Test
+    fun observeRunsTheModelWithoutOpeningTheLatch() {
+        var windows = 0
+        val gate = WindowedSpeechGate(320, 0.5f, 0.35f) { windows++; 0.9f }
+
+        gate.observe(frame, frame.size)
+        gate.observe(frame, 100)
+
+        assertEquals(1, windows)
+        assertEquals(0.9f, gate.lastProbability)
+        // The partial window carries over, so live audio completes it at once.
+        assertTrue(gate.accept(frame, 220))
+        assertEquals(2, windows)
+    }
+
+    @Test
     fun resetDropsPartialWindowAndSpeechState() {
         val gate = WindowedSpeechGate(320, 0.5f, 0.35f) { 0.9f }
         assertTrue(gate.accept(frame, frame.size))

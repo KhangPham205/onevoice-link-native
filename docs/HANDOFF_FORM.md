@@ -195,6 +195,28 @@ biến mất. Bảng đã vá thêm alias chữ số → mũi tên, `ɗ → d`, 
 vòng TTS → GIPFormer trên 6 câu: CER 9.8% → 0.0%. Còn thiếu: ngã/nặng mất `ʔ`,
 cặp s/x, tr/ch, gi/d chưa phân biệt; muốn triệt để phải dùng G2P `vig2p`.
 
+**Phương án thay thế cho tiếng Việt: Supertonic-3** (`-PviTtsEngine=SUPERTONIC`).
+Bản int8 của sherpa-onnx (`sherpa-onnx-supertonic-3-tts-int8-2026-05-11`, code MIT,
+weights OpenRAIL-M) được đẩy vào `en-vi/tts_supertonic/`. Model đọc thẳng chữ
+viết (không qua espeak), ra 44.1 kHz; runtime resample về 24 kHz và cắt khoảng
+lặng đầu/cuối (~0.6 s / ~0.7 s).
+
+| Cấu hình (vòng TTS → GIPFormer, 17 câu) | CER |
+| :-- | --: |
+| Kokoro VI (đối chứng) | 2.9% |
+| Supertonic, chưa NFKD | 31.9% |
+| Supertonic, NFKD, speed 1.0 | 4.9% |
+| Supertonic, NFKD, speed 1.15 (mặc định) | 0.8% / 3.0% (2 lần chạy) |
+
+- Bắt buộc NFKD trước khi gọi sherpa: `unicode_indexer` chỉ có chữ cái gốc +
+  dấu tổ hợp, sherpa 1.13.4 chỉ tách vài dấu Latin-1 nên ơ, ư, ạ, ữ, ệ... bị bỏ.
+- Bộ đoán độ dài cấp dư thời gian cho tiếng Việt, model lấp bằng cách lặp từ;
+  `supertonicSpeed=1.15` khắc phục phần lớn. Vẫn còn ~1/6 câu chèn/bỏ một từ, và
+  đầu ra ngẫu nhiên theo từng lần gọi.
+- Đo trên SM8550 (máy nguội, 8 câu): thời gian tổng hợp median 1240 ms so với
+  1307 ms của Kokoro; nghe được tiếng sớm hơn ~250 ms; peak RSS 0.90 GB so với
+  1.50 GB.
+
 ## 4. Catalog lịch sử/thử nghiệm — không tự động đưa vào production
 
 ### 4.1 Parakeet-CTC-0.6B Vietnamese

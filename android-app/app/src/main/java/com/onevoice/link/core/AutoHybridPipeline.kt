@@ -1,6 +1,7 @@
 package com.onevoice.link.core
 
 import android.util.Log
+import com.onevoice.link.BuildConfig
 import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
@@ -114,6 +115,8 @@ internal class AutoHybridPipeline private constructor(
                     asrArtifactPrefix = asrArtifactPrefix(enAsr),
                     useCpuTts = true,
                     cpuTtsModel = File(enRoot, "tts_cpu.onnx"),
+                    // Vietnamese target speech: Kokoro-VI or Supertonic-3 (A/B).
+                    cpuTtsEngine = CpuTtsEngine.parse(BuildConfig.VI_TTS_ENGINE),
                 )
                 if (routingConfig.mode == RoutingMode.LID) {
                     lid = SpeechFlowLanguageIdentifier.load(File(modelRoot, "shared"))

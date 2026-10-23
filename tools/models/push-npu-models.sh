@@ -13,6 +13,7 @@
 #   <filesDir>/models/npu/vi-en/asr_gipformer_{tokens,bpe,config}.*
 #   <filesDir>/models/npu/en-vi/{asr_parakeet_ctc,mt_encoder,mt_decoder}.bin
 #   <filesDir>/models/npu/en-vi/asr_parakeet_tokens.txt
+#   <filesDir>/models/npu/en-vi/tts_supertonic/*   (Supertonic-3, optional engine)
 #
 # Each direction also gets Marian host tokenizers, a whole-utterance CPU Kokoro
 # model, voice/token files and exact eSpeak data. A complete CPU ASR+MT branch
@@ -104,6 +105,10 @@ vi-en/fallback/mt/vocab.json	../models-hf/mt-vi-en/vocab.json
 vi-en/fallback/mt/mt_config.json	../models-hf/mt-vi-en/mt_config.json
 EOF
 
+# en-vi/tts_supertonic/ is the -PviTtsEngine=SUPERTONIC alternative to Kokoro-VI:
+# sherpa-onnx-supertonic-3-tts-int8-2026-05-11 from the k2-fsa/sherpa-onnx
+# tts-models release (code MIT, weights OpenRAIL-M). Both engines are staged so
+# an A/B needs only an APK rebuild.
 read -r -d '' EN_VI <<'EOF' || true
 en-vi/asr_parakeet_ctc.bin	asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/model.bin
 en-vi/asr_parakeet_tokens.txt	asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/tokens.txt
@@ -116,6 +121,13 @@ en-vi/mt_config.json	../models-hf/mt-en-vi/mt_config.json
 en-vi/tts_tokens.txt	../tools/models/kokoro-vi-espeak-tokens.txt
 en-vi/tts_voices.bin	../models-hf/tts-vi/voices.bin
 en-vi/tts_cpu.onnx	../models-hf/tts-vi/model.onnx
+en-vi/tts_supertonic/duration_predictor.int8.onnx	../models-hf/tts-vi-supertonic/duration_predictor.int8.onnx
+en-vi/tts_supertonic/text_encoder.int8.onnx	../models-hf/tts-vi-supertonic/text_encoder.int8.onnx
+en-vi/tts_supertonic/vector_estimator.int8.onnx	../models-hf/tts-vi-supertonic/vector_estimator.int8.onnx
+en-vi/tts_supertonic/vocoder.int8.onnx	../models-hf/tts-vi-supertonic/vocoder.int8.onnx
+en-vi/tts_supertonic/tts.json	../models-hf/tts-vi-supertonic/tts.json
+en-vi/tts_supertonic/unicode_indexer.bin	../models-hf/tts-vi-supertonic/unicode_indexer.bin
+en-vi/tts_supertonic/voice.bin	../models-hf/tts-vi-supertonic/voice.bin
 en-vi/fallback/asr/model.onnx	../models-hf/asr-en/model.int8.onnx
 en-vi/fallback/asr/tokens.txt	../models-hf/asr-en/tokens.txt
 en-vi/fallback/mt/encoder_model.onnx	../models-hf/mt-en-vi/encoder_model.onnx

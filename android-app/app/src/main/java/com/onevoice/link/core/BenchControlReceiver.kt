@@ -125,22 +125,15 @@ class BenchControlReceiver : BroadcastReceiver() {
                     Log.w(TAG, "synth produced no audio")
                     return
                 }
-                // Integer 3:2 decimation with a short box filter. Crude, but the
-                // fixture only has to be intelligible to ASR, and a
-                // sharper filter would add a dependency for no measurable gain.
-                val decimated = FloatArray(result.size * 2 / 3)
-                for (i in decimated.indices) {
-                    val src = i * 3 / 2
-                    decimated[i] = if (src + 1 < result.size) {
-                        (result[src] + result[src + 1]) * 0.5f
-                    } else {
-                        result[src.coerceAtMost(result.size - 1)]
-                    }
+                // Same band-limited resampler that brings Supertonic to 24 kHz,
+                // so Kokoro and Supertonic fixtures share one filter.
+                val decimated = resamplePcm(result, NpuEngine.TTS_SAMPLE_RATE, NpuEngine.SAMPLE_RATE)
+                // Optional untouched 24 kHz copy for listening tests.
+                intent.getStringExtra(EXTRA_RAW_PATH)?.let { rawPath ->
+                    runCatching { File(rawPath).writeBytes(littleEndianFloats(result)) }
+                        .onFailure { Log.w(TAG, "synth raw write failed", it) }
                 }
-                val buffer = ByteBuffer.allocate(decimated.size * Float.SIZE_BYTES)
-                    .order(ByteOrder.LITTLE_ENDIAN)
-                decimated.forEach(buffer::putFloat)
-                runCatching { File(out).writeBytes(buffer.array()) }
+                runCatching { File(out).writeBytes(littleEndianFloats(decimated)) }
                     .onSuccess {
                         Log.i(TAG, "synth wrote $out samples=${decimated.size} " +
                             "seconds=${"%.2f".format(decimated.size / 16000.0)}")
@@ -239,5 +232,13 @@ class BenchControlReceiver : BroadcastReceiver() {
         const val EXTRA_FORCED = "forced"
         const val EXTRA_TEXT = "text"
         const val EXTRA_DIRECTION = "direction"
+        const val EXTRA_RAW_PATH = "raw"
+
+        private fun littleEndianFloats(samples: FloatArray): ByteArray {
+            val buffer = ByteBuffer.allocate(samples.size * Float.SIZE_BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN)
+            samples.forEach(buffer::putFloat)
+            return buffer.array()
+        }
     }
 }

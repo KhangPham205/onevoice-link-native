@@ -20,7 +20,6 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.math.sqrt
 import org.json.JSONObject
 
 private const val TAG = "OneVoiceNpu"
@@ -784,11 +783,6 @@ class NpuEngine(
         }
     }
 
-    private data class BoundedUtterance(
-        val samples: FloatArray,
-        val forcedBoundary: Boolean,
-    )
-
     @SuppressLint("MissingPermission")
     private fun captureOneTurn(
         audioManager: AudioManager,
@@ -866,7 +860,8 @@ class NpuEngine(
                 record,
                 detector,
                 // The loudspeaker tail of the previous translation reaches the
-                // built-in mic after AudioTrack reports drained; a headset does not.
+                // built-in mic after AudioTrack reports drained; a headset does
+                // not. Guarded audio cannot open a turn but is kept as pre-roll.
                 guardSamples = if (communication == null) PHONE_ECHO_GUARD_SAMPLES else 0,
             )
         } finally {
@@ -981,85 +976,21 @@ class NpuEngine(
         guardSamples: Int = 0,
     ): BoundedUtterance? {
         val frame = ShortArray(FRAME_SAMPLES)
-        // Discard the echo guard before VAD or pre-roll can see it.
-        var guardRemaining = guardSamples
-        while (running.get() && guardRemaining > 0) {
-            val count = record.read(frame, 0, minOf(frame.size, guardRemaining))
-            if (count < 0) error("AudioRecord.read failed with code $count")
-            guardRemaining -= count
-        }
-        detector.reset()
-        val current = FloatArray(MAX_SEGMENT_SAMPLES)
-        val preRoll = FloatArray(PRE_ROLL_SAMPLES)
-        var currentSize = 0
-        var speechFrames = 0
-        var silenceFrames = 0
-        var trailingSilenceSamples = 0
-        var preRollSize = 0
-        var preRollWrite = 0
+        val segmenter = UtteranceSegmenter(detector, guardSamples, log = { Log.i(TAG, it) })
         var vadFrames = 0
         var vadSpeechFrames = 0
         var vadPeakScore = 0f
-
-        fun resetCandidate() {
-            currentSize = 0
-            speechFrames = 0
-            silenceFrames = 0
-            trailingSilenceSamples = 0
-            preRollSize = 0
-            preRollWrite = 0
-        }
-
-        fun rememberPreRoll(count: Int) {
-            for (index in 0 until count) {
-                preRoll[preRollWrite] = frame[index] / 32_768f
-                preRollWrite = (preRollWrite + 1) % preRoll.size
-                preRollSize = minOf(preRoll.size, preRollSize + 1)
-            }
-        }
-
-        fun beginFromPreRoll() {
-            val start = (preRollWrite - preRollSize + preRoll.size) % preRoll.size
-            repeat(preRollSize) { index ->
-                current[index] = preRoll[(start + index) % preRoll.size]
-            }
-            currentSize = preRollSize
-        }
-
-        fun completed(size: Int, forcedBoundary: Boolean): BoundedUtterance? {
-            if (size <= 0) return null
-            val segment = current.copyOf(size)
-            var sumSquares = 0.0
-            var peak = 0f
-            segment.forEach { sample ->
-                sumSquares += sample.toDouble() * sample
-                peak = maxOf(peak, kotlin.math.abs(sample))
-            }
-            val rms = sqrt(sumSquares / size).toFloat()
-            val crest = peak / (rms + 1e-9f)
-            Log.i(
-                TAG,
-                "Captured segment samples=$size durationMs=${size * 1_000L / SAMPLE_RATE} " +
-                    "rms=${"%.5f".format(rms)} peak=${"%.5f".format(peak)} " +
-                    "crest=${"%.1f".format(crest)} forced=$forcedBoundary",
-            )
-            if (rms < SEGMENT_MIN_RMS || peak < SEGMENT_MIN_PEAK) {
-                Log.i(TAG, "Discarding segment below speech floor")
-                return null
-            }
-            return BoundedUtterance(segment, forcedBoundary)
-        }
-
         while (running.get()) {
             val count = record.read(frame, 0, frame.size)
             if (count < 0) error("AudioRecord.read failed with code $count")
             if (count == 0) continue
-            val speech = detector.isSpeech(frame, count)
-            if (BuildConfig.DEBUG) {
+            val live = !segmenter.guarding
+            val utterance = segmenter.accept(frame, count)
+            if (BuildConfig.DEBUG && live) {
                 // One line per second of capture: peak detector score and how
                 // many 20 ms frames it called speech. Debug builds only.
                 vadPeakScore = maxOf(vadPeakScore, detector.lastScore)
-                if (speech) vadSpeechFrames++
+                if (segmenter.lastFrameSpeech) vadSpeechFrames++
                 if (++vadFrames == VAD_LOG_FRAMES) {
                     Log.d(
                         VAD_TAG,
@@ -1071,45 +1002,7 @@ class NpuEngine(
                     vadPeakScore = 0f
                 }
             }
-            if (speechFrames == 0) {
-                rememberPreRoll(count)
-                if (speech) {
-                    beginFromPreRoll()
-                    speechFrames = 1
-                    silenceFrames = 0
-                }
-                continue
-            }
-
-            val append = minOf(count, current.size - currentSize)
-            for (index in 0 until append) {
-                current[currentSize + index] = frame[index] / 32_768f
-            }
-            currentSize += append
-            if (speech) {
-                speechFrames++
-                silenceFrames = 0
-                trailingSilenceSamples = 0
-            } else {
-                silenceFrames++
-                trailingSilenceSamples += append
-            }
-            val endedBySilence = speechFrames >= MIN_SPEECH_FRAMES &&
-                silenceFrames >= END_SILENCE_FRAMES
-            val rejectedBySilence = speechFrames < MIN_SPEECH_FRAMES &&
-                silenceFrames >= END_SILENCE_FRAMES
-            if (endedBySilence) {
-                val candidate = completed(
-                    (currentSize - trailingSilenceSamples).coerceAtLeast(1),
-                    forcedBoundary = false,
-                )
-                if (candidate != null) return candidate
-                resetCandidate()
-            } else if (rejectedBySilence) {
-                resetCandidate()
-            } else if (currentSize >= MAX_SEGMENT_SAMPLES) {
-                return completed(MAX_SEGMENT_SAMPLES, forcedBoundary = true)
-            }
+            if (utterance != null) return utterance
         }
         return null
     }
@@ -1861,8 +1754,9 @@ class NpuEngine(
         // Strict half-duplex permits exactly one bounded turn in flight.
         const val MAX_QUEUED_SEGMENTS = 1
         const val EXPECTED_HYBRID_CONTEXTS = 6
-        // Phone route: drop this much capture after IDLE so the loudspeaker's
-        // decaying translation (output latency + room reverb) cannot open a turn.
+        // Phone route: for this long after IDLE the loudspeaker's decaying
+        // translation (output latency + room reverb) cannot open a turn. The
+        // audio still warms the VAD and fills pre-roll ([UtteranceSegmenter]).
         const val PHONE_ECHO_GUARD_SAMPLES = SAMPLE_RATE * 3 / 10 // 300 ms
         const val PHONE_ROUTE_NAME = "Phone microphone"
         const val MIC_ROUTE_TIMEOUT_MS = 2_000L

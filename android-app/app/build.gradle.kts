@@ -63,6 +63,33 @@ val kokoroThreads = providers.gradleProperty("kokoroThreads").orElse("2").get()
     .toIntOrNull()
     ?.takeIf { it in 1..8 }
     ?: error("kokoroThreads must be an integer in 1..8")
+// Vietnamese target speech (en-vi): KOKORO (espeak-ng vi + aliased tokens) or
+// SUPERTONIC (Supertonic-3 int8, grapheme input). Both are staged on device, so
+// switching is an APK rebuild only.
+val viTtsEngine = providers.gradleProperty("viTtsEngine").orElse("KOKORO").get().also {
+    require(it in setOf("KOKORO", "SUPERTONIC")) {
+        "viTtsEngine must be KOKORO or SUPERTONIC (got '$it')"
+    }
+}
+val supertonicVoice = providers.gradleProperty("supertonicVoice").orElse("F1").get().also {
+    require(Regex("[FM][1-5]").matches(it)) {
+        "supertonicVoice must be F1..F5 or M1..M5 (got '$it')"
+    }
+}
+val supertonicSteps = providers.gradleProperty("supertonicSteps").orElse("5").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..32 }
+    ?: error("supertonicSteps must be an integer in 1..32")
+// Divides the duration predictor's estimate. On Vietnamese it over-allocates
+// time, and Supertonic fills the slack with repeated words.
+val supertonicSpeed = providers.gradleProperty("supertonicSpeed").orElse("1.05").get()
+    .toFloatOrNull()
+    ?.takeIf { it in 0.5f..2.0f }
+    ?: error("supertonicSpeed must be a number in 0.5..2.0")
+val supertonicThreads = providers.gradleProperty("supertonicThreads").orElse("4").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..8 }
+    ?: error("supertonicThreads must be an integer in 1..8")
 require(dualAsrMarginThreshold >= 0.0) {
     "dualAsrMarginThreshold must be >= 0 (got $dualAsrMarginThreshold)"
 }
@@ -169,6 +196,11 @@ android {
         buildConfigField("double", "DUAL_ASR_EN_OFFSET", dualAsrEnOffset.toString())
         buildConfigField("int", "KOKORO_THREADS", kokoroThreads.toString())
         buildConfigField("String", "VAD_MODE", "\"$vadMode\"")
+        buildConfigField("String", "VI_TTS_ENGINE", "\"$viTtsEngine\"")
+        buildConfigField("String", "SUPERTONIC_VOICE", "\"$supertonicVoice\"")
+        buildConfigField("int", "SUPERTONIC_STEPS", supertonicSteps.toString())
+        buildConfigField("int", "SUPERTONIC_THREADS", supertonicThreads.toString())
+        buildConfigField("float", "SUPERTONIC_SPEED", "${supertonicSpeed}f")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

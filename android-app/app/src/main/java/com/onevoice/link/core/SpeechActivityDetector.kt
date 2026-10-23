@@ -36,6 +36,13 @@ internal interface SpeechActivityDetector : Closeable {
     /** Detector-native score of the latest decision (RMS or probability), for tuning logs. */
     val lastScore: Float
 
+    /**
+     * Feed [frame] without letting it open a turn: recurrent state stays warm
+     * through the post-playback echo guard while the speech latch stays closed.
+     * Stateless detectors have nothing to warm.
+     */
+    fun observe(frame: ShortArray, count: Int) {}
+
     /** Forget recurrent state between turns so one turn cannot bias the next. */
     fun reset() {}
 
@@ -83,12 +90,19 @@ internal class WindowedSpeechGate(
     var lastProbability = 0f
         private set
 
-    fun accept(frame: ShortArray, count: Int): Boolean {
+    fun accept(frame: ShortArray, count: Int): Boolean = feed(frame, count, latch = true)
+
+    /** Run the model over [frame] but hold the latch closed (see [SpeechActivityDetector.observe]). */
+    fun observe(frame: ShortArray, count: Int) {
+        feed(frame, count, latch = false)
+    }
+
+    private fun feed(frame: ShortArray, count: Int, latch: Boolean): Boolean {
         for (index in 0 until count) {
             window[filled++] = frame[index] / 32_768f
             if (filled == windowSamples) {
                 lastProbability = probability(window)
-                speaking = if (speaking) {
+                speaking = latch && if (speaking) {
                     lastProbability >= offsetProbability
                 } else {
                     lastProbability >= onsetProbability
@@ -125,6 +139,8 @@ internal class SileroSpeechDetector private constructor(
     )
 
     override fun isSpeech(frame: ShortArray, count: Int): Boolean = gate.accept(frame, count)
+
+    override fun observe(frame: ShortArray, count: Int) = gate.observe(frame, count)
 
     override val lastScore: Float get() = gate.lastProbability
 
