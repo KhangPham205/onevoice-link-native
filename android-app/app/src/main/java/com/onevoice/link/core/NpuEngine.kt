@@ -168,7 +168,55 @@ class NpuEngine(
                 "timestampNs=${transition.timestampNs} dwellMs=${transition.dwellMs} " +
                 "reason=${transition.reason}",
         )
+        val phase = when (transition.to) {
+            HalfDuplexState.IDLE -> LivePhase.IDLE
+            HalfDuplexState.CAPTURING -> LivePhase.CAPTURING
+            HalfDuplexState.PROCESSING -> LivePhase.PROCESSING
+            HalfDuplexState.PLAYING -> LivePhase.PLAYING
+        }
+        runCatching { pipelineListener?.onLivePhase(phase) }
     }
+
+    /**
+     * Live-turn evidence that survives without logcat. Bench fixtures are not
+     * recorded here; the harness keeps its own CSV.
+     */
+    private val sessionRecorder = SessionRecorder(File(context.filesDir, "sessions")) {
+        sessionHeader()
+    }
+
+    /** Tagged bench fixtures: same row shape as a live session, for scoring. */
+    private val benchRecorder = SessionRecorder(File(context.filesDir, "bench/turns")) {
+        sessionHeader()
+    }
+
+    private fun sessionHeader(): JSONObject =
+        JSONObject().apply {
+            put("timestamp", System.currentTimeMillis())
+            put("versionName", BuildConfig.VERSION_NAME)
+            put("buildType", BuildConfig.BUILD_TYPE)
+            put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
+            put("soc", if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else Build.HARDWARE)
+            put("android", Build.VERSION.RELEASE)
+            put("routingMode", routingConfig.mode.name)
+            put("marginThreshold", routingConfig.marginThreshold)
+            put("floorThreshold", routingConfig.floorThreshold)
+            put("priorWeight", routingConfig.priorWeight)
+            put("enScoreOffset", routingConfig.enScoreOffset)
+            put("vadMode", vadMode.name)
+            put("viTtsEngine", BuildConfig.VI_TTS_ENGINE)
+            put("kokoroThreads", BuildConfig.KOKORO_THREADS)
+            put("audioRoutePreference", audioRoutePreference.name)
+        }
+
+    /** JSONL file of the current (or last) live session; null before any turn. */
+    val sessionFile: File? get() = sessionRecorder.currentFile
+
+    /** Close the current session log; the next live turn opens a new file. */
+    fun startNewSession() = sessionRecorder.rotate()
+
+    /** Start a fresh tagged-fixture log, e.g. once per dataset evaluation run. */
+    internal fun rotateBenchLog() = benchRecorder.rotate()
 
     /**
      * Benchmark sink. Inert unless the harness created `<filesDir>/bench`, so a
@@ -204,6 +252,11 @@ class NpuEngine(
         val benchmark: Boolean = false,
         /** Bench-forced branch; null routes the fixture like a live turn. */
         val benchmarkDirection: TranslationDirection? = null,
+        /**
+         * Dataset item id. A tagged fixture also records its text and target
+         * waveform so accuracy can be scored offline against the references.
+         */
+        val benchmarkTag: String? = null,
     )
 
     private val segments = LinkedBlockingQueue<CapturedSegment>(MAX_QUEUED_SEGMENTS)
@@ -593,6 +646,7 @@ class NpuEngine(
         samples: FloatArray,
         direction: TranslationDirection?,
         forcedBoundary: Boolean = false,
+        tag: String? = null,
     ): Boolean {
         if (telemetry?.enabled != true) return false
         if (pipeline == null) {
@@ -629,6 +683,7 @@ class NpuEngine(
             scoClosedNs = System.nanoTime(),
             benchmark = true,
             benchmarkDirection = direction,
+            benchmarkTag = tag,
         )
         // Blocking put, not offer: dropping a fixture would silently shrink the
         // sample count a percentile is computed from.
@@ -1080,6 +1135,8 @@ class NpuEngine(
                 var direction: TranslationDirection? = null
                 var textResult: HybridTextResult? = null
                 var ttsMs = 0L
+                var ttsAudioMs: Long? = null
+                var ttsAudio: FloatArray? = null
                 var playback: PlaybackMetrics? = null
                 var turnError: String? = null
                 try {
@@ -1151,6 +1208,8 @@ class NpuEngine(
                         continue
                     }
                     val audioMs = audio.size * 1_000L / TTS_SAMPLE_RATE
+                    ttsAudioMs = audioMs
+                    ttsAudio = audio
                     Log.i(
                         TAG,
                         "Pipeline direction=$selectedDirection transcript=\"$transcript\" " +
@@ -1199,7 +1258,11 @@ class NpuEngine(
                     Log.e(TAG, "Hybrid turn ${captured.id} failed closed", failure)
                     notifyPipelineError("Hybrid turn failed closed: $turnError")
                 } finally {
-                    logTuningRow(
+                    val totalMs = (System.nanoTime() - processingStartedNs) / 1_000_000L
+                    val firstAudioMs = playback?.let {
+                        (it.firstAudioNs - captured.enqueuedNs).coerceAtLeast(0L) / 1_000_000L
+                    }
+                    val row = logTuningRow(
                         captured = captured,
                         routing = routing,
                         direction = direction,
@@ -1207,10 +1270,29 @@ class NpuEngine(
                         ttsMs = ttsMs,
                         queueWaitMs = queueWaitMs,
                         playback = playback,
-                        totalMs = (System.nanoTime() - processingStartedNs) / 1_000_000L,
+                        firstAudioMs = firstAudioMs,
+                        totalMs = totalMs,
                         error = turnError,
                     )
+                    // After every timing above is final, so the disk write is
+                    // never inside a measured interval.
+                    captured.benchmarkTag?.let { tag ->
+                        recordTaggedFixture(tag, row, textResult, ttsAudioMs, ttsAudio)
+                    }
                     if (!captured.benchmark) {
+                        reportTurn(
+                            row = row,
+                            captured = captured,
+                            routing = routing,
+                            direction = direction,
+                            text = textResult,
+                            ttsMs = ttsMs,
+                            ttsAudioMs = ttsAudioMs,
+                            queueWaitMs = queueWaitMs,
+                            firstAudioMs = firstAudioMs,
+                            totalMs = totalMs,
+                            error = turnError ?: routing?.error,
+                        )
                         halfDuplex.finishTurn(captured.id, turnError ?: "turn_complete")
                     }
                 }
@@ -1230,6 +1312,8 @@ class NpuEngine(
         val a2dpRestoreMs: Long,
         val routePollMs: Long,
         val playbackMs: Long,
+        /** When the first translated sample was handed to the proven route. */
+        val firstAudioNs: Long,
     )
 
     private fun playStereo(
@@ -1445,6 +1529,7 @@ class NpuEngine(
                 a2dpRestoreMs = a2dpRestoreMs,
                 routePollMs = routePollMs,
                 playbackMs = (System.nanoTime() - playbackStartedNs) / 1_000_000L,
+                firstAudioNs = playbackStartedNs,
             )
         } catch (_: InterruptedException) {
             throw InterruptedException()
@@ -1567,9 +1652,10 @@ class NpuEngine(
         ttsMs: Long,
         queueWaitMs: Long,
         playback: PlaybackMetrics?,
+        firstAudioMs: Long?,
         totalMs: Long,
         error: String?,
-    ) {
+    ): JSONObject {
         fun branch(value: TimedAsrHypothesis?): Any = if (value == null) {
             JSONObject.NULL
         } else {
@@ -1628,10 +1714,89 @@ class NpuEngine(
                 put("a2dpRestore", playback?.a2dpRestoreMs ?: JSONObject.NULL)
                 put("routePoll", playback?.routePollMs ?: JSONObject.NULL)
                 put("playback", playback?.playbackMs ?: JSONObject.NULL)
+                // Bound -> first translated sample written; what the listener waits.
+                put("firstAudio", firstAudioMs ?: JSONObject.NULL)
                 put("postBoundTotal", totalMs)
             })
         }
         Log.i(TUNING_TAG, row.toString())
+        return row
+    }
+
+    /**
+     * Publish one live turn to the demo screen and the session log. Text stays
+     * out of the logcat routing row; the session file is app-private until the
+     * user explicitly exports it.
+     */
+    private fun reportTurn(
+        row: JSONObject,
+        captured: CapturedSegment,
+        routing: RoutingDiagnostics?,
+        direction: TranslationDirection?,
+        text: HybridTextResult?,
+        ttsMs: Long,
+        ttsAudioMs: Long?,
+        queueWaitMs: Long,
+        firstAudioMs: Long?,
+        totalMs: Long,
+        error: String?,
+    ) {
+        val report = TurnReport(
+            turnId = captured.id,
+            timestampMs = System.currentTimeMillis(),
+            audioMs = captured.samples.size * 1_000L / SAMPLE_RATE,
+            route = captured.route.name.lowercase(Locale.ROOT),
+            direction = direction,
+            reason = routing?.reason?.logValue ?: "pipeline_error",
+            executionPath = text?.executionPath,
+            transcript = text?.transcript,
+            translation = text?.translation,
+            error = error,
+            viScore = routing?.vi?.hypothesis?.normalizedLogProb?.takeIf(Double::isFinite),
+            enScore = routing?.en?.hypothesis?.normalizedLogProb?.takeIf(Double::isFinite),
+            frontendMs = routing?.frontendMs ?: 0L,
+            dualAsrWallMs = routing?.dualAsrWallMs ?: 0L,
+            mtMs = text?.mtMs ?: 0L,
+            ttsMs = ttsMs,
+            queueWaitMs = queueWaitMs,
+            ttsAudioMs = ttsAudioMs,
+            firstAudioMs = firstAudioMs,
+            postBoundTotalMs = totalMs,
+        )
+        sessionRecorder.append(turnRow(row, text, ttsAudioMs))
+        runCatching { pipelineListener?.onTurnReport(report) }
+    }
+
+    /** The routing row plus what was said and translated: the session-log shape. */
+    private fun turnRow(row: JSONObject, text: HybridTextResult?, ttsAudioMs: Long?): JSONObject =
+        JSONObject(row.toString()).apply {
+            put("type", "turn")
+            put("transcript", text?.transcript ?: JSONObject.NULL)
+            put("translation", text?.translation ?: JSONObject.NULL)
+            put("ttsAudioMs", ttsAudioMs ?: JSONObject.NULL)
+        }
+
+    /**
+     * Dataset evaluation output: one JSONL row per tagged fixture, plus the
+     * 24 kHz target waveform under `bench/tts/<tag>.f32` so intelligibility
+     * can be scored by an independent recognizer on the workstation.
+     */
+    private fun recordTaggedFixture(
+        tag: String,
+        row: JSONObject,
+        text: HybridTextResult?,
+        ttsAudioMs: Long?,
+        audio: FloatArray?,
+    ) {
+        benchRecorder.append(turnRow(row, text, ttsAudioMs).put("tag", tag))
+        if (audio == null) return
+        runCatching {
+            val dir = File(appContext.filesDir, "bench/tts").apply { mkdirs() }
+            val bytes = java.nio.ByteBuffer.allocate(audio.size * Float.SIZE_BYTES)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            audio.forEach(bytes::putFloat)
+            File(dir, "$tag.f32").writeBytes(bytes.array())
+        }.onFailure { Log.w(TAG, "tagged fixture $tag: waveform not saved", it) }
     }
 
     private fun notifySegment(

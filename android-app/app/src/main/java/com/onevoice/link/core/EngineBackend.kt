@@ -34,6 +34,12 @@ interface EngineBackend {
 
         /** Reports a fatal asynchronous failure after the engine has stopped itself. */
         fun onPipelineStopped(message: String) {}
+
+        /** Called once per bounded live turn, accepted or rejected, after it ends. */
+        fun onTurnReport(report: TurnReport) {}
+
+        /** Called on every half-duplex state edge of a live session. */
+        fun onLivePhase(phase: LivePhase) {}
     }
 }
 

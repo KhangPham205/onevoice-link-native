@@ -182,10 +182,12 @@ internal class BenchTelemetry(private val context: Context) {
      */
     fun memorySnapshot(): Map<String, Long> {
         val out = LinkedHashMap<String, Long>()
-        val activityManager =
-            context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        val pid = android.os.Process.myPid()
-        activityManager?.getProcessMemoryInfo(intArrayOf(pid))?.firstOrNull()?.let { info ->
+        // Debug.getMemoryInfo, not ActivityManager.getProcessMemoryInfo: since
+        // Android Q the latter returns a cached sample to app callers, and on
+        // this device it reported an unchanged PSS across a 1 GB RSS jump.
+        runCatching {
+            val info = android.os.Debug.MemoryInfo()
+            android.os.Debug.getMemoryInfo(info)
             out["pss_kb"] = info.totalPss.toLong()
             out["private_dirty_kb"] = info.totalPrivateDirty.toLong()
         }

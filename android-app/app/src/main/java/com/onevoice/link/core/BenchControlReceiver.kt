@@ -209,12 +209,24 @@ class BenchControlReceiver : BroadcastReceiver() {
                         return
                     }
                 }
+                // The tag names a file under bench/tts, so it must stay a plain id.
+                val tag = intent.getStringExtra(EXTRA_TAG)
+                if (tag != null && !TAG_PATTERN.matches(tag)) {
+                    Log.w(TAG, "feed ignored: invalid tag")
+                    return
+                }
                 val accepted = engine.benchFeed(
                     samples,
                     direction = direction,
                     forcedBoundary = intent.getBooleanExtra(EXTRA_FORCED, false),
+                    tag = tag,
                 )
-                Log.i(TAG, "feed ${file.name} samples=${samples.size} accepted=$accepted")
+                Log.i(TAG, "feed ${file.name} samples=${samples.size} tag=$tag accepted=$accepted")
+            }
+
+            "newlog" -> {
+                NpuEngine.current()?.rotateBenchLog()
+                Log.i(TAG, "newlog rotated tagged-fixture log")
             }
 
             else -> Log.w(TAG, "unknown bench command: $command")
@@ -233,6 +245,8 @@ class BenchControlReceiver : BroadcastReceiver() {
         const val EXTRA_TEXT = "text"
         const val EXTRA_DIRECTION = "direction"
         const val EXTRA_RAW_PATH = "raw"
+        const val EXTRA_TAG = "tag"
+        val TAG_PATTERN = Regex("[A-Za-z0-9_-]{1,64}")
 
         private fun littleEndianFloats(samples: FloatArray): ByteArray {
             val buffer = ByteBuffer.allocate(samples.size * Float.SIZE_BYTES)

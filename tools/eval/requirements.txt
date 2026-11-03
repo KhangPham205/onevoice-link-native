@@ -1,0 +1,12 @@
+# Workstation-side dataset evaluation (the phone runs inference; this scores it).
+# CPU torch is enough: install it first from the PyTorch CPU index to avoid
+# pulling multi-GB CUDA wheels, e.g.
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
+numpy
+openpyxl
+sacrebleu
+jiwer
+num2words
+scipy
+unbabel-comet
+faster-whisper

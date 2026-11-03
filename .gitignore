@@ -63,3 +63,9 @@ google-services.json
 # Keep their integration code and manifests in Git, not the binary payloads.
 /android-app/app/libs/*.aar
 /android-app/app/src/main/assets/dsp/*.so
+
+# Local speech translation dataset
+/Vie-Eng dataset/
+# Dataset evaluation output quotes that dataset and holds ~70 MB of TTS audio;
+# it ships as the submission's evidence folder, summarised in docs/.
+/eval-results/

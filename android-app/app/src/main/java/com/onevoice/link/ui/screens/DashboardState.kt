@@ -1,5 +1,7 @@
 package com.onevoice.link.ui.screens
 
+import android.content.Context
+import android.os.SystemClock
 import androidx.annotation.StringRes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -12,11 +14,14 @@ import com.onevoice.link.R
 import com.onevoice.link.core.AudioRoutePreference
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.ExecutionPath
+import com.onevoice.link.core.LivePhase
 import com.onevoice.link.core.NpuEngine
 import com.onevoice.link.core.PipelineSegment
+import com.onevoice.link.core.SessionRecorder
 import com.onevoice.link.core.StageState
 import com.onevoice.link.core.StageStatus
 import com.onevoice.link.core.TranslationDirection
+import com.onevoice.link.core.TurnReport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -133,6 +138,21 @@ class EngineController(
     var activeRouteLabel by mutableStateOf<String?>(null)
         private set
 
+    /**
+     * Every live turn since the session began, oldest first. It survives
+     * start/stop so a 30-minute demo keeps one continuous on-screen history,
+     * matching the single JSONL file the engine appends to.
+     */
+    var turns by mutableStateOf<List<TurnReport>>(emptyList())
+        private set
+    var livePhase by mutableStateOf(LivePhase.IDLE)
+        private set
+    /** Monotonic time the current [livePhase] began, for an elapsed timer. */
+    var livePhaseSinceMs by mutableStateOf(SystemClock.elapsedRealtime())
+        private set
+    var exportMessage by mutableStateOf<UiMessage?>(null)
+        private set
+
     val supportsLiveTranslation: Boolean get() = backend.supportsLiveTranslation
 
     init {
@@ -194,6 +214,38 @@ class EngineController(
                 onFailure = ::nativeFailure,
             )
         }
+    }
+
+    /** Copy the session JSONL to Download/OneVoice so it can leave the device. */
+    fun exportSession(context: Context) {
+        val file = (backend as? NpuEngine)?.sessionFile
+        if (file == null) {
+            exportMessage = UiMessage(R.string.demo_export_empty, kind = MessageKind.Error)
+            return
+        }
+        val appContext = context.applicationContext
+        scope.launch {
+            exportMessage = withContext(Dispatchers.IO) {
+                runCatching { SessionRecorder.exportToDownloads(appContext, file) }
+            }.fold(
+                onSuccess = { UiMessage(R.string.demo_export_done, it) },
+                onFailure = {
+                    UiMessage(
+                        R.string.demo_export_failed,
+                        it.message ?: it.javaClass.simpleName,
+                        MessageKind.Error,
+                    )
+                },
+            )
+        }
+    }
+
+    /** Clear the on-screen history and make the next turn open a new log file. */
+    fun startNewSession() {
+        if (busy || stage == EngineStage.RUNNING) return
+        (backend as? NpuEngine)?.startNewSession()
+        turns = emptyList()
+        exportMessage = null
     }
 
     /** Detach callbacks and begin off-main-thread teardown. */
@@ -285,6 +337,21 @@ class EngineController(
                 }
             }
 
+            override fun onTurnReport(report: TurnReport) {
+                scope.launch {
+                    if (shutdownRequested) return@launch
+                    turns = (turns + report).takeLast(MAX_TURN_HISTORY)
+                }
+            }
+
+            override fun onLivePhase(phase: LivePhase) {
+                scope.launch {
+                    if (shutdownRequested) return@launch
+                    livePhase = phase
+                    livePhaseSinceMs = SystemClock.elapsedRealtime()
+                }
+            }
+
             override fun onPipelineStopped(message: String) {
                 scope.launch {
                     if (shutdownRequested) return@launch
@@ -350,5 +417,10 @@ class EngineController(
                 }
             }
         }
+    }
+
+    private companion object {
+        /** About an hour of turns; the JSONL file keeps everything. */
+        const val MAX_TURN_HISTORY = 500
     }
 }

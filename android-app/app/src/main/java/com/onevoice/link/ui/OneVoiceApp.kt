@@ -28,12 +28,13 @@ import com.onevoice.link.headset.AuracastCapabilityProbe
 import com.onevoice.link.headset.ConnectedHeadsetRepository
 import com.onevoice.link.headset.HeadsetInventoryState
 import com.onevoice.link.ui.screens.DashboardScreen
+import com.onevoice.link.ui.screens.DemoScreen
 import com.onevoice.link.ui.screens.EngineController
 import com.onevoice.link.ui.screens.SettingsScreen
 import com.onevoice.link.ui.theme.Spacing
 import kotlinx.coroutines.launch
 
-private enum class AppDestination { DASHBOARD, SETTINGS }
+private enum class AppDestination { DASHBOARD, DEMO, SETTINGS }
 
 /** Activity-level UI surface for navigation, Hybrid state, and headset inventory. */
 @Composable
@@ -69,7 +70,7 @@ fun OneVoiceApp(
         onDispose { headsetRepository.stop() }
     }
 
-    BackHandler(enabled = destination == AppDestination.SETTINGS) {
+    BackHandler(enabled = destination != AppDestination.DASHBOARD) {
         destination = AppDestination.DASHBOARD
     }
 
@@ -98,6 +99,14 @@ fun OneVoiceApp(
                     onClick = { selectDestination(AppDestination.DASHBOARD) },
                     modifier = Modifier.padding(horizontal = Spacing.md),
                 )
+                // Same controller as the dashboard, so live translation keeps
+                // running across this switch; only Settings pauses it.
+                NavigationDrawerItem(
+                    label = { Text(stringResource(R.string.navigation_demo)) },
+                    selected = destination == AppDestination.DEMO,
+                    onClick = { selectDestination(AppDestination.DEMO) },
+                    modifier = Modifier.padding(horizontal = Spacing.md),
+                )
                 NavigationDrawerItem(
                     label = { Text(stringResource(R.string.navigation_settings)) },
                     selected = destination == AppDestination.SETTINGS,
@@ -120,6 +129,13 @@ fun OneVoiceApp(
                 micGranted = micGranted,
                 micPermanentlyDenied = micPermanentlyDenied,
                 engine = engine,
+                controller = engineController,
+                onRequestMic = onRequestMic,
+                onOpenMenu = { scope.launch { drawerState.open() } },
+            )
+
+            AppDestination.DEMO -> DemoScreen(
+                micGranted = micGranted,
                 controller = engineController,
                 onRequestMic = onRequestMic,
                 onOpenMenu = { scope.launch { drawerState.open() } },
