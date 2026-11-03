@@ -1,3 +1,166 @@
 <resources>
     <string name="app_name">OneVoice Link</string>
+
+    <!-- Header -->
+    <string name="header_tagline">Private • offline • on-device speech translation</string>
+    <string name="header_tagline_a11y">Private, offline, on-device speech to speech translation.</string>
+
+    <!-- Navigation -->
+    <string name="navigation_dashboard">Translation</string>
+    <string name="navigation_settings">Settings</string>
+    <string name="navigation_demo">Live demo &amp; metrics</string>
+    <string name="navigation_hybrid_only">One dual-ASR Hybrid pipeline. CPU remains a controlled fallback.</string>
+
+    <!-- Status card -->
+    <string name="status_card_overline">ENGINE STATUS</string>
+    <string name="stage_not_initialized">Not Initialized</string>
+    <string name="stage_initialized">Ready</string>
+    <string name="stage_running">Listening · Half-duplex</string>
+
+    <!-- Status messages -->
+    <string name="msg_idle_hybrid_auto">Dual-ASR Hybrid is idle — load the on-device pipeline to begin.</string>
+    <string name="msg_initializing_hybrid_auto">Loading both Hybrid translation branches…</string>
+    <string name="msg_initialized_hybrid_auto">Hybrid is ready. Choose an audio route, then start translating.</string>
+    <string name="msg_init_failed">Model loading failed.</string>
+    <string name="msg_native_error">Native error: %1$s</string>
+    <string name="msg_starting_auto">Opening the microphone for the next turn…</string>
+    <string name="msg_live_auto">Listening one turn at a time. Dual ASR selects Vietnamese or English after speech ends.</string>
+    <string name="msg_start_failed">Failed to start the audio stream.</string>
+    <string name="msg_stopping">Stopping stream…</string>
+    <string name="msg_stopped">Stopped. Models stay resident.</string>
+    <string name="msg_replaying">Replaying the last spoken translation.</string>
+    <string name="msg_replay_unavailable">No synthesized translation is ready to replay yet.</string>
+    <string name="msg_backend_error">%1$s</string>
+
+    <!-- Audio route -->
+    <string name="audio_route_title">Audio input / output</string>
+    <string name="audio_route_auto">Auto</string>
+    <string name="audio_route_phone">Phone</string>
+    <string name="audio_route_bluetooth">Bluetooth</string>
+    <string name="audio_route_auto_hint">Uses a connected Bluetooth headset; otherwise the phone microphone and loudspeaker.</string>
+    <string name="audio_route_phone_hint">Two people share this phone: speak toward the microphone, the translation plays from the loudspeaker.</string>
+    <string name="audio_route_bluetooth_hint">Headset microphone and earbuds only. Vietnamese plays on the left bud, English on the right.</string>
+    <string name="audio_route_active">Last turn: %1$s</string>
+
+    <!-- Actions -->
+    <string name="action_load_hybrid">Load Hybrid Pipeline</string>
+    <string name="action_start_translating">Start Translating</string>
+    <string name="action_stop_translating">Stop Translating</string>
+    <string name="action_grant">Grant</string>
+
+    <!-- Mic permission -->
+    <string name="mic_granted">Microphone access granted</string>
+    <string name="mic_denied">Microphone access needed</string>
+    <string name="mic_denied_permanent_hint">Microphone was denied. Enable it for OneVoice Link in system settings.</string>
+    <string name="warn_mic_required">Grant microphone access to start the stream.</string>
+
+    <!-- Latest utterance emitted by the automatic Hybrid pipeline -->
+    <string name="translation_card_overline">AUTO-ROUTED TRANSLATION</string>
+    <string name="lang_vi">VIETNAMESE</string>
+    <string name="lang_en">ENGLISH</string>
+    <string name="lang_source">SOURCE</string>
+    <string name="lang_translation">TRANSLATION</string>
+    <string name="language_waiting_headset_route">Waiting for dual-ASR language routing</string>
+    <string name="language_routed_vi_en">Dual ASR selected Vietnamese · VI → EN</string>
+    <string name="language_routed_en_vi">Dual ASR selected English · EN → VI</string>
+    <string name="execution_path_hybrid_npu">Hybrid · ASR and translation accelerated on NPU</string>
+    <string name="execution_path_cpu_fallback">Degraded operation · CPU fallback</string>
+    <string name="translation_waiting_source">Your speech will appear here.</string>
+    <string name="translation_waiting_target">The translation will appear here.</string>
+
+    <!-- Model cascade -->
+    <string name="cascade_overline">MODEL CASCADE</string>
+    <string name="cascade_target">Target: %1$s · Hexagon %2$s</string>
+    <string name="cascade_summary">%1$d/%2$d stages · %3$s</string>
+    <string name="cascade_missing_hint">Push the binaries to %1$s</string>
+    <string name="stage_state_pending">queued</string>
+    <string name="stage_state_loading">loading…</string>
+    <string name="stage_state_loaded">%1$s · %2$.0f ms</string>
+    <string name="stage_state_missing">file not on device</string>
+    <string name="stage_state_failed">failed</string>
+
+    <!-- Capability boundary for the only user-facing pipeline -->
+    <string name="scope_notice_hybrid_auto">Dual-ASR Hybrid: both on-device recognizers score each bounded turn, then margin/floor/prior policy selects VI → EN or EN → VI. Capture and stereo playback never overlap. NPU acceleration is preferred; CPU is a controlled fallback.</string>
+
+    <!-- Live demo screen: readouts for the uncut offline demo recording -->
+    <string name="demo_title">Live demo</string>
+    <string name="demo_subtitle">On-device · VI ⇄ EN · HTP</string>
+    <string name="demo_action_load">Load models</string>
+    <string name="demo_action_start">Start</string>
+    <string name="demo_action_stop">Stop</string>
+    <string name="demo_action_grant_mic">Allow mic</string>
+    <string name="demo_network_unknown">NETWORK …</string>
+    <string name="demo_offline_airplane">OFFLINE · AIRPLANE MODE</string>
+    <string name="demo_offline">OFFLINE · NO NETWORK</string>
+    <string name="demo_online">NETWORK CONNECTED</string>
+    <string name="demo_no_internet_permission">APK declares no INTERNET permission</string>
+    <string name="demo_memory">App RAM %1$s GB · peak %2$s GB</string>
+    <string name="demo_device_memory">Device free %1$s / %2$s GB · thermal %3$s</string>
+    <string name="demo_thermal_none">normal</string>
+    <string name="demo_thermal_light">light</string>
+    <string name="demo_thermal_moderate">moderate</string>
+    <string name="demo_thermal_severe">severe</string>
+    <string name="demo_summary_turns">Turns translated %1$d / %2$d bounded</string>
+    <string name="demo_summary_latency">First audio p50 %1$s s · p95 %2$s s · median ASR %3$d · MT %4$d · TTS %5$d ms</string>
+    <string name="demo_phase_not_loaded">Models not loaded</string>
+    <string name="demo_phase_ready">Ready · press Start</string>
+    <string name="demo_phase_listening">Listening… speak now</string>
+    <string name="demo_phase_processing">Translating… %1$s s</string>
+    <string name="demo_phase_playing">Speaking translation…</string>
+    <string name="demo_no_turns">Translated turns will appear here with their timings.</string>
+    <string name="demo_turn_header">#%1$d · %2$s · %3$s · %4$s</string>
+    <string name="demo_turn_stages">ASR×2 %1$d · MT %2$d · TTS %3$d ms</string>
+    <string name="demo_turn_first_audio">First audio %1$s s · speech %2$s s → voice %3$s s</string>
+    <string name="demo_turn_no_audio">No audio · %1$s s · speech %2$s s</string>
+    <string name="demo_turn_scores">score/token VI %1$s · EN %2$s</string>
+    <string name="demo_dir_vi_en">VI → EN</string>
+    <string name="demo_dir_en_vi">EN → VI</string>
+    <string name="demo_dir_rejected">REJECTED</string>
+    <string name="demo_path_npu">NPU</string>
+    <string name="demo_path_cpu">CPU FALLBACK</string>
+    <string name="demo_path_none">—</string>
+    <string name="demo_action_export">Export</string>
+    <string name="demo_action_new_session">New</string>
+    <string name="demo_export_done">Saved %1$s</string>
+    <string name="demo_export_empty">No session log yet: translate at least one turn.</string>
+    <string name="demo_export_failed">Export failed: %1$s</string>
+
+    <!-- Connected audio endpoint settings -->
+    <string name="settings_title">Headset settings</string>
+    <string name="settings_headset_intro">Save a preferred listening language for connected audio endpoints. These assignments are reserved for future privileged Auracast provisioning; live source direction currently comes from dual-ASR confidence, not headset identity.</string>
+    <string name="auracast_configuration_title">Auracast system route</string>
+    <string name="auracast_configuration_only">Create and join the broadcast in Android Bluetooth settings. OneVoice plays completed target-language audio to the current system media route. A normal APK cannot create broadcasts, provision receivers, or enumerate passive listeners itself.</string>
+    <string name="auracast_capability_permission_required">Allow Nearby devices to check this phone’s LE Audio broadcast capability.</string>
+    <string name="auracast_capability_source_and_assistant">This phone reports Auracast Broadcast Source and Assistant support.</string>
+    <string name="auracast_capability_source">This phone reports Auracast Broadcast Source support.</string>
+    <string name="auracast_capability_unavailable">Auracast Broadcast Source support was not reported.</string>
+    <string name="headset_loading">Reading connected Bluetooth audio devices…</string>
+    <string name="headset_permission_required">Nearby devices permission is required to identify connected Bluetooth audio devices.</string>
+    <string name="headset_bluetooth_off">Bluetooth is off. Enable it in Android settings, then refresh this list.</string>
+    <string name="headset_none_connected">No connected Bluetooth audio devices are currently exposed to OneVoice Link.</string>
+    <string name="headset_bluetooth_unsupported">Bluetooth audio is not supported on this device.</string>
+    <string name="headset_inventory_error">Could not read connected Bluetooth audio devices: %1$s</string>
+    <string name="headset_connected_count">Connected audio devices: %1$d</string>
+    <string name="headset_unknown_name">Bluetooth audio device</string>
+    <string name="headset_preferred_receive_language">Preferred listening language (future routing)</string>
+    <string name="headset_language_unassigned">Not assigned</string>
+    <string name="headset_language_vi">Vietnamese (VI)</string>
+    <string name="headset_language_en">English (EN)</string>
+    <string name="headset_assignment_session_only">Android did not expose a stable Bluetooth identity. This assignment lasts only for the current app session.</string>
+    <string name="headset_transport_bluetooth_call">Bluetooth call audio</string>
+    <string name="headset_transport_bluetooth_media">Bluetooth media audio</string>
+    <string name="headset_transport_le_audio">LE Audio</string>
+    <string name="headset_transport_hearing_aid">Bluetooth hearing aid</string>
+    <string name="action_grant_nearby_devices">Allow nearby devices</string>
+    <string name="action_refresh_headsets">Refresh devices</string>
+    <string name="action_open_bluetooth_settings">Open Bluetooth settings</string>
+
+    <!-- Accessibility -->
+    <string name="a11y_engine_status">Engine status: %1$s</string>
+    <string name="a11y_busy">Working</string>
+    <string name="a11y_grant_mic">Grant microphone permission</string>
+    <string name="a11y_replay">Replay the last spoken translation</string>
+    <string name="a11y_stage_row">Stage %1$s, %2$s</string>
+    <string name="a11y_open_navigation_menu">Open navigation menu</string>
+    <string name="a11y_back_to_dashboard">Back to translation</string>
 </resources>

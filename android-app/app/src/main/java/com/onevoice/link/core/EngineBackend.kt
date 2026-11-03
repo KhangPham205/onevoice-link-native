@@ -1,0 +1,61 @@
+package com.onevoice.link.core
+
+/**
+ * Common lifecycle for an offline speech-to-speech engine.
+ *
+ * Production uses one automatic dual-ASR Hybrid engine. The CPU implementation is
+ * retained as a failover/reference implementation but is not user-selectable.
+ */
+interface EngineBackend {
+    val displayName: String
+    val lastError: String?
+
+    /** True only when start() can produce translated speech. */
+    val supportsLiveTranslation: Boolean get() = true
+
+    fun initialize(): Boolean
+    fun start(): Boolean
+    fun stop()
+    fun destroy()
+
+    fun setDirection(direction: TranslationDirection) {}
+    fun replayLastAudio(): Boolean = false
+    fun setPipelineListener(listener: PipelineListener?) {}
+
+    interface PipelineListener {
+        /** Called from a worker thread after ASR and again after MT. */
+        fun onSegment(segment: PipelineSegment)
+
+        /** Called only after a replayable waveform has been published. */
+        fun onAudioReady() {}
+
+        /** Reports an asynchronous pipeline failure while the engine is running. */
+        fun onPipelineError(message: String) {}
+
+        /** Reports a fatal asynchronous failure after the engine has stopped itself. */
+        fun onPipelineStopped(message: String) {}
+
+        /** Called once per bounded live turn, accepted or rejected, after it ends. */
+        fun onTurnReport(report: TurnReport) {}
+
+        /** Called on every half-duplex state edge of a live session. */
+        fun onLivePhase(phase: LivePhase) {}
+    }
+}
+
+/** Which compute path produced a segment; it is diagnostic, never a UI mode. */
+enum class ExecutionPath {
+    HYBRID_NPU,
+    CPU_FALLBACK,
+}
+
+/**
+ * Atomic per-utterance result. Direction is committed by the router together
+ * with the transcript so a later turn cannot relabel an earlier result.
+ */
+data class PipelineSegment(
+    val transcript: String,
+    val translation: String?,
+    val direction: TranslationDirection,
+    val executionPath: ExecutionPath,
+)

@@ -6,11 +6,9 @@ plugins {
 // ============================================================================
 // Task 2 — Qualcomm QNN runtime library staging
 // ----------------------------------------------------------------------------
-// CMake *links* libonevoice_core.so against QnnSystem / QnnHtp / QnnHtpPrepare,
-// but linking is not packaging: those prebuilt .so files are NOT emitted into
-// the APK by the externalNativeBuild. Their sonames are recorded as ELF NEEDED
-// entries in libonevoice_core.so, so if they are absent from nativeLibraryDir
-// the very first System.loadLibrary("onevoice_core") throws UnsatisfiedLinkError.
+// The native wrapper dlopen()s QNN after ADSP_LIBRARY_PATH is configured. CMake
+// deliberately does not link these .so files (that would create eager NEEDED
+// entries), but dlopen dependencies still have to be packaged in the APK.
 //
 // We stage the exact subset the core depends on into a build-managed folder and
 // register it as an extra jniLibs source dir. Advantages over committing the
@@ -22,6 +20,79 @@ val qnnAndroidLibDir =
 // Resolved eagerly to a File: AGP 9's jniLibs.srcDir rejects lazy Providers
 // (it can't tell generated vs. static). The <abi> subdir lives beneath this root.
 val qnnStagingRoot = layout.buildDirectory.dir("qnnJniLibs").get().asFile
+val qnnSignedDspAssetsRoot = layout.buildDirectory.dir("qnnSignedDspAssets").get().asFile
+val qnnSignedSkelSource = providers.gradleProperty("qnnSignedSkel")
+    .orNull
+    ?.let(::file)
+val qnnPdMode = providers.gradleProperty("qnnPdMode").orElse("auto").get().also {
+    require(it in setOf("auto", "signed", "unsigned")) {
+        "qnnPdMode must be auto, signed, or unsigned (got '$it')"
+    }
+}
+val routingMode = providers.gradleProperty("routingMode").get().also {
+    require(it in setOf("DUAL_ASR", "LID")) {
+        "routingMode must be DUAL_ASR or LID (got '$it')"
+    }
+}
+val dualAsrMarginThreshold = providers.gradleProperty("dualAsrMarginThreshold")
+    .get()
+    .toDoubleOrNull()
+    ?.takeIf(Double::isFinite)
+    ?: error("dualAsrMarginThreshold must be a finite number")
+val dualAsrFloorThreshold = providers.gradleProperty("dualAsrFloorThreshold")
+    .get()
+    .toDoubleOrNull()
+    ?.takeIf(Double::isFinite)
+    ?: error("dualAsrFloorThreshold must be a finite number")
+val dualAsrPriorWeight = providers.gradleProperty("dualAsrPriorWeight")
+    .get()
+    .toDoubleOrNull()
+    ?.takeIf { it.isFinite() && it >= 0.0 }
+    ?: error("dualAsrPriorWeight must be a finite number >= 0")
+val vadMode = providers.gradleProperty("vadMode").orElse("SILERO").get().also {
+    require(it in setOf("SILERO", "ENERGY")) { "vadMode must be SILERO or ENERGY (got '$it')" }
+}
+val dualAsrEnOffset = providers.gradleProperty("dualAsrEnOffset").orElse("0.0").get()
+    .toDoubleOrNull()
+    ?.takeIf(Double::isFinite)
+    ?: error("dualAsrEnOffset must be a finite number")
+// ORT intra-op threads for each whole-utterance Kokoro session. SM8550 has one
+// X3 + four A715/A710 performance cores; the value is an A/B knob, not a
+// hidden decoder constant.
+val kokoroThreads = providers.gradleProperty("kokoroThreads").orElse("2").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..8 }
+    ?: error("kokoroThreads must be an integer in 1..8")
+// Vietnamese target speech (en-vi): KOKORO (espeak-ng vi + aliased tokens) or
+// SUPERTONIC (Supertonic-3 int8, grapheme input). Both are staged on device, so
+// switching is an APK rebuild only.
+val viTtsEngine = providers.gradleProperty("viTtsEngine").orElse("KOKORO").get().also {
+    require(it in setOf("KOKORO", "SUPERTONIC")) {
+        "viTtsEngine must be KOKORO or SUPERTONIC (got '$it')"
+    }
+}
+val supertonicVoice = providers.gradleProperty("supertonicVoice").orElse("F1").get().also {
+    require(Regex("[FM][1-5]").matches(it)) {
+        "supertonicVoice must be F1..F5 or M1..M5 (got '$it')"
+    }
+}
+val supertonicSteps = providers.gradleProperty("supertonicSteps").orElse("5").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..32 }
+    ?: error("supertonicSteps must be an integer in 1..32")
+// Divides the duration predictor's estimate. On Vietnamese it over-allocates
+// time, and Supertonic fills the slack with repeated words.
+val supertonicSpeed = providers.gradleProperty("supertonicSpeed").orElse("1.05").get()
+    .toFloatOrNull()
+    ?.takeIf { it in 0.5f..2.0f }
+    ?: error("supertonicSpeed must be a number in 0.5..2.0")
+val supertonicThreads = providers.gradleProperty("supertonicThreads").orElse("4").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..8 }
+    ?: error("supertonicThreads must be an integer in 1..8")
+require(dualAsrMarginThreshold >= 0.0) {
+    "dualAsrMarginThreshold must be >= 0 (got $dualAsrMarginThreshold)"
+}
 
 val copyQnnRuntimeLibs = tasks.register<Sync>("copyQnnRuntimeLibs") {
     description = "Stage the QNN runtime .so files that libonevoice_core.so " +
@@ -51,6 +122,35 @@ val copyQnnRuntimeLibs = tasks.register<Sync>("copyQnnRuntimeLibs") {
     }
 }
 
+// Optional licensed artifact injection:
+//   ./gradlew :app:assembleDebug \
+//     -PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
+//
+// The DSP6 binary must be an asset, not an arm64 jniLib. It is extracted to a
+// real file at runtime and selected together with signed-PD device config. When
+// the property is absent this Sync task empties its output, preventing a stale
+// signed binary from leaking into a later build.
+val prepareQnnSignedDspAssets = tasks.register<Sync>("prepareQnnSignedDspAssets") {
+    description = "Stage an externally supplied production/test-signed Hexagon v73 skeleton."
+    group = "build"
+
+    if (qnnSignedSkelSource != null) {
+        from(qnnSignedSkelSource) {
+            rename { "libQnnHtpV73Skel.so" }
+        }
+    }
+    into(File(qnnSignedDspAssetsRoot, "dsp/signed"))
+
+    val signedSkel = qnnSignedSkelSource
+    doFirst {
+        if (signedSkel != null) {
+            require(signedSkel.isFile) {
+                "qnnSignedSkel does not name a file: $signedSkel"
+            }
+        }
+    }
+}
+
 android {
     namespace = "com.onevoice.link"
     compileSdk {
@@ -59,12 +159,48 @@ android {
         }
     }
 
+    // Pinned so every machine builds the core with the same toolchain; AGP's
+    // implicit default drifts between plugin versions.
+    ndkVersion = "27.2.12479018"
+
     defaultConfig {
         applicationId = "com.onevoice.link"
         minSdk = 28
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+
+        // `auto` uses the matching unsigned QAIRT skeleton unless an explicitly
+        // supplied signed skeleton is staged. `signed` never falls back to an
+        // unsigned/OEM-mismatched image.
+        buildConfigField("String", "QNN_PD_MODE", "\"$qnnPdMode\"")
+        // Routing is a build-time experiment flag so A/B APKs are explicit and
+        // thresholds are recorded in BuildConfig instead of hidden in decoder code.
+        buildConfigField("String", "ROUTING_MODE", "\"$routingMode\"")
+        buildConfigField(
+            "double",
+            "DUAL_ASR_MARGIN_THRESHOLD",
+            dualAsrMarginThreshold.toString(),
+        )
+        buildConfigField(
+            "double",
+            "DUAL_ASR_FLOOR_THRESHOLD",
+            dualAsrFloorThreshold.toString(),
+        )
+
+        buildConfigField(
+            "double",
+            "DUAL_ASR_PRIOR_WEIGHT",
+            dualAsrPriorWeight.toString(),
+        )
+        buildConfigField("double", "DUAL_ASR_EN_OFFSET", dualAsrEnOffset.toString())
+        buildConfigField("int", "KOKORO_THREADS", kokoroThreads.toString())
+        buildConfigField("String", "VAD_MODE", "\"$vadMode\"")
+        buildConfigField("String", "VI_TTS_ENGINE", "\"$viTtsEngine\"")
+        buildConfigField("String", "SUPERTONIC_VOICE", "\"$supertonicVoice\"")
+        buildConfigField("int", "SUPERTONIC_STEPS", supertonicSteps.toString())
+        buildConfigField("int", "SUPERTONIC_THREADS", supertonicThreads.toString())
+        buildConfigField("float", "SUPERTONIC_SPEED", "${supertonicSpeed}f")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -74,13 +210,11 @@ android {
         }
 
         // Task 1 — inject the optimized C++ toolchain flags and shared STL.
-        // -flto is set at compile here; the matching link-time -flto lives in
-        // native-core/CMakeLists.txt (CMAKE_SHARED_LINKER_FLAGS) so LTO is
-        // end-to-end. ANDROID_STL=c++_shared is required because Oboe/QNN and
+        // ANDROID_STL=c++_shared is required because Oboe/QNN and
         // our core must agree on a single libc++ instance across .so boundaries.
         externalNativeBuild {
             cmake {
-                cppFlags("-std=c++20", "-O3", "-flto")
+                cppFlags("-std=c++20")
                 arguments("-DANDROID_STL=c++_shared")
             }
         }
@@ -100,7 +234,16 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(qnnStagingRoot)
+            assets.srcDir(qnnSignedDspAssetsRoot)
         }
+    }
+
+    androidResources {
+        // The Hexagon skel ships as an asset (ADSP_LIBRARY_PATH needs a real
+        // file on disk, and packaged jniLibs are never extracted here). Storing
+        // it uncompressed lets the app check its size via openFd and stream it
+        // out without inflating 11 MB.
+        noCompress += "so"
     }
 
     packaging {
@@ -109,11 +252,29 @@ android {
             // dynamic loader can mmap the libs directly on 16 KB-page devices
             // (Android 15+), matching how the core .so is aligned in CMake.
             useLegacyPackaging = false
+            // sherpa-onnx is the complete offline fallback for ASR/TTS while
+            // MarianMT uses the official ORT Android artifact. The static-link
+            // sherpa AAR only overlaps ORT on unused 32-bit ABIs.
+            pickFirsts.add("lib/**/libonnxruntime.so")
         }
     }
 
     buildTypes {
+        debug {
+            externalNativeBuild {
+                cmake {
+                    // Fast compilation for debug builds
+                    cppFlags("-O0", "-g")
+                }
+            }
+        }
         release {
+            externalNativeBuild {
+                cmake {
+                    // Heavy optimization for production
+                    cppFlags("-O3", "-flto")
+                }
+            }
             optimization {
                 enable = false
             }
@@ -125,6 +286,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -132,13 +294,18 @@ android {
 // wire the staging task explicitly ahead of the jniLibs source merge (which
 // consumes the srcDir) and preBuild (so it also runs on a bare `assemble`).
 tasks.withType<com.android.build.gradle.tasks.MergeSourceSetFolders>().configureEach {
-    dependsOn(copyQnnRuntimeLibs)
+    dependsOn(copyQnnRuntimeLibs, prepareQnnSignedDspAssets)
 }
 tasks.named("preBuild") {
-    dependsOn(copyQnnRuntimeLibs)
+    dependsOn(copyQnnRuntimeLibs, prepareQnnSignedDspAssets)
 }
 
 dependencies {
+    implementation(files("libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar"))
+    implementation(libs.onnxruntime.android)
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.select.tf.ops)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

@@ -2,21 +2,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Low-latency full-duplex capture for the S2ST pipeline. -->
+    <!-- Microphone capture for the utterance-based S2ST pipeline. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Read-only: lets the demo screen prove no network is active. The app
+         deliberately declares no INTERNET permission; all inference is local. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="true" />
 
-    <!-- P2P off-grid networking over Bluetooth / BLE. -->
-    <!-- Android 12+ (API 31) split the old BLUETOOTH permission into runtime grants. -->
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="s" />
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_ADVERTISE"
-        tools:targetApi="s" />
+    <!-- Connected headset identity and public LE Audio capability probes. A
+         normal BLE advertiser is not an Auracast transport, so this app does
+         not request SCAN or ADVERTISE. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="s" />
@@ -29,15 +29,30 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
+    <!-- pageSizeCompat: the x86_64 EMULATOR libs (sherpa-onnx/ONNX Runtime
+         prebuilts) are not 16 KB ELF-aligned upstream; this opts that ABI into
+         Android 16's page-size compatibility mode without the warning dialog.
+         The arm64-v8a device libs (incl. our core) ARE 16 KB aligned. -->
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:pageSizeCompat="enabled"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.OneVoiceLink">
+        <!--
+            QNN's V73 FastRPC stub has DT_NEEDED libcdsprpc.so. Since this app
+            targets API 31+, Android does not expose vendor non-NDK libraries
+            to its linker namespace unless they are requested explicitly.
+            Samsung lists libcdsprpc.so as a public vendor library on SM8550.
+        -->
+        <uses-native-library
+            android:name="libcdsprpc.so"
+            android:required="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -50,6 +65,29 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Benchmark control surface, driven by `adb shell am broadcast`.
+
+            It has to be exported: on this Android build a shell broadcast to a
+            non-exported receiver is dropped before it is even enqueued, even
+            when -n names the component (verified on the target — the
+            ActivityManager "Broadcasting" line never appears).
+
+            A signature-level android:permission was tried first and silently
+            swallowed the broadcast on this build, so the guard is instead:
+            every action is inert unless <filesDir>/bench exists, and that
+            directory can only be created through run-as, which requires a
+            debuggable build. A release build therefore carries the class but
+            can never be made to act on it.
+        -->
+        <receiver
+            android:name=".core.BenchControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.onevoice.link.BENCH" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>
