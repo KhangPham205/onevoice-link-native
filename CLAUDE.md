@@ -74,7 +74,9 @@ Gradle properties that change runtime behavior:
 -PdualAsrPriorWeight=0.15              # soft turn prior, nats/token (>= margin = hard prior)
 -PkokoroThreads=4                      # ORT threads per Kokoro session (2/4/5 measured)
 -PvadMode=SILERO                       # SILERO (bundled asset) or legacy ENERGY RMS gate
--PviTtsEngine=KOKORO                   # Vietnamese speech: KOKORO or SUPERTONIC (Supertonic-3 int8)
+-PviTtsEngine=KOKORO                   # Vietnamese speech: KOKORO, SUPERTONIC (Supertonic-3 int8) or VIENEU
+                                       # (VieNeu-TTS v3 Nano; needs build-sea-g2p-android.sh + push-vieneu.sh)
+-PvieneuVoice=minh_quan -PvieneuSteps=16 -PvieneuCfg=3.0 -PvieneuSeed=1234
 -PsupertonicVoice=F1 -PsupertonicSteps=5 -PsupertonicSpeed=1.15 -PsupertonicThreads=4
 -PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
 -PqnnPdMode=auto                        # auto (default), signed or unsigned

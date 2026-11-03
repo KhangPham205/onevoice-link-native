@@ -118,6 +118,12 @@ target_link_libraries(onevoice_core PRIVATE
     ${OBOE_LIB}
 )
 
+# --- sea-g2p JNI shim (VieNeu-TTS phonemizer) -------------------------------
+# A separate library so it never relinks the core. It dlopen()s the optional
+# libsea_g2p_rs.so at runtime, so this builds without the Rust artifact.
+add_library(sea_g2p_jni SHARED src/sea_g2p_jni.cpp)
+target_link_libraries(sea_g2p_jni PRIVATE ${log-lib} dl)
+
 # Strip local symbols from release binaries to shrink the APK payload.
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_custom_command(TARGET onevoice_core POST_BUILD

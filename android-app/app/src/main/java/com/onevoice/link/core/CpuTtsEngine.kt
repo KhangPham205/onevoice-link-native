@@ -17,13 +17,22 @@ internal enum class CpuTtsEngine {
      * Vietnamese tones and initials reach the model as written. 44.1 kHz out.
      */
     SUPERTONIC,
+
+    /**
+     * VieNeu-TTS v3 Nano: flow matching over sea-g2p phonemes, trained on
+     * Vietnamese speech, 24 kHz. Vietnamese target only ([VieNeuNanoTts]).
+     */
+    VIENEU,
     ;
+
+    /** Kokoro alone needs tts_tokens.txt, tts_voices.bin, tts_cpu.onnx and eSpeak data. */
+    val usesKokoroAssets: Boolean get() = this == KOKORO
 
     companion object {
         fun parse(value: String): CpuTtsEngine =
             entries.firstOrNull { it.name == value }
                 ?: throw IllegalArgumentException(
-                    "viTtsEngine must be KOKORO or SUPERTONIC (got '$value')",
+                    "viTtsEngine must be KOKORO, SUPERTONIC or VIENEU (got '$value')",
                 )
     }
 }

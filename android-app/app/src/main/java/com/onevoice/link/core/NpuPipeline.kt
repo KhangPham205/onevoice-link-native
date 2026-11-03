@@ -38,6 +38,8 @@ internal class NpuPipeline private constructor(
     /** Which model [cpuTts] holds; Supertonic also needs [cpuTtsGeneration]. */
     private val cpuTtsEngine: CpuTtsEngine,
     private val cpuTtsGeneration: GenerationConfig?,
+    /** Set instead of [cpuTts] when [cpuTtsEngine] is VIENEU (not a sherpa model). */
+    private val vieneuTts: VieNeuNanoTts? = null,
 ) : Closeable {
     companion object {
         private const val PARAKEET_FEATURE_BYTES = 1 * 1001 * 80 * Float.SIZE_BYTES
@@ -114,12 +116,15 @@ internal class NpuPipeline private constructor(
                 "Only CPU TTS can use ${cpuTtsEngine.name}"
             }
             val supertonic = cpuTtsEngine == CpuTtsEngine.SUPERTONIC
+            val vieneu = cpuTtsEngine == CpuTtsEngine.VIENEU
+            require(!vieneu || stagePrefix == "en-vi") { "VieNeu speaks Vietnamese only" }
+            val kokoro = cpuTtsEngine.usesKokoroAssets
             val requiredNames = buildList {
                 addAll(listOf("mt_source.spm", "mt_vocab.json", "mt_config.json"))
-                if (supertonic) {
-                    SupertonicFiles.ALL.forEach { add("${SupertonicFiles.DIR}/$it") }
-                } else {
-                    addAll(listOf("tts_tokens.txt", "tts_voices.bin"))
+                when {
+                    supertonic -> SupertonicFiles.ALL.forEach { add("${SupertonicFiles.DIR}/$it") }
+                    vieneu -> VieNeuFiles.ALL.forEach { add("${VieNeuFiles.DIR}/$it") }
+                    else -> addAll(listOf("tts_tokens.txt", "tts_voices.bin"))
                 }
                 when (asrMode) {
                     NpuAsrMode.PARAKEET_CTC -> add("asr_tokens.txt")
@@ -135,14 +140,15 @@ internal class NpuPipeline private constructor(
                 if (!useCpuTts) add("tts_frontend.onnx")
             }
             val required = requiredNames.map { File(directionRoot, it) }.toMutableList()
-            if (useCpuTts && !supertonic) {
+            if (useCpuTts && kokoro) {
                 required += cpuTtsModel ?: File(directionRoot, "tts_cpu.onnx")
             }
             val missing = required.filterNot(File::isFile)
             val espeakData = File(directionRoot, "espeak-ng-data")
             val targetDictionary = if (stagePrefix == "vi-en") "en_dict" else "vi_dict"
-            // Supertonic reads graphemes; only Kokoro needs the eSpeak frontend.
-            val espeakMissing = if (supertonic) {
+            // Supertonic reads graphemes and VieNeu has sea-g2p; only Kokoro
+            // needs the eSpeak frontend.
+            val espeakMissing = if (!kokoro) {
                 emptyList()
             } else {
                 listOf("phontab", "phondata", "phonindex", targetDictionary)
@@ -191,7 +197,7 @@ internal class NpuPipeline private constructor(
             } else {
                 null to null
             }
-            val ttsTokens = if (supertonic) {
+            val ttsTokens = if (!kokoro) {
                 emptyMap()
             } else {
                 parseIndexedTokens(File(directionRoot, "tts_tokens.txt"))
@@ -217,6 +223,7 @@ internal class NpuPipeline private constructor(
             var ttsFrontend: OfflineTts? = null
             var cpuTts: OfflineTts? = null
             var cpuTtsGeneration: GenerationConfig? = null
+            var vieneuTts: VieNeuNanoTts? = null
             try {
                 if (asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT) {
                     rnntDecoder = ZipformerFamilyRnntDecoder.load(
@@ -250,6 +257,23 @@ internal class NpuPipeline private constructor(
                             "threads=${BuildConfig.SUPERTONIC_THREADS} " +
                             "sampleRate=${synthesizer.sampleRate()} styles=${synthesizer.numSpeakers()}",
                     )
+                } else if (vieneu) {
+                    vieneuTts = VieNeuNanoTts.load(
+                        directionRoot = directionRoot,
+                        voice = BuildConfig.VIENEU_VOICE,
+                        steps = BuildConfig.VIENEU_STEPS,
+                        cfg = BuildConfig.VIENEU_CFG,
+                        speed = BuildConfig.VIENEU_SPEED,
+                        threads = BuildConfig.VIENEU_THREADS,
+                        seed = BuildConfig.VIENEU_SEED,
+                    )
+                    Log.i(
+                        TAG,
+                        "VieNeu v3 Nano TTS loaded direction=$stagePrefix " +
+                            "voice=${BuildConfig.VIENEU_VOICE} steps=${BuildConfig.VIENEU_STEPS} " +
+                            "cfg=${BuildConfig.VIENEU_CFG} speed=${BuildConfig.VIENEU_SPEED} " +
+                            "threads=${BuildConfig.VIENEU_THREADS} seed=${BuildConfig.VIENEU_SEED}",
+                    )
                 } else if (useCpuTts) {
                     cpuTts = OfflineTts(
                         config = kokoroConfig(requireNotNull(cpuTtsModel).absolutePath),
@@ -277,8 +301,10 @@ internal class NpuPipeline private constructor(
                     cpuTts = cpuTts,
                     cpuTtsEngine = cpuTtsEngine,
                     cpuTtsGeneration = cpuTtsGeneration,
+                    vieneuTts = vieneuTts,
                 )
             } catch (failure: Throwable) {
+                runCatching { vieneuTts?.close() }
                 runCatching { cpuTts?.release() }
                 runCatching { ttsFrontend?.release() }
                 runCatching { voices?.close() }
@@ -538,6 +564,30 @@ internal class NpuPipeline private constructor(
 
     /** Whole-utterance target speech at [PLAYBACK_SAMPLE_RATE], mono. */
     fun synthesize(text: String): FloatArray {
+        vieneuTts?.let { synthesizer ->
+            val startedNs = System.nanoTime()
+            val generated = synthesizer.synthesize(text)
+            val inferenceMs = (System.nanoTime() - startedNs) / 1_000_000L
+            require(generated.all(Float::isFinite)) { "VieNeu returned non-finite waveform samples" }
+            val resampled = if (synthesizer.sampleRate == PLAYBACK_SAMPLE_RATE) {
+                generated
+            } else {
+                resamplePcm(generated, synthesizer.sampleRate, PLAYBACK_SAMPLE_RATE)
+            }
+            // Same edge trim as Supertonic: lead silence is pure time-to-first-audio.
+            val samples = trimSilence(resampled, PLAYBACK_SAMPLE_RATE)
+            val peak = limitPeak(samples)
+            Log.i(
+                TAG,
+                "CPU whole-utterance TTS engine=vieneu textChars=${text.length} " +
+                    "audioSamples=${samples.size} " +
+                    "durationMs=${samples.size * 1_000L / PLAYBACK_SAMPLE_RATE} " +
+                    "untrimmedMs=${resampled.size * 1_000L / PLAYBACK_SAMPLE_RATE} " +
+                    "rawPeak=${"%.3f".format(peak)} inferenceMs=$inferenceMs " +
+                    "totalMs=${(System.nanoTime() - startedNs) / 1_000_000L}",
+            )
+            return samples
+        }
         cpuTts?.let { synthesizer ->
             val startedNs = System.nanoTime()
             val generated = cpuTtsGeneration
@@ -772,6 +822,7 @@ internal class NpuPipeline private constructor(
     }
 
     override fun close() {
+        vieneuTts?.close()
         cpuTts?.release()
         ttsFrontend?.release()
         voices?.close()
