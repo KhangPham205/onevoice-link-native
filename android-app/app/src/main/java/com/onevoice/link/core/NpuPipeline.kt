@@ -533,10 +533,18 @@ internal class NpuPipeline private constructor(
         }
     }
 
-    fun translate(text: String): String = translator.translate(text)
+    /** One Marian pass per sentence; see [splitSentences] for why. */
+    fun translate(text: String): String {
+        var tokens = 0
+        return translateBySentence(text) { sentence ->
+            translator.translate(sentence).also { tokens += translator.lastOutputTokens }
+        }.also { lastMtOutputTokens = tokens }
+    }
 
-    /** Tokens the Marian decoder emitted for the last [translate]. */
-    val lastMtOutputTokens: Int get() = translator.lastOutputTokens
+    /** Tokens the Marian decoder emitted for the last [translate], summed over sentences. */
+    @Volatile
+    var lastMtOutputTokens: Int = 0
+        private set
 
     /**
      * Scale a waveform in place so nothing leaves [-1, 1], returning the peak

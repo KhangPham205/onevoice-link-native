@@ -77,7 +77,8 @@ internal class CpuFallbackBranch private constructor(
         }
     }
 
-    fun translate(text: String): String = translator.translate(text).trim()
+    /** Sentence by sentence, matching the HTP path so recovery output is comparable. */
+    fun translate(text: String): String = translateBySentence(text, translator::translate)
 
     override fun close() {
         translator.close()
