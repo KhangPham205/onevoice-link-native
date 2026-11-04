@@ -42,6 +42,17 @@ class TranscriptAssemblerTest {
     }
 
     @Test
+    fun leftContextAfterAPauseCutIsReadButNotCommittedTwice() {
+        val assembler = TranscriptAssembler(tolerance)
+        assembler.accept(chunk(0, 0, 8_000, ChunkCut.PAUSE, null), listOf(w("not", 7_000), w("obvious", 7_300)))
+        // Next window re-reads 960 ms before the cut; its core starts at 8000.
+        val context = AudioChunk(1, LongTurnConfig.ms(7_040), LongTurnConfig.ms(9_000),
+            LongTurnConfig.ms(8_000), LongTurnConfig.ms(9_000), ChunkCut.TURN_END, ChunkCut.PAUSE)
+        assembler.accept(context, listOf(w("obvious", 7_300), w("or", 8_100), w("known", 8_400)))
+        assertEquals("not obvious or known", assembler.text())
+    }
+
+    @Test
     fun overlappingWindowsKeepEachWordOnceByCore() {
         // Window 0 [0,10000) core ends at 9520; window 1 starts at 9040.
         val assembler = TranscriptAssembler(tolerance)

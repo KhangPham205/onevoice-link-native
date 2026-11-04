@@ -66,8 +66,10 @@ internal class TranscriptAssembler(private val toleranceSamples: Int) {
 
     /** Accept one window's words; returns the words this call committed, in order. */
     fun accept(chunk: AudioChunk, words: List<AsrWord>): List<AsrWord> {
-        val overlapBefore = chunk.previousCut == ChunkCut.FORCED
-        val overlapAfter = chunk.cut == ChunkCut.FORCED
+        // Left context (after either cut kind) and a forced cut's shared tail
+        // are both outside the core; only a forced cut leaves a pending tail.
+        val overlapBefore = chunk.coreStart > chunk.start
+        val overlapAfter = chunk.coreEnd < chunk.end
         val head = if (overlapBefore) words.filter { it.startSample < chunk.coreStart } else emptyList()
         var kept = words.filter { word ->
             (!overlapBefore || word.startSample >= chunk.coreStart) &&
@@ -76,7 +78,7 @@ internal class TranscriptAssembler(private val toleranceSamples: Int) {
         val tail = if (overlapAfter) words.filter { it.startSample >= chunk.coreEnd } else emptyList()
 
         val fresh = ArrayList<AsrWord>(kept.size + 1)
-        if (overlapBefore) {
+        if (overlapBefore && chunk.previousCut == ChunkCut.FORCED) {
             val previousLast = committed.lastOrNull()
             val keptFirst = kept.firstOrNull()
             if (previousLast != null && keptFirst != null && sameWord(previousLast, keptFirst)) {

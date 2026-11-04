@@ -147,7 +147,10 @@ internal class ReplayAccumulator(private val capBytes: Long) {
             return
         }
         if (size + count > samples.size) {
-            samples = samples.copyOf(maxOf(size + count, samples.size * 2))
+            // Grow geometrically but never past the cap, so the transient
+            // copy stays within the PCM budget.
+            val capSamples = (capBytes / Float.SIZE_BYTES).toInt()
+            samples = samples.copyOf(minOf(capSamples, maxOf(size + count, samples.size * 2)))
         }
         fill(size)
         size += count

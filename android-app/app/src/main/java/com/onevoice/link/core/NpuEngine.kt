@@ -1267,10 +1267,13 @@ class NpuEngine(
             } catch (interrupted: InterruptedException) {
                 throw interrupted
             } catch (failure: Throwable) {
-                Log.e(TAG, "Long turn $turnId playback failed", failure)
                 val message = "Playback failed: ${failure.message ?: failure.javaClass.simpleName}"
                 if (turn.error == null) turn.error = message
-                notifyPipelineError(message)
+                // stop() stops the track under the writer; that is a cancel, not a fault.
+                if (running.get()) {
+                    Log.e(TAG, "Long turn $turnId playback failed", failure)
+                    notifyPipelineError(message)
+                }
                 null
             }
         }
@@ -2177,13 +2180,16 @@ class NpuEngine(
         val ttsMs = units.sumOf { it.ttsMs }
         val outputAudioMs = units.sumOf { it.audioMs }
         val error = turn.error
+        // Accepted speech, as LEGACY reports it: up to the last owned core,
+        // without the end-of-turn silence that is still in the archive.
+        val acceptedMs = (chunks.maxOfOrNull { it.chunk.coreEnd } ?: ended.lastSpeechSample) * 1_000L / SAMPLE_RATE
 
         val row = JSONObject().apply {
             put("schema", 2)
             put("timestamp", System.currentTimeMillis())
             put("turnId", turn.turnId)
             put("inputMode", provider.inputMode)
-            put("audioMs", ended.archivedSamples * 1_000L / SAMPLE_RATE)
+            put("audioMs", acceptedMs)
             put("audioRoute", capture.route.name.lowercase(Locale.ROOT))
             put("routingMode", routing?.mode?.name ?: routingConfig.mode.name)
             put("marginThreshold", routingConfig.marginThreshold)
@@ -2236,7 +2242,7 @@ class NpuEngine(
                 put("emptyUnits", turn.emptyUnits)
                 put("revision", turn.revision)
                 put("partialFailure", turn.partialFailure)
-                put("acceptedSamples", ended.archivedSamples)
+                put("archivedSamples", ended.archivedSamples)
                 put("lastSpeechSample", ended.lastSpeechSample)
                 put("droppedAtCap", ended.droppedAtCap)
                 put("speechEndToFirstContentMs",
@@ -2295,7 +2301,7 @@ class NpuEngine(
         val report = TurnReport(
             turnId = turn.turnId,
             timestampMs = System.currentTimeMillis(),
-            audioMs = ended.archivedSamples * 1_000L / SAMPLE_RATE,
+            audioMs = acceptedMs,
             route = capture.route.name.lowercase(Locale.ROOT),
             direction = turn.direction,
             reason = routing?.reason?.logValue ?: "pipeline_error",

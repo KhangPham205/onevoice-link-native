@@ -65,4 +65,21 @@ class PreparedAudioQueueTest {
         assertEquals(AudioTake.Cancelled, cancelled.take(10))
         assertFalse(cancelled.put(audio(0, 10)))
     }
+
+    @Test
+    fun replayCopyKeepsWhatPlayedOrNothingWhenOverTheCap() {
+        val replay = ReplayAccumulator(capBytes = 400)
+        replay.append(FloatArray(40) { 0.5f })
+        replay.appendSilence(20)
+        replay.append(FloatArray(30) { -0.5f })
+        val played = checkNotNull(replay.result())
+        assertEquals(90, played.size)
+        assertEquals(0f, played[45], 0f)
+        assertEquals(-0.5f, played[89], 0f)
+
+        val over = ReplayAccumulator(capBytes = 400)
+        over.append(FloatArray(80))
+        over.append(FloatArray(80))
+        assertEquals("never a silently shortened copy", null, over.result())
+    }
 }

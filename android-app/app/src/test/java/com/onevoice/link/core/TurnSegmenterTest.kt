@@ -78,7 +78,14 @@ class TurnSegmenterTest {
             assertEquals("cores are contiguous", previous.coreEnd, next.coreStart)
             assertEquals(previous.cut, next.previousCut)
             when (previous.cut) {
-                ChunkCut.PAUSE -> assertEquals("no overlap after a pause cut", previous.end, next.start)
+                ChunkCut.PAUSE -> {
+                    assertEquals("core starts at the pause cut", previous.end, next.coreStart)
+                    assertEquals(
+                        "only fixed left context before it",
+                        maxOf(0, previous.end - config.pauseContextSamples),
+                        next.start,
+                    )
+                }
                 ChunkCut.FORCED -> {
                     assertEquals(previous.end - config.overlapSamples, next.start)
                     assertEquals(

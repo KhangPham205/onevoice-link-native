@@ -54,6 +54,13 @@ internal data class LongTurnConfig(
     val microPauseSamples: Int = ms(160),
     /** Audio shared by two windows when no reliable pause was found. */
     val overlapSamples: Int = ms(960),
+    /**
+     * Left context a window gets after a pause cut. The graph is a fixed 10 s
+     * either way, so it costs no compute; without it, a short final window
+     * ("...or known") was decoded cold and lost its word. Its words before
+     * the cut are dropped by the core rule, never committed twice.
+     */
+    val pauseContextSamples: Int = ms(960),
     /** Hard model contract: every ASR call, context included, holds at most this. */
     val maxWindowSamples: Int = NpuEngine.MAX_SEGMENT_SAMPLES,
     /** Trailing non-speech that ends the turn; kept at the legacy 1 s baseline. */
@@ -70,8 +77,8 @@ internal data class LongTurnConfig(
     val pcmBudgetBytes: Long = 32L * 1024 * 1024,
     /** Pause written between two synthesized units of one turn. */
     val unitPauseMs: Int = 150,
-    /** Replay copy of a long turn is kept only below this size. */
-    val replayMaxBytes: Long = 12L * 1024 * 1024,
+    /** Replay-button copy of a long turn (~87 s of 24 kHz mono); longer turns keep none. */
+    val replayMaxBytes: Long = 8L * 1024 * 1024,
 ) {
     init {
         require(overlapSamples % OVERLAP_GRID_SAMPLES == 0) {
@@ -85,10 +92,14 @@ internal data class LongTurnConfig(
             "ASR windows cannot exceed the ${NpuEngine.MAX_SEGMENT_SAMPLES}-sample model contract"
         }
         require(microPauseSamples > 0 && endSilenceSamples > microPauseSamples)
+        require(pauseContextSamples in 0 until softSplitSamples)
+        require(softSplitSamples + maxOf(pauseContextSamples, overlapSamples / 2) < maxWindowSamples) {
+            "the soft split plus left context must leave room before the window ceiling"
+        }
         require(maxTurnSamples >= maxWindowSamples)
         val archiveBytes = (maxTurnSamples + NpuEngine.PRE_ROLL_SAMPLES).toLong() * Short.SIZE_BYTES
         val windowBytes = 2L * maxWindowSamples * Float.SIZE_BYTES
-        require(archiveBytes + windowBytes + ttsQueueBudgetBytes <= pcmBudgetBytes) {
+        require(archiveBytes + windowBytes + ttsQueueBudgetBytes + replayMaxBytes <= pcmBudgetBytes) {
             "long-turn PCM buffers exceed the ${pcmBudgetBytes}-byte budget"
         }
     }
@@ -102,6 +113,7 @@ internal data class LongTurnConfig(
         put("softSplitMs", toMs(softSplitSamples))
         put("microPauseMs", toMs(microPauseSamples))
         put("overlapMs", toMs(overlapSamples))
+        put("pauseContextMs", toMs(pauseContextSamples))
         put("maxWindowMs", toMs(maxWindowSamples))
         put("endSilenceMs", toMs(endSilenceSamples))
         put("maxTurnMs", toMs(maxTurnSamples))

@@ -104,6 +104,13 @@ def ensure_pipeline(adb: Adb, init: bool) -> None:
     raise RuntimeError("pipeline did not become ready within 180 s")
 
 
+def total_pss_kb(adb: Adb) -> int | None:
+    """App PSS from dumpsys; DSP-private memory is not in it."""
+    output = adb.shell(f"dumpsys meminfo {PACKAGE}", check=False)
+    match = re.search(r"TOTAL PSS:\s+(\d+)", output) or re.search(r"^\s*TOTAL\s+(\d+)", output, re.M)
+    return int(match.group(1)) if match else None
+
+
 def wait_replay(adb: Adb, file_name: str, timeout_s: float) -> str | None:
     deadline = time.time() + timeout_s
     pattern = f"replay done file={file_name}"
@@ -128,6 +135,8 @@ def main() -> int:
     parser.add_argument("--ids", nargs="*", help="subset of fixture ids")
     parser.add_argument("--init", action="store_true", help='tap "Load Hybrid Pipeline" first')
     parser.add_argument("--settle", type=float, default=3.0, help="seconds between runs")
+    parser.add_argument("--run-id", default=time.strftime("%m%d%H%M"),
+                        help="prefix of every tag, so rows of earlier runs never mix in")
     args = parser.parse_args()
 
     manifest = json.loads((args.fixtures / "manifest.json").read_text())
@@ -153,9 +162,10 @@ def main() -> int:
 
     runs = []
     for number, (item, baseline, repeat) in enumerate(plan, 1):
-        tag = f"{item['id']}__{baseline}__r{repeat}"
+        tag = f"{args.run_id}_{item['id']}__{baseline}__r{repeat}"
         adb.run("logcat", "-c", check=False)
         thermal = adb.shell("dumpsys thermalservice | grep -m1 'Thermal Status'", check=False).strip()
+        pss_before = total_pss_kb(adb)
         started = time.time()
         adb.bench(cmd="replay", path=f"{DEVICE_DIR}/{item['file']}", mode=args.mode,
                   baseline=baseline, tag=tag)
@@ -170,7 +180,9 @@ def main() -> int:
         (out / "raw" / f"{tag}.log").write_text(log)
         runs.append({"tag": tag, "id": item["id"], "baseline": baseline, "repeat": repeat,
                      "mode": args.mode, "status": status, "wallS": round(wall, 1),
-                     "thermalBefore": thermal})
+                     "thermalBefore": thermal, "pssKbBefore": pss_before, "pssKbAfter": total_pss_kb(adb),
+                     "thermalAfter": adb.shell("dumpsys thermalservice | grep -m1 'Thermal Status'",
+                                               check=False).strip()})
         print(f"[{number}/{len(plan)}] {tag}: {status} in {wall:.0f} s")
         time.sleep(args.settle)
 

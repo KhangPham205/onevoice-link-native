@@ -34,8 +34,9 @@ internal enum class TurnEndReason(val logValue: String) {
  *
  * Ranges are half-open. `[start, end)` is what the model sees; `[coreStart,
  * coreEnd)` is the part this window owns. Cores of consecutive windows tile the
- * accepted turn without gaps: a pause cut has no overlap, and a forced cut
- * shares [LongTurnConfig.overlapSamples] split at its midpoint. Indices are Int
+ * accepted turn without gaps: after a pause cut the next window only reads
+ * [LongTurnConfig.pauseContextSamples] of left context it does not own, and
+ * a forced cut shares [LongTurnConfig.overlapSamples] split at its midpoint. Indices are Int
  * because a turn is capped ([LongTurnConfig.maxTurnSamples] <= 300 s).
  */
 internal data class AudioChunk(
@@ -252,19 +253,22 @@ internal class TurnSegmenter(
 
     private fun notePause() {
         val runLength = archive.size - pauseRunStart
-        // A forced cut may use a short gap only well inside the window, so the
-        // next window still advances by more than the overlap.
-        val earliest = chunkStart + config.softSplitSamples / 2
+        // A forced cut may use a short gap only well inside the owned audio,
+        // so the next window still advances by more than the overlap.
+        val earliest = coreStart + config.softSplitSamples / 2
         if (pauseRunStart >= maxOf(earliest, coreStart) && runLength > bestPauseLength) {
             bestPauseLength = runLength
             bestPauseMid = pauseRunStart + runLength / 2
         }
     }
 
-    /** After the soft minimum, the first pause of at least the micro-pause length cuts the window. */
+    /**
+     * After the soft minimum of owned audio (left context excluded), the first
+     * pause of at least the micro-pause length cuts the window.
+     */
     private fun pauseCutDue(): Boolean =
         pauseRunStart >= 0 && pauseRunStart >= coreStart &&
-            archive.size - chunkStart >= config.softSplitSamples &&
+            archive.size - coreStart >= config.softSplitSamples &&
             archive.size - pauseRunStart >= config.microPauseSamples
 
     private fun forcedCut(): SegmenterEvent.Chunk? {
@@ -303,15 +307,19 @@ internal class TurnSegmenter(
                 "samples=[${chunk.start},${chunk.end}) core=[${chunk.coreStart},${chunk.coreEnd})",
         )
         chunkIndex++
-        chunkStart = if (kind == ChunkCut.FORCED) cut - config.overlapSamples else cut
+        chunkStart = if (kind == ChunkCut.FORCED) {
+            cut - config.overlapSamples
+        } else {
+            (cut - config.pauseContextSamples).coerceAtLeast(0)
+        }
         coreStart = coreEnd
         previousCut = kind
         bestPauseLength = 0
         bestPauseMid = -1
-        if (pauseRunStart in 0 until chunkStart) {
+        if (pauseRunStart in 0 until coreStart) {
             // The ongoing pause began in the previous window; a pause cut in
-            // the new window must wait for a pause that starts inside it.
-            pauseRunStart = chunkStart
+            // the new window must wait for a pause that starts inside its core.
+            pauseRunStart = coreStart
         }
         return SegmenterEvent.Chunk(chunk)
     }

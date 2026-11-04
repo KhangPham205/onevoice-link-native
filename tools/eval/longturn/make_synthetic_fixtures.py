@@ -64,12 +64,34 @@ def main() -> int:
     parser.add_argument("--gap-ms", type=int, nargs=2, default=[150, 550],
                         help="seeded gap range between items; keep below the 1 s end-of-turn silence")
     parser.add_argument("--seed", type=int, default=20261104)
+    parser.add_argument("--single", type=int, default=0,
+                        help="instead: N untouched single items per language (short-turn regression)")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
     items = load_items(args.dataset)
     args.out.mkdir(parents=True, exist_ok=True)
     manifest = {"kind": "synthetic_concat", "seed": args.seed, "gapMs": args.gap_ms, "items": []}
+    if args.single:
+        manifest = {"kind": "dataset_single", "seed": args.seed, "items": []}
+        for lang in ("vi", "en"):
+            pool = sorted((item for item in items if item.source_lang == lang), key=lambda item: item.id)
+            for item in rng.sample(pool, args.single):
+                pcm = read_pcm(item.wav)
+                with wave.open(str(args.out / f"{item.id}.wav"), "wb") as w:
+                    w.setnchannels(1)
+                    w.setsampwidth(2)
+                    w.setframerate(RATE)
+                    w.writeframes(pcm)
+                manifest["items"].append({
+                    "id": item.id, "file": f"{item.id}.wav", "language": lang,
+                    "durationS": round(len(pcm) / 2 / RATE, 2), "speaker": "dataset", "split": "regression",
+                    "reference": item.source_text, "referenceTranslation": item.target_text,
+                    "sourceItems": [item.id],
+                })
+        (args.out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+        print(f"{len(manifest['items'])} single-item fixtures")
+        return 0
     for lang in ("vi", "en"):
         pool = [item for item in items if item.source_lang == lang]
         for seconds in args.seconds:
