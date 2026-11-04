@@ -257,7 +257,8 @@ class BenchControlReceiver : BroadcastReceiver() {
                     }
                 }
                 val baseline = intent.getStringExtra(EXTRA_BASELINE)
-                val accepted = engine.benchReplay(file, paced, baseline, tag)
+                val softSplitMs = intent.getStringExtra(EXTRA_SOFT_SPLIT_MS)?.toIntOrNull()
+                val accepted = engine.benchReplay(file, paced, baseline, tag, softSplitMs)
                 Log.i(
                     TAG,
                     "replay ${file.name} paced=$paced baseline=$baseline tag=$tag accepted=$accepted" +
@@ -296,6 +297,7 @@ class BenchControlReceiver : BroadcastReceiver() {
         const val EXTRA_RAW_PATH = "raw"
         const val EXTRA_TAG = "tag"
         const val EXTRA_BASELINE = "baseline"
+        const val EXTRA_SOFT_SPLIT_MS = "softSplitMs"
         val TAG_PATTERN = Regex("[A-Za-z0-9_-]{1,64}")
 
         private fun littleEndianFloats(samples: FloatArray): ByteArray {

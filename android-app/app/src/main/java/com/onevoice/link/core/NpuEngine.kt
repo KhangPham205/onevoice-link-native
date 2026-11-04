@@ -1304,6 +1304,11 @@ class NpuEngine(
         /** Content frames written after the route proof, pauses included. */
         val framesWritten: Long,
         val underruns: Int,
+        /**
+         * Underruns up to the last write. The end of the stream always
+         * underruns once while draining; this one counts only gaps between units.
+         */
+        val underrunsBeforeDrain: Int,
         /** Time the track had played everything written while the next unit was not ready. */
         val starvedMs: Long,
         val completed: Boolean,
@@ -1395,6 +1400,7 @@ class NpuEngine(
                     }
                 }
             }
+            val underrunsBeforeDrain = if (unitsPlayed > 0) activeTrack.underrunCount - baselineUnderruns else 0
             if (unitsPlayed > 0) {
                 val remainingMs = (written - delivered()).coerceAtLeast(0L) * 1_000L / TTS_SAMPLE_RATE
                 val deadlineNs = System.nanoTime() + (remainingMs + PLAYBACK_DRAIN_GRACE_MS) * 1_000_000L
@@ -1436,6 +1442,7 @@ class NpuEngine(
                 unitsPlayed = unitsPlayed,
                 framesWritten = written,
                 underruns = underruns,
+                underrunsBeforeDrain = underrunsBeforeDrain,
                 starvedMs = starvedMs,
                 completed = outcome == "complete" && unitsPlayed > 0 && drained,
                 outcome = if (outcome == "complete" && !drained) "drain_timeout" else outcome,
@@ -2260,6 +2267,7 @@ class NpuEngine(
                 put("unitsPlayed", playback?.unitsPlayed ?: 0)
                 put("playbackOutcome", playback?.outcome ?: JSONObject.NULL)
                 put("underruns", playback?.underruns ?: JSONObject.NULL)
+                put("underrunsBeforeDrain", playback?.underrunsBeforeDrain ?: JSONObject.NULL)
                 put("starvedMs", playback?.starvedMs ?: JSONObject.NULL)
                 put("outputAudioMs", outputAudioMs)
             })
@@ -2409,7 +2417,13 @@ class NpuEngine(
      * read on the replay worker.
      */
     @Synchronized
-    internal fun benchReplay(file: File, paced: Boolean, baseline: String?, tag: String?): Boolean {
+    internal fun benchReplay(
+        file: File,
+        paced: Boolean,
+        baseline: String?,
+        tag: String?,
+        softSplitMs: Int? = null,
+    ): Boolean {
         if (telemetry?.enabled != true) return false
         if (pipeline == null) {
             lastError = "NPU pipeline is not initialized."
@@ -2421,7 +2435,9 @@ class NpuEngine(
             return false
         }
         val config = runCatching {
-            baseline?.let(buildLongTurnConfig::forBaseline) ?: buildLongTurnConfig
+            val chosen = baseline?.let(buildLongTurnConfig::forBaseline) ?: buildLongTurnConfig
+            // Tuning sweep without a rebuild; validated by LongTurnConfig's init.
+            softSplitMs?.let { chosen.copy(softSplitSamples = LongTurnConfig.ms(it)) } ?: chosen
         }.getOrElse {
             lastError = it.message
             return false

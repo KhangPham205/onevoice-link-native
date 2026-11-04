@@ -135,6 +135,7 @@ def main() -> int:
     parser.add_argument("--ids", nargs="*", help="subset of fixture ids")
     parser.add_argument("--init", action="store_true", help='tap "Load Hybrid Pipeline" first')
     parser.add_argument("--settle", type=float, default=3.0, help="seconds between runs")
+    parser.add_argument("--soft-split-ms", type=int, help="override the soft split for this sweep")
     parser.add_argument("--run-id", default=time.strftime("%m%d%H%M"),
                         help="prefix of every tag, so rows of earlier runs never mix in")
     args = parser.parse_args()
@@ -167,8 +168,9 @@ def main() -> int:
         thermal = adb.shell("dumpsys thermalservice | grep -m1 'Thermal Status'", check=False).strip()
         pss_before = total_pss_kb(adb)
         started = time.time()
+        extras = {"softSplitMs": args.soft_split_ms} if args.soft_split_ms else {}
         adb.bench(cmd="replay", path=f"{DEVICE_DIR}/{item['file']}", mode=args.mode,
-                  baseline=baseline, tag=tag)
+                  baseline=baseline, tag=tag, **extras)
         timeout = item["durationS"] * (2 if args.mode == "fast" else 5) + 180
         log = wait_replay(adb, item["file"], timeout)
         wall = time.time() - started
