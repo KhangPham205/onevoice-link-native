@@ -104,6 +104,69 @@ second segment captured while the first is processing or playing. A forced
 boundary sets the turn prior to the same language, because the cut speaker is
 expected to continue.
 
+### Long turns (`-PlongTurnMode=ADAPTIVE`)
+
+The paragraph above is `LEGACY`, still the default. With `ADAPTIVE` a turn may
+run up to `longTurnMaxTurnS` (120 s); the 10 s model ceiling cuts only an ASR
+window, never the microphone. The spec and acceptance plan are
+`docs/LONG_FORM_SPEECH_IMPLEMENTATION.md`; measured evidence is in
+`docs/LONG_FORM_SPEECH_VALIDATION.md`.
+
+- **Capture.** `TurnSegmenter` keeps the legacy onset, pre-roll, echo guard and
+  1 s end-of-turn silence, but writes the whole turn into one bounded PCM16
+  `TurnArchive` (120 s = 3.84 MB) and emits windows as sample ranges. After 7 s
+  a window is cut inside the first pause of at least 160 ms, with no overlap;
+  without one it is cut at the 160,000-sample contract (or a shorter gap in its
+  second half) with 960 ms of overlap, aligned to the 80 ms CTC/RNN-T frame
+  grid. Window cores tile the turn without gaps. The detector is reset once per
+  turn, and the onset/minimum/RMS floor decides only whether the turn is
+  accepted, never drops a quiet stretch in the middle. Live long-turn capture
+  uses a 2 s `AudioRecord` buffer and `THREAD_PRIORITY_URGENT_AUDIO`, and logs
+  the read lag against `AudioRecord.getTimestamp()`.
+- **Inference while capturing.** `LongTurnCoordinator` runs ASR and MT on one
+  inference thread and TTS on one TTS thread while the microphone stays open.
+  Playback stays absent until capture closed, so the half-duplex invariant is
+  unchanged: `CAPTURING` now also hosts background inference, `PROCESSING`
+  starts when capture and SCO are closed, `PLAYING` at the first translated
+  sample.
+- **Routing.** The first window runs dual ASR (or LID) once; the winner's
+  hypothesis is reused and the direction is locked for the turn. Later windows
+  run only the selected branch. A rejected first window fails the turn closed
+  and closes the microphone at once. The turn prior is committed once, after
+  the whole turn played: opposite language after a natural end, same language
+  after the turn cap. Windows never touch the prior.
+- **Merge.** Decoders expose token emission times (CTC run start, 80 ms steps;
+  RNN-T encoder frame, 40 ms). `TranscriptAssembler` keeps the words whose first
+  token falls in a window's core; words past a forced cut's core wait for the
+  next window. Only the one boundary word on each side is reconciled (same text
+  within 120 ms), so genuine repeats survive.
+- **Translation units.** `TranslationUnitBuilder` releases complete sentences
+  where Parakeet (EN) punctuates and text up to a pause cut for GIPFormer (VI,
+  no punctuation). Every Marian sentence must fit 96 source tokens counted by
+  the real SentencePiece model; longer text is split at a word boundary, never
+  truncated. Marian now rejects an over-long input and reports output that hit
+  its 128-token cap without EOS; the coordinator splits and retries such a unit.
+  A one-window turn is exactly one unit, like the legacy whole-utterance path.
+- **Playback.** One `AudioTrack` per turn: the route proof runs as soon as
+  capture closed, while the last units are still synthesizing; units are
+  appended in order with a 150 ms pause, staged in 100 ms stereo blocks (VI
+  left, EN right on Bluetooth). `PreparedAudioQueue` bounds synthesized audio
+  by bytes (16 MiB); when full, only the TTS worker waits.
+- **Failure.** A selected NPU ASR/MT failure before any audio played
+  quarantines that text path and rebuilds the whole turn from the archive on
+  CPU recovery (revision bump; nothing earlier is kept). After audio played the
+  turn ends as `partial_failure`. TTS/route failures do not trigger CPU text
+  recovery.
+- **Telemetry.** One `OneVoiceRouting` row per turn (`schema: 2`, legacy fields
+  unchanged plus `longTurn`), and `OneVoiceLongTurn` rows per window and unit.
+  `latencyMs.firstAudio` is endpoint (speech end + 1 s hangover) to first
+  translated sample written.
+- **Replay harness.** `cmd=replay` feeds a 16 kHz mono WAV through the same
+  capture loop instead of the microphone (`paced` follows the wall clock and
+  skips audio while no turn captures, like a closed mic; `fast` is for
+  coverage only). `baseline=B0..B3` selects the policy for that replay. See
+  `tools/eval/longturn/`.
+
 Every state edge is checked by `HalfDuplexCoordinator`; error paths may return
 directly to `IDLE` only as explicit cleanup. `OneVoiceHalfDuplex` logs the turn
 id, source/target states, monotonic timestamp, dwell time and reason, together

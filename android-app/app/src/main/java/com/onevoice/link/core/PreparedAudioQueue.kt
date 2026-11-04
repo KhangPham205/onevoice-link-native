@@ -123,3 +123,35 @@ internal class PreparedAudioQueue(private val budgetBytes: Long) {
         changed.signalAll()
     }
 }
+
+/**
+ * Growable copy of what one long turn played, for the Replay button and the
+ * tagged bench waveform. It stops growing at [capBytes] and then reports
+ * nothing rather than a silently shortened copy.
+ */
+internal class ReplayAccumulator(private val capBytes: Long) {
+    private var samples = FloatArray(0)
+    private var size = 0
+    private var overflowed = false
+
+    fun append(mono: FloatArray) = add(mono.size) { offset -> mono.copyInto(samples, offset) }
+
+    fun appendSilence(frames: Int) = add(frames) { _ -> }
+
+    private inline fun add(count: Int, fill: (Int) -> Unit) {
+        if (overflowed) return
+        if ((size + count).toLong() * Float.SIZE_BYTES > capBytes) {
+            overflowed = true
+            samples = FloatArray(0)
+            size = 0
+            return
+        }
+        if (size + count > samples.size) {
+            samples = samples.copyOf(maxOf(size + count, samples.size * 2))
+        }
+        fill(size)
+        size += count
+    }
+
+    fun result(): FloatArray? = if (overflowed || size == 0) null else samples.copyOf(size)
+}

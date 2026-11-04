@@ -110,6 +110,8 @@ internal class LongTurn(
     @Volatile var transcript: String = ""
     @Volatile var translation: String = ""
     @Volatile var emptyUnits: Int = 0
+    /** What was played, for the tagged bench waveform; null when over the replay cap. */
+    @Volatile var replayAudio: FloatArray? = null
 
     internal var work: TurnWork? = null
 
