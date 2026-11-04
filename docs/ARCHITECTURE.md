@@ -142,7 +142,12 @@ window, never the microphone. The spec and acceptance plan are
   within 120 ms), so genuine repeats survive.
 - **Translation units.** `TranslationUnitBuilder` releases complete sentences
   where Parakeet (EN) punctuates and text up to a pause cut for GIPFormer (VI,
-  no punctuation). Every Marian sentence must fit 96 source tokens counted by
+  no punctuation). Real continuous VI speech rarely yields a pause cut, so once
+  open VI text exceeds 24 tokens (first unit of a turn) or 40 (later units),
+  a unit is also released at the widest word-onset gap among the boundaries
+  giving it half to all of that size (`word_gap`); without this, units only
+  split at the token budget (~25 s of speech) and the first one was still
+  rendering when the turn ended. Every Marian sentence must fit 96 source tokens counted by
   the real SentencePiece model; longer text is split at a word boundary, never
   truncated. Marian now rejects an over-long input and reports output that hit
   its 128-token cap without EOS; the coordinator splits and retries such a unit.

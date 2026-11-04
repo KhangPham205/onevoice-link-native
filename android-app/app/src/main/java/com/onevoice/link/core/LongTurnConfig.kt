@@ -71,6 +71,14 @@ internal data class LongTurnConfig(
     val mergeToleranceSamples: Int = ms(120),
     /** Marian source tokens per sentence, prefix and EOS included; output is capped at 128. */
     val maxUnitSourceTokens: Int = 96,
+    /**
+     * Without ASR punctuation (VI), the first unit of a turn is released at a
+     * word gap once the text exceeds this many tokens (~5 s of speech), so the
+     * first audio is short to render; later units use [unitTargetTokens]
+     * (~9 s, about one window). See [TranslationUnitBuilder].
+     */
+    val firstUnitTargetTokens: Int = 24,
+    val unitTargetTokens: Int = 40,
     /** Soft cap on synthesized audio waiting for playback. */
     val ttsQueueBudgetBytes: Long = 16L * 1024 * 1024,
     /** Everything PCM held for one turn: archive, windows, TTS queue, staging. */
@@ -97,6 +105,9 @@ internal data class LongTurnConfig(
             "the soft split plus left context must leave room before the window ceiling"
         }
         require(maxTurnSamples >= maxWindowSamples)
+        require(firstUnitTargetTokens in 2..unitTargetTokens && unitTargetTokens <= maxUnitSourceTokens) {
+            "unit targets must satisfy 2 <= first <= later <= maxUnitSourceTokens"
+        }
         val archiveBytes = (maxTurnSamples + NpuEngine.PRE_ROLL_SAMPLES).toLong() * Short.SIZE_BYTES
         val windowBytes = 2L * maxWindowSamples * Float.SIZE_BYTES
         require(archiveBytes + windowBytes + ttsQueueBudgetBytes + replayMaxBytes <= pcmBudgetBytes) {
@@ -119,6 +130,8 @@ internal data class LongTurnConfig(
         put("maxTurnMs", toMs(maxTurnSamples))
         put("mergeToleranceMs", toMs(mergeToleranceSamples))
         put("maxUnitSourceTokens", maxUnitSourceTokens)
+        put("firstUnitTargetTokens", firstUnitTargetTokens)
+        put("unitTargetTokens", unitTargetTokens)
         put("ttsQueueBudgetBytes", ttsQueueBudgetBytes)
         put("pcmBudgetBytes", pcmBudgetBytes)
         put("unitPauseMs", unitPauseMs)

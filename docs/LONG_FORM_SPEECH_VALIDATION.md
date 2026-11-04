@@ -9,10 +9,12 @@ qua đúng đường capture production (replay file thay micro). Lượt dài k
 bị cắt mất phần sau 10 giây. Độ trễ từ lúc hệ thống xác nhận người nói dừng tới
 mẫu bản dịch đầu tiên giảm từ p50 5,5 s (B1) xuống 40 ms (B3), vì phần lớn bản
 dịch đã được tổng hợp sẵn trong lúc người nói còn nói. Lượt ngắn không chậm
-hơn (p50 −11%, p95 −9% so với B0) và WER lượt ngắn chênh +0,46 điểm. Toàn bộ số
-đo dùng **audio tổng hợp từ dataset** hoặc **item dataset đơn lẻ**; chưa có bản
-ghi giọng thật nói dài, chưa test micro/Bluetooth live, chưa soak 20–30 phút
-bằng micro. Vì vậy `LEGACY` vẫn là mặc định; `ADAPTIVE` bật bằng
+hơn (p50 −11%, p95 −9% so với B0) và WER lượt ngắn chênh +0,46 điểm. §3.1–3.6
+dùng **audio tổng hợp từ dataset** hoặc **item dataset đơn lẻ**. §3.7 dùng **12
+bản ghi giọng thật tiếng Việt** (30–134 s, một người nói): sau khi sửa cách chia
+đơn vị dịch, audio đầu ra p50 66 ms, p95 130 ms sau endpoint, WER 3,3%, không
+starvation. Chưa có bản ghi tiếng Anh, chưa test micro/Bluetooth live, chưa soak
+20–30 phút bằng micro. Vì vậy `LEGACY` vẫn là mặc định; `ADAPTIVE` bật bằng
 `-PlongTurnMode=ADAPTIVE`.
 
 ## 1. Môi trường
@@ -157,9 +159,62 @@ cao nhất 1 555 351 kB; thermal status 0, tới run cuối là 1. Archive cố 
 heap Java chưa GC với rò rỉ; cần soak dài hơn với `dumpsys meminfo` theo thời
 gian (NOT RUN). PSS không gồm bộ nhớ riêng của DSP.
 
+### 3.7. Giọng thật tiếng Việt (12 bản ghi, paced)
+
+Bản ghi theo [`LONG_FORM_RECORDING_SCRIPT.md`](LONG_FORM_RECORDING_SCRIPT.md),
+thu bằng Samsung Voice Recorder trên chính máy test (AAC 48 kHz, chuyển 16 kHz
+mono bằng `recording_scripts.py prepare`), một người nói, 30–134 s/bài. Mức tín
+hiệu: đỉnh −10 đến −0,4 dBFS, không clip, chênh tiếng nói/nền ~15–19 dB. Kết
+quả: `eval-results/real-vi-paced` (B1, B3 trước khi sửa),
+`eval-results/real-vi-paced-vi09b1` (chạy lại vi09/B1: lần đầu cảnh báo pin yếu
+của SystemUI mở màn hình Battery, activity bị pause và engine dừng ở giây 35),
+`eval-results/real-vi-paced-gap` (B3 sau khi sửa).
+
+**Lỗi tìm thấy.** Giọng thật nói liền mạch gần như không cho Silero một khoảng
+non-speech ≥ 160 ms giữa lượt: 12 bài chỉ có 0–1 lần cắt ở khoảng nghỉ, còn lại
+toàn cắt ép ở 10 s. GIPFormer không có dấu câu, nên đơn vị dịch VI chỉ được chia
+khi chạm budget 96 token (~95 âm tiết, ~22–25 s lời nói). Kokoro EN cần ~20 s cho
+một đơn vị như vậy (RTF ~0,76 trên audio ra), nên với bài 30–45 s, đơn vị đầu
+xong sau khi người nói đã dừng: 4/12 bài chờ 6,4–13,9 s dù đang ở B3. Fixture
+tổng hợp không lộ lỗi này vì các câu được ghép với khoảng lặng 150–550 ms.
+
+**Sửa.** Khi không có dấu câu, lúc văn bản đang mở vượt 24 token (đơn vị đầu
+của lượt) hoặc 40 token (các đơn vị sau), `TranslationUnitBuilder` nhả một đơn
+vị tại khoảng cách lớn nhất giữa hai thời điểm bắt đầu từ liên tiếp, trong các
+ranh giới cho đơn vị từ một nửa tới đủ kích thước đó (`reason: word_gap`, log
+`boundaryGapMs`). Lượt một cửa sổ vẫn đúng một đơn vị; EN không đổi. 24/40 được
+chọn từ tốc độ nói đo được (~4,3 âm tiết/s: ~5,5 s và ~9 s, khoảng một cửa sổ),
+không quét tham số; replay có thể ghi đè bằng `--unit-tokens 24,40`.
+
+| B3, 12 bài | Trước (budget 96) | Sau (`word_gap` 24/40) |
+|---|---|---|
+| Endpoint → mẫu bản dịch đầu, p50 / p95 / max | 78 ms / 12 742 ms / 13 870 ms | **66 ms / 130 ms / 196 ms** |
+| Ngừng nói thật → mẫu đầu, p50 / max | 1 069 / 14 870 ms | **1 060 / 1 196 ms** |
+| WER gộp (VI) | 3,36% | 3,33% (ASR không đổi) |
+| Số đơn vị / lượt | 2–5 | 3–16 |
+| Starvation, underrun trước drain, lỗi | 0 / 0 / 0 | 0 / 0 / 0 |
+| Backlog max, TTS queue high-water | 6,7 s, 6,8 MB | 6,7 s, 9,0 MB |
+| Từ EN / âm tiết VI (tỉ lệ thô, không phải điểm MT) | 0,70 (0,38–0,85) | 0,78 (0,60–0,89) |
+
+- Held-out (`vi04`, `vi06`, `vi08`, `vi12`, không dùng để chọn tham số): mẫu đầu
+  55 / 41 / 60 / 76 ms, WER 0,9 / 3,4 / 1,0 / 1,3%.
+- Khoảng cách tại chỗ chia (94 lần): min 240 ms, p50 440 ms, max 1 840 ms; so
+  với ~230 ms mỗi âm tiết khi nói liền, phần lớn lần chia rơi vào một chỗ ngừng
+  thật.
+- B1 trên cùng bộ (trước khi sửa, có lượt chạy lại vi09): mẫu đầu p50 15,5 s,
+  max 23 s; starvation 1,8 s và 1,25 s ở hai bài.
+- `vi10` dài 133,7 s: lượt dừng đúng ở trần 120 s (`turn_cap`), WER 10,8% là
+  phần nói sau trần, không phải lỗi nhận dạng.
+- **Chất lượng dịch chưa được chấm** (chưa có bản dịch tham chiếu). Marian bỏ
+  bớt nội dung với đầu vào VI dài không dấu câu: trước khi sửa, `vi04` chỉ còn
+  0,38 từ EN/âm tiết. Đơn vị nhỏ giữ được nhiều nội dung hơn ở 10/12 bài, nhưng
+  không đều: `vi02` giảm 0,80 → 0,63 (một đơn vị 29 âm tiết mất địa chỉ và giờ
+  mở cửa). Đây là hành vi của Marian trên văn bản không dấu câu, có ở cả hai
+  cách chia; cần bản dịch tham chiếu để chấm chrF/BLEU trước khi chỉnh 24/40.
+
 ## 4. Kiểm thử
 
-### 4.1. JVM (119 test, PASS)
+### 4.1. JVM (124 test, PASS)
 
 `./gradlew :app:testDebugUnitTest`:
 - `TurnSegmenterTest`: lượt ngắn giống hệt mẫu của `UtteranceSegmenter` legacy;
@@ -173,7 +228,10 @@ gian (NOT RUN). PSS không gồm bộ nhớ riêng của DSP.
   ở điểm giữa; từ lặp thật ("có có", "rất rất") giữ nguyên; ngữ cảnh trái không
   commit hai lần; flush phần đuôi.
 - `TranslationUnitBuilderTest`: câu EN, khoảng nghỉ VI, lượt một cửa sổ đúng một
-  unit, chia theo budget không mất/lặp từ, ưu tiên dấu phẩy, budget tính theo câu.
+  unit, chia theo budget không mất/lặp từ, ưu tiên dấu phẩy, budget tính theo câu;
+  `word_gap`: chưa vượt target thì chờ, chọn khoảng cách lớn nhất trong khoảng
+  cho phép, chuỗi nhiều cửa sổ không mất/lặp từ, EN bỏ qua target, lượt VI một
+  cửa sổ vẫn một unit.
 - `LongTurnCoordinatorTest`: route một lần và tái dùng hypothesis; từ chối route
   fail-closed và yêu cầu dừng thu; chế độ hoãn (B1/B2) không dịch khi đang nói;
   lỗi NPU trước khi phát dựng lại toàn lượt trên CPU (revision mới, không phát
@@ -195,7 +253,7 @@ gian (NOT RUN). PSS không gồm bộ nhớ riêng của DSP.
 | Cancel/restart/recovery không race, không phát lại | PASS (JVM) | Fault injection trên máy NOT RUN |
 | Phone/BT route thật, stereo, half-duplex | PARTIAL | Replay dùng route loa và chứng minh route; micro Phone và TWS live NOT RUN |
 | Hồi quy lượt ngắn | PASS | §3.3 |
-| Long-turn held-out giọng thật | NOT RUN | Chờ bản ghi theo `LONG_FORM_RECORDING_SCRIPT.md` |
+| Long-turn held-out giọng thật | PARTIAL | VI: 12 bài, 4 held-out PASS về độ trễ/WER (§3.7); EN chưa thu; chất lượng MT chưa chấm |
 | Soak 20–30 phút | PARTIAL | ~20 phút replay liên tục; chưa có micro live |
 | Tuning B4 (thread/power/prebuffer) | NOT RUN | |
 | Lint | PASS cho file đã sửa | 20 lỗi còn lại có từ trước, ở `BluetoothRoutingProbeActivity` (debug) và `DeviceVitals` |
@@ -222,6 +280,13 @@ gian (NOT RUN). PSS không gồm bộ nhớ riêng của DSP.
    NPU trên máy; timestamps từ sherpa CPU chưa được kiểm thực tế.
 6. **Thời gian tới tai người nghe** chưa đo (cần loopback). Số liệu là thời điểm
    ghi mẫu vào AudioTrack.
+7. **Marian bỏ nội dung với VI không dấu câu** (§3.7), ở cả đơn vị dài và
+   ngắn. Chưa có điểm MT; cần bản dịch tham chiếu cho 12 bài VI. Hướng có thể
+   thử: khôi phục dấu câu cho VI trước MT, hoặc đặt ranh giới đơn vị tại khoảng
+   ngừng lớn hơn (target 32/48) rồi so chrF.
+8. **Kokoro EN là nút cổ chai thông lượng** (RTF ~0,76 trên audio ra, tức
+   ~0,9 thời gian nói). Lượt 120 s vẫn theo kịp, nhưng backlog 6,7 s; trên máy
+   nóng hơn có thể starvation. B4 (thread/power) chưa chạy.
 
 ## 6. Tái lập
 
@@ -236,6 +301,12 @@ $PY tools/eval/longturn/run_long_replay.py --serial <serial> --fixtures eval-res
 $PY tools/eval/longturn/run_long_replay.py --serial <serial> --fixtures eval-results/shortturn-fixtures \
   --out eval-results/shortturn-paced-2 --baselines B0 B3 --mode paced --run-id s2
 $PY tools/eval/longturn/score_long_replay.py eval-results/longturn-paced-2
+# Giọng thật (§3.7): bản ghi vi01.m4a... trong eval-results/recordings-raw
+$PY tools/eval/longturn/recording_scripts.py prepare --recordings eval-results/recordings-raw \
+  --out eval-results/real-vi --speaker spk1
+$PY tools/eval/longturn/run_long_replay.py --serial <serial> --fixtures eval-results/real-vi \
+  --out eval-results/real-vi-paced-gap --baselines B3 --mode paced --init
+$PY tools/eval/longturn/score_long_replay.py eval-results/real-vi-paced-gap
 ```
 
 Dữ liệu thô của mỗi run nằm trong thư mục kết quả: `runs.json`, `turns.jsonl`

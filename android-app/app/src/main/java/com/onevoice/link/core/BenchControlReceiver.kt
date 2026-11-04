@@ -258,7 +258,12 @@ class BenchControlReceiver : BroadcastReceiver() {
                 }
                 val baseline = intent.getStringExtra(EXTRA_BASELINE)
                 val softSplitMs = intent.getStringExtra(EXTRA_SOFT_SPLIT_MS)?.toIntOrNull()
-                val accepted = engine.benchReplay(file, paced, baseline, tag, softSplitMs)
+                // "24,40": first-unit and later-unit word-gap targets (VI), validated by LongTurnConfig.
+                val unitTokens = intent.getStringExtra(EXTRA_UNIT_TOKENS)?.split(',')
+                    ?.mapNotNull { it.trim().toIntOrNull() }
+                    ?.takeIf { it.size == 2 }
+                    ?.let { it[0] to it[1] }
+                val accepted = engine.benchReplay(file, paced, baseline, tag, softSplitMs, unitTokens)
                 Log.i(
                     TAG,
                     "replay ${file.name} paced=$paced baseline=$baseline tag=$tag accepted=$accepted" +
@@ -298,6 +303,7 @@ class BenchControlReceiver : BroadcastReceiver() {
         const val EXTRA_TAG = "tag"
         const val EXTRA_BASELINE = "baseline"
         const val EXTRA_SOFT_SPLIT_MS = "softSplitMs"
+        const val EXTRA_UNIT_TOKENS = "unitTokens"
         val TAG_PATTERN = Regex("[A-Za-z0-9_-]{1,64}")
 
         private fun littleEndianFloats(samples: FloatArray): ByteArray {

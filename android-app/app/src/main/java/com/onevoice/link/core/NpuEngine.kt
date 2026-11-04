@@ -2387,6 +2387,7 @@ class NpuEngine(
                 put("sourceTokens", record.unit.sourceTokens)
                 put("firstWordSample", record.unit.firstWordSample)
                 put("lastWordSample", record.unit.lastWordSample)
+                record.unit.boundaryGapSamples?.let { put("boundaryGapMs", LongTurnConfig.toMs(it)) }
                 put("path", record.path.name)
                 put("mtMs", record.mtMs)
                 put("outputTokens", record.outputTokens)
@@ -2423,6 +2424,7 @@ class NpuEngine(
         baseline: String?,
         tag: String?,
         softSplitMs: Int? = null,
+        unitTokens: Pair<Int, Int>? = null,
     ): Boolean {
         if (telemetry?.enabled != true) return false
         if (pipeline == null) {
@@ -2437,7 +2439,9 @@ class NpuEngine(
         val config = runCatching {
             val chosen = baseline?.let(buildLongTurnConfig::forBaseline) ?: buildLongTurnConfig
             // Tuning sweep without a rebuild; validated by LongTurnConfig's init.
-            softSplitMs?.let { chosen.copy(softSplitSamples = LongTurnConfig.ms(it)) } ?: chosen
+            val split = softSplitMs?.let { chosen.copy(softSplitSamples = LongTurnConfig.ms(it)) } ?: chosen
+            unitTokens?.let { (first, later) -> split.copy(firstUnitTargetTokens = first, unitTargetTokens = later) }
+                ?: split
         }.getOrElse {
             lastError = it.message
             return false

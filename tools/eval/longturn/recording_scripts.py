@@ -151,7 +151,7 @@ SCRIPTS: list[dict] = [
     {"id": "vi12", "language": "vi", "targetS": 120, "condition": "noise", "split": "heldout",
      "text": "Kính gửi toàn thể nhân viên, phòng nhân sự xin thông báo một số thay đổi về chính sách làm "
              "việc từ xa, áp dụng từ ngày một tháng mười hai năm nay. Thứ nhất, mỗi nhân viên được làm việc "
-             "từ xa tối đa hai ngày mỗi tuần, nhưng không được làm từ xa vào thứ hai, vì đây là ngày họp "
+             "từ xa tối đa hai ngày mỗi tuần, nhưng không được làm từ xa vào ngày thứ hai, vì đây là ngày họp "
              "toàn công ty. Thứ hai, việc đăng ký làm từ xa phải được quản lý trực tiếp phê duyệt trước ít "
              "nhất hai mươi bốn giờ. Nếu không có phê duyệt, ngày đó sẽ được tính là nghỉ phép không "
              "lương. Thứ ba, trong giờ làm việc từ chín giờ sáng đến năm giờ chiều, nhân viên phải bật "

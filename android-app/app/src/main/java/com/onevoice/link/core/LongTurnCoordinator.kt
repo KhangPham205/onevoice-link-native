@@ -505,6 +505,8 @@ internal class LongTurnCoordinator(
             maxSourceTokens = turn.config.maxUnitSourceTokens,
             hasPunctuation = inference.hasPunctuation(direction),
             tokenCount = { text -> inference.sourceTokens(text, direction) },
+            firstUnitTokens = turn.config.firstUnitTargetTokens,
+            unitTokens = turn.config.unitTargetTokens,
         ),
         path = path,
     )
