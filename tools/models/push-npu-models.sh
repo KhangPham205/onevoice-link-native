@@ -13,6 +13,7 @@
 #   <filesDir>/models/npu/vi-en/asr_gipformer_{tokens,bpe,config}.*
 #   <filesDir>/models/npu/en-vi/{asr_parakeet_ctc,mt_encoder,mt_decoder}.bin
 #   <filesDir>/models/npu/en-vi/asr_parakeet_tokens.txt
+#   <filesDir>/models/npu/en-vi/tts_vieneu/*       (VieNeu-TTS v3 Nano, default VI voice)
 #   <filesDir>/models/npu/en-vi/tts_supertonic/*   (Supertonic-3, optional engine)
 #
 # Each direction also gets Marian host tokenizers, a whole-utterance CPU Kokoro
@@ -105,10 +106,12 @@ vi-en/fallback/mt/vocab.json	../models-hf/mt-vi-en/vocab.json
 vi-en/fallback/mt/mt_config.json	../models-hf/mt-vi-en/mt_config.json
 EOF
 
-# en-vi/tts_supertonic/ is the -PviTtsEngine=SUPERTONIC alternative to Kokoro-VI:
+# en-vi/tts_vieneu/ is the default Vietnamese voice (VieNeu-TTS v3 Nano,
+# Apache-2.0), produced by build-sea-g2p-android.sh + prepare-vieneu-nano.py.
+# en-vi/tts_supertonic/ is the -PviTtsEngine=SUPERTONIC alternative:
 # sherpa-onnx-supertonic-3-tts-int8-2026-05-11 from the k2-fsa/sherpa-onnx
-# tts-models release (code MIT, weights OpenRAIL-M). Both engines are staged so
-# an A/B needs only an APK rebuild.
+# tts-models release (code MIT, weights OpenRAIL-M). Kokoro-VI, Supertonic and
+# VieNeu are all staged so an A/B needs only an APK rebuild.
 read -r -d '' EN_VI <<'EOF' || true
 en-vi/asr_parakeet_ctc.bin	asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/model.bin
 en-vi/asr_parakeet_tokens.txt	asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/tokens.txt
@@ -128,6 +131,15 @@ en-vi/tts_supertonic/vocoder.int8.onnx	../models-hf/tts-vi-supertonic/vocoder.in
 en-vi/tts_supertonic/tts.json	../models-hf/tts-vi-supertonic/tts.json
 en-vi/tts_supertonic/unicode_indexer.bin	../models-hf/tts-vi-supertonic/unicode_indexer.bin
 en-vi/tts_supertonic/voice.bin	../models-hf/tts-vi-supertonic/voice.bin
+en-vi/tts_vieneu/text_encoder.onnx	../models-vieneu/tts_vieneu/text_encoder.onnx
+en-vi/tts_vieneu/duration_predictor.onnx	../models-vieneu/tts_vieneu/duration_predictor.onnx
+en-vi/tts_vieneu/vector_estimator.onnx	../models-vieneu/tts_vieneu/vector_estimator.onnx
+en-vi/tts_vieneu/codec_decoder.onnx	../models-vieneu/tts_vieneu/codec_decoder.onnx
+en-vi/tts_vieneu/nano.json	../models-vieneu/tts_vieneu/nano.json
+en-vi/tts_vieneu/null_spk.bin	../models-vieneu/tts_vieneu/null_spk.bin
+en-vi/tts_vieneu/null_style.bin	../models-vieneu/tts_vieneu/null_style.bin
+en-vi/tts_vieneu/voices.bin	../models-vieneu/tts_vieneu/voices.bin
+en-vi/tts_vieneu/sea_g2p.bin	../models-vieneu/tts_vieneu/sea_g2p.bin
 en-vi/fallback/asr/model.onnx	../models-hf/asr-en/model.int8.onnx
 en-vi/fallback/asr/tokens.txt	../models-hf/asr-en/tokens.txt
 en-vi/fallback/mt/encoder_model.onnx	../models-hf/mt-en-vi/encoder_model.onnx
@@ -164,6 +176,7 @@ while IFS=$'\t' read -r dest src; do
 done <<< "$PLAN"
 if [ "$missing_sources" -ne 0 ]; then
   echo "!! $missing_sources required Hybrid artifact(s) are absent." >&2
+  echo "   VieNeu: tools/models/build-sea-g2p-android.sh, then prepare-vieneu-nano.py." >&2
   echo "   Generate the LID trio with tools/models/convert_speechflow_lid.py and prepare" >&2
   echo "   both direction bundles before retrying; the device was not modified." >&2
   exit 1
