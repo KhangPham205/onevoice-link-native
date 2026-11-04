@@ -212,6 +212,40 @@ không quét tham số; replay có thể ghi đè bằng `--unit-tokens 24,40`.
   mở cửa). Đây là hành vi của Marian trên văn bản không dấu câu, có ở cả hai
   cách chia; cần bản dịch tham chiếu để chấm chrF/BLEU trước khi chỉnh 24/40.
 
+### 3.8. Tiếng Anh bằng TTS nhiều accent (12 bài, paced, B3)
+
+Chưa có người nói tiếng Anh thật; 12 kịch bản `en01`–`en12` được đọc bằng Edge
+neural TTS, mỗi bài một accent (`tools/eval/longturn/make_tts_recordings.py`):
+Mỹ, Anh, Ấn Độ, Úc, Singapore, Philippines, Nigeria, Nam Phi, Hồng Kông và
+`vi-VN-NamMinhNeural` đọc tiếng Anh (accent Việt; `en02`, `en06`, `en11`). Điều
+kiện được mô phỏng: nhanh +20%, nhỏ −15 dB, ồn hồng SNR 10 dB, liền mạch
+(khoảng ngừng ≤ 150 ms). Bài dài chỉ 71–85 s vì TTS đọc nhanh hơn người. Kết
+quả: `eval-results/tts-en-paced-2`.
+
+Lần chạy đầu (`eval-results/tts-en-paced`) bị loại: Edge chèn 0,8–1,1 s im lặng
+số ở cuối câu, đủ để kết thúc lượt (hangover 1 s), nên 6/12 bài bị tách lượt và
+mất 23–73% audio (paced bỏ audio khi micro đóng). Bộ dùng để chấm giới hạn mọi
+khoảng ngừng ở 600 ms; đây là đặc điểm của TTS, không phải của người nói.
+
+| | Kết quả |
+|---|---|
+| Lượt / bài | 1 cho cả 12 bài; `speaker_done` |
+| Endpoint → mẫu đầu, p50 / p95 | 47 ms / 67 ms (ngừng nói thật → mẫu đầu 1,03–1,07 s) |
+| WER, 9 accent không phải Việt | 5,96% (en01 0%, nhanh 8,3%, nhỏ 3,6%, ồn 9,0% / 5,2%, liền mạch 5,2%) |
+| WER held-out `en04`, `en08`, `en12` | 4,98% |
+| Starvation / lỗi | 0 / 0 |
+| Accent Việt (`NamMinh`) | **Hỏng**: `en02`, `en06` route sang VI (WER 93%, 97%); `en11` đúng EN nhưng WER 52% |
+
+**Accent Việt.** Với giọng này, Parakeet chấm gần ngang GIPFormer (EN −0,58 /
+−0,41 so với VI −0,54 / −0,44; margin 0,12 và 0,06 < 0,15), nên soft prior quyết
+định. Prior mong ngôn ngữ ngược với lượt trước, mà lượt trước trong replay cũng
+là EN, nên chọn VI. Khi đã route đúng (`en11`), Parakeet vẫn nghe sai nhiều ("My
+name is Chiang Men Jk… Houmen City"). Giọng TTS này áp âm vị tiếng Việt lên chữ
+tiếng Anh, nặng hơn nhiều người Việt nói tiếng Anh thật, nên chưa đủ để kết
+luận về người dùng thật; nhưng nó cho thấy rủi ro: với accent nặng, routing dựa
+vào prior luân phiên, và prior sai khi cùng một người nói nhiều lượt liền. Cần
+bản ghi người Việt nói tiếng Anh thật trước khi chỉnh margin/offset.
+
 ## 4. Kiểm thử
 
 ### 4.1. JVM (124 test, PASS)
@@ -253,7 +287,7 @@ không quét tham số; replay có thể ghi đè bằng `--unit-tokens 24,40`.
 | Cancel/restart/recovery không race, không phát lại | PASS (JVM) | Fault injection trên máy NOT RUN |
 | Phone/BT route thật, stereo, half-duplex | PARTIAL | Replay dùng route loa và chứng minh route; micro Phone và TWS live NOT RUN |
 | Hồi quy lượt ngắn | PASS | §3.3 |
-| Long-turn held-out giọng thật | PARTIAL | VI: 12 bài, 4 held-out PASS về độ trễ/WER (§3.7); EN chưa thu; chất lượng MT chưa chấm |
+| Long-turn held-out giọng thật | PARTIAL | VI: 12 bài, 4 held-out PASS về độ trễ/WER (§3.7); EN chỉ có TTS nhiều accent (§3.8): PASS trừ accent Việt; chất lượng MT chưa chấm |
 | Soak 20–30 phút | PARTIAL | ~20 phút replay liên tục; chưa có micro live |
 | Tuning B4 (thread/power/prebuffer) | NOT RUN | |
 | Lint | PASS cho file đã sửa | 20 lỗi còn lại có từ trước, ở `BluetoothRoutingProbeActivity` (debug) và `DeviceVitals` |
@@ -287,6 +321,8 @@ không quét tham số; replay có thể ghi đè bằng `--unit-tokens 24,40`.
 8. **Kokoro EN là nút cổ chai thông lượng** (RTF ~0,76 trên audio ra, tức
    ~0,9 thời gian nói). Lượt 120 s vẫn theo kịp, nhưng backlog 6,7 s; trên máy
    nóng hơn có thể starvation. B4 (thread/power) chưa chạy.
+9. **Tiếng Anh accent Việt nặng route sang VI** (§3.8): điểm hai nhánh gần
+   ngang, soft prior quyết định. Cần bản ghi người thật để hiệu chỉnh.
 
 ## 6. Tái lập
 
@@ -307,6 +343,12 @@ $PY tools/eval/longturn/recording_scripts.py prepare --recordings eval-results/r
 $PY tools/eval/longturn/run_long_replay.py --serial <serial> --fixtures eval-results/real-vi \
   --out eval-results/real-vi-paced-gap --baselines B3 --mode paced --init
 $PY tools/eval/longturn/score_long_replay.py eval-results/real-vi-paced-gap
+# Tiếng Anh TTS (§3.8), cần edge-tts và mạng
+$PY tools/eval/longturn/make_tts_recordings.py --out eval-results/recordings-tts-en
+$PY tools/eval/longturn/recording_scripts.py prepare --recordings eval-results/recordings-tts-en \
+  --out eval-results/tts-en --speaker edge_tts
+$PY tools/eval/longturn/run_long_replay.py --serial <serial> --fixtures eval-results/tts-en \
+  --out eval-results/tts-en-paced-2 --baselines B3 --mode paced --init
 ```
 
 Dữ liệu thô của mỗi run nằm trong thư mục kết quả: `runs.json`, `turns.jsonl`

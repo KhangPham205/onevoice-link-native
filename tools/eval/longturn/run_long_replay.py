@@ -81,6 +81,11 @@ def ensure_pipeline(adb: Adb, init: bool) -> None:
     adb.shell("svc power stayon true")
     adb.shell("input keyevent KEYCODE_WAKEUP")
     adb.shell("wm dismiss-keyguard", check=False)
+    if init:
+        # A process left from an earlier session still holds its six QNN
+        # contexts; loading again would make twelve and fail the init.
+        adb.shell(f"am force-stop {PACKAGE}")
+        time.sleep(2)
     adb.shell(f"am start -n {PACKAGE}/.MainActivity")
     time.sleep(2)
     if not init:
