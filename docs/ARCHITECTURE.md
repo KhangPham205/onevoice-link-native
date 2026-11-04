@@ -30,7 +30,7 @@ flowchart LR
   Router -->|VI selected| VIMT["VI→EN MarianMT<br/>encoder + decoder / HTP"]
   Router -->|EN selected| ENMT["EN→VI MarianMT<br/>encoder + decoder / HTP"]
   VIMT --> ENTTS["Kokoro EN<br/>whole utterance / CPU"]
-  ENMT --> VITTS["Kokoro VI or Supertonic-3<br/>whole utterance / CPU"]
+  ENMT --> VITTS["VieNeu-TTS Nano VI<br/>(Kokoro VI / Supertonic-3 by flag)<br/>whole utterance / CPU"]
   ENTTS --> Right["Stereo AudioTrack<br/>EN target = right"]
   VITTS --> Left["Stereo AudioTrack<br/>VI target = left"]
   Right --> Buds([Shared TWS pair])
@@ -147,7 +147,11 @@ dualAsrEnOffset=-0.08
 dualAsrPriorWeight=0.15
 kokoroThreads=4
 vadMode=SILERO
-viTtsEngine=KOKORO
+viTtsEngine=VIENEU
+vieneuVoice=minh_quan
+vieneuSteps=16
+vieneuCfg=3.0
+vieneuSeed=1234
 supertonicVoice=F1
 supertonicSteps=5
 supertonicSpeed=1.15
@@ -206,8 +210,9 @@ figures; DSP-private allocations require separate device telemetry.
 
 ## Target-channel output
 
-The CPU TTS (Kokoro, or Supertonic-3 for Vietnamese with
-`viTtsEngine=SUPERTONIC`) produces one continuous mono waveform at 24 kHz;
+The CPU TTS (Kokoro EN; VieNeu-TTS v3 Nano for Vietnamese by default, or
+Kokoro VI / Supertonic-3 with `viTtsEngine=KOKORO|SUPERTONIC`) produces one
+continuous mono waveform at 24 kHz;
 Supertonic's 44.1 kHz output is band-limited resampled and its silence padding
 trimmed in `NpuPipeline.synthesize`. Playback converts it to
 interleaved stereo float PCM and fills the unused channel with zero:

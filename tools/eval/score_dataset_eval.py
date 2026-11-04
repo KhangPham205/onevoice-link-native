@@ -153,6 +153,9 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--skip-comet", action="store_true")
     parser.add_argument("--skip-tts", action="store_true")
+    parser.add_argument("--skip-whisper-floor", action="store_true",
+                        help="skip Whisper on the human source audio (unchanged between "
+                             "runs that differ only in TTS); halves the TTS scoring time")
     parser.add_argument("--comet-gpus", type=int, default=0)
     args = parser.parse_args()
 
@@ -262,8 +265,9 @@ def main() -> int:
                 r["tts_asr"] = transcribe(model, resample_poly(samples, 2, 3),
                                           TARGET_LANG[r["decision"]])
                 # Whisper on the human source audio: the recognizer's own floor.
-                r["source_asr_whisper"] = transcribe(model, read_wav_16k(items[r["id"]].wav),
-                                                     items[r["id"]].source_lang)
+                if not args.skip_whisper_floor:
+                    r["source_asr_whisper"] = transcribe(model, read_wav_16k(items[r["id"]].wav),
+                                                         items[r["id"]].source_lang)
         for truth in ("vi-en", "en-vi"):
             src, tgt = truth.split("-")
             # Grouped by the direction actually rendered, so the TTS voice
@@ -275,7 +279,7 @@ def main() -> int:
                                                      [normalize(r["tts_asr"], tgt) for r in spoken]),
                 "whisper_floor_on_human_source": error_rates(
                     [normalize(r["src_ref"], src) for r in heard],
-                    [normalize(r["source_asr_whisper"], src) for r in heard]),
+                    [normalize(r["source_asr_whisper"], src) for r in heard]) if heard else None,
                 "target_language": tgt,
             }
         metrics["tts_intelligibility"] = intelligibility

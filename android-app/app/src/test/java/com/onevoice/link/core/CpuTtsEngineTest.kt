@@ -8,6 +8,37 @@ class CpuTtsEngineTest {
     fun parsesBuildConfigNames() {
         assertEquals(CpuTtsEngine.KOKORO, CpuTtsEngine.parse("KOKORO"))
         assertEquals(CpuTtsEngine.SUPERTONIC, CpuTtsEngine.parse("SUPERTONIC"))
+        assertEquals(CpuTtsEngine.VIENEU, CpuTtsEngine.parse("VIENEU"))
+    }
+
+    @Test
+    fun onlyKokoroNeedsKokoroAssets() {
+        assertEquals(listOf(CpuTtsEngine.KOKORO), CpuTtsEngine.entries.filter { it.usesKokoroAssets })
+    }
+
+    @Test
+    fun vieneuKeepsAShortTurnAsOneChunk() {
+        val turn = "Cho tôi một chiếc taxi để đưa tôi ra sân bay vào thứ sáu."
+        assertEquals(listOf(turn), VieNeuNanoTts.chunkText(turn))
+        assertEquals(emptyList<String>(), VieNeuNanoTts.chunkText("   "))
+    }
+
+    @Test
+    fun vieneuSplitsLongTextAtSentencesWithinTheTrainingLength() {
+        val sentence = "Cảm ơn vì đã đến và tôi sẽ gửi cho bạn biên bản cuộc họp hôm nay."
+        val text = List(4) { sentence }.joinToString(" ")
+        val chunks = VieNeuNanoTts.chunkText(text)
+        assert(chunks.size >= 2) { "expected a split, got $chunks" }
+        assert(chunks.all { it.length <= 140 }) { chunks.toString() }
+        assertEquals(text.replace(" ", ""), chunks.joinToString("").replace(" ", ""))
+    }
+
+    @Test
+    fun vieneuFallsBackToSpacesForOneRunOnClause() {
+        val text = List(40) { "chữ" }.joinToString(" ")
+        val chunks = VieNeuNanoTts.chunkText(text)
+        assert(chunks.all { it.length <= 140 }) { chunks.toString() }
+        assertEquals(40, chunks.sumOf { it.split(" ").size })
     }
 
     @Test(expected = IllegalArgumentException::class)

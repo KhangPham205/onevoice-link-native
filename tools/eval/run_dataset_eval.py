@@ -39,8 +39,9 @@ from dataset import load_items  # noqa: E402
 PACKAGE = "com.onevoice.link"
 RECEIVER = f"{PACKAGE}/.core.BenchControlReceiver"
 ACTION = "com.onevoice.link.BENCH"
-LOG_TAGS = ("OneVoiceRouting OneVoiceNpu OneVoiceBench OneVoiceBenchCtl "
-            "OneVoiceHalfDuplex OneVoiceQNN OneVoiceCore OneVoiceSession").split()
+LOG_TAGS = ("OneVoiceRouting OneVoiceNpu OneVoiceNpuPipeline OneVoiceBench OneVoiceBenchCtl "
+            "OneVoiceHalfDuplex OneVoiceQNN OneVoiceCore OneVoiceSession "
+            "OneVoiceVieNeu OneVoiceSeaG2p").split()
 
 
 class Adb:

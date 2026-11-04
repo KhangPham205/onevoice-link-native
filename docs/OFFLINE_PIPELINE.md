@@ -7,7 +7,7 @@ learned language classifier.
 | Speaking-headset assignment | ASR | Translation | Speech output |
 |---|---|---|---|
 | Vietnamese | GIPFormer encoder on QNN HTP; RNN-T decoder/joiner on CPU | Marian VI->EN on QNN HTP | whole-utterance Kokoro EN on CPU |
-| English | Zipformer-small encoder on QNN HTP; RNN-T decoder/joiner on CPU | Marian EN->VI on QNN HTP | whole-utterance Kokoro VI on CPU |
+| English | Zipformer-small encoder on QNN HTP; RNN-T decoder/joiner on CPU | Marian EN->VI on QNN HTP | whole-utterance VieNeu-TTS v3 Nano on CPU (Kokoro VI / Supertonic-3 by build flag) |
 | Route missing/ambiguous/unassigned | none | none | none; fail closed |
 
 Each direction retains a cold CPU CTC ASR + Marian fallback bundle. It loads

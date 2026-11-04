@@ -63,14 +63,38 @@ val kokoroThreads = providers.gradleProperty("kokoroThreads").orElse("2").get()
     .toIntOrNull()
     ?.takeIf { it in 1..8 }
     ?: error("kokoroThreads must be an integer in 1..8")
-// Vietnamese target speech (en-vi): KOKORO (espeak-ng vi + aliased tokens) or
-// SUPERTONIC (Supertonic-3 int8, grapheme input). Both are staged on device, so
-// switching is an APK rebuild only.
-val viTtsEngine = providers.gradleProperty("viTtsEngine").orElse("KOKORO").get().also {
-    require(it in setOf("KOKORO", "SUPERTONIC")) {
-        "viTtsEngine must be KOKORO or SUPERTONIC (got '$it')"
+// Vietnamese target speech (en-vi): VIENEU (default; VieNeu-TTS v3 Nano,
+// sea-g2p phonemes; needs models-vieneu staged and libsea_g2p_rs.so packaged),
+// KOKORO (espeak-ng vi + aliased tokens) or SUPERTONIC (Supertonic-3 int8,
+// grapheme input). Switching is an APK rebuild only.
+val viTtsEngine = providers.gradleProperty("viTtsEngine").orElse("VIENEU").get().also {
+    require(it in setOf("KOKORO", "SUPERTONIC", "VIENEU")) {
+        "viTtsEngine must be KOKORO, SUPERTONIC or VIENEU (got '$it')"
     }
 }
+// VieNeu preset voice id as prepare-vieneu-nano.py slugs it (minh_quan, ai_han...).
+val vieneuVoice = providers.gradleProperty("vieneuVoice").orElse("minh_quan").get().also {
+    require(Regex("[a-z_]+").matches(it)) { "vieneuVoice must be a slug like minh_quan (got '$it')" }
+}
+val vieneuSteps = providers.gradleProperty("vieneuSteps").orElse("16").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..32 }
+    ?: error("vieneuSteps must be an integer in 1..32")
+val vieneuCfg = providers.gradleProperty("vieneuCfg").orElse("3.0").get()
+    .toFloatOrNull()
+    ?.takeIf { it in 0f..10f }
+    ?: error("vieneuCfg must be a number in 0..10")
+val vieneuSpeed = providers.gradleProperty("vieneuSpeed").orElse("1.0").get()
+    .toFloatOrNull()
+    ?.takeIf { it in 0.5f..2.0f }
+    ?: error("vieneuSpeed must be a number in 0.5..2.0")
+val vieneuThreads = providers.gradleProperty("vieneuThreads").orElse("4").get()
+    .toIntOrNull()
+    ?.takeIf { it in 1..8 }
+    ?: error("vieneuThreads must be an integer in 1..8")
+val vieneuSeed = providers.gradleProperty("vieneuSeed").orElse("1234").get()
+    .toLongOrNull()
+    ?: error("vieneuSeed must be an integer")
 val supertonicVoice = providers.gradleProperty("supertonicVoice").orElse("F1").get().also {
     require(Regex("[FM][1-5]").matches(it)) {
         "supertonicVoice must be F1..F5 or M1..M5 (got '$it')"
@@ -201,6 +225,12 @@ android {
         buildConfigField("int", "SUPERTONIC_STEPS", supertonicSteps.toString())
         buildConfigField("int", "SUPERTONIC_THREADS", supertonicThreads.toString())
         buildConfigField("float", "SUPERTONIC_SPEED", "${supertonicSpeed}f")
+        buildConfigField("String", "VIENEU_VOICE", "\"$vieneuVoice\"")
+        buildConfigField("int", "VIENEU_STEPS", vieneuSteps.toString())
+        buildConfigField("float", "VIENEU_CFG", "${vieneuCfg}f")
+        buildConfigField("float", "VIENEU_SPEED", "${vieneuSpeed}f")
+        buildConfigField("int", "VIENEU_THREADS", vieneuThreads.toString())
+        buildConfigField("long", "VIENEU_SEED", "${vieneuSeed}L")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -298,6 +328,23 @@ tasks.withType<com.android.build.gradle.tasks.MergeSourceSetFolders>().configure
 }
 tasks.named("preBuild") {
     dependsOn(copyQnnRuntimeLibs, prepareQnnSignedDspAssets)
+}
+
+// libsea_g2p_rs.so is a git-ignored Rust build output. Without it a VIENEU APK
+// still assembles and then fails at the first turn with UnsatisfiedLinkError,
+// so refuse the jniLibs merge instead. Unit tests never merge jniLibs and keep
+// running on machines without the Rust toolchain.
+val seaG2pLib = file("src/main/jniLibs/arm64-v8a/libsea_g2p_rs.so")
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
+    // Locals, so the action captures a String and a File, not the script.
+    val needsSeaG2p = viTtsEngine == "VIENEU"
+    val lib = seaG2pLib
+    doFirst {
+        check(!needsSeaG2p || lib.isFile) {
+            "viTtsEngine=VIENEU needs ${lib.path}: run tools/models/build-sea-g2p-android.sh " +
+                "or build with -PviTtsEngine=KOKORO"
+        }
+    }
 }
 
 dependencies {

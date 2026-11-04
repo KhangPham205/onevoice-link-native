@@ -205,6 +205,19 @@ class NpuEngine(
             put("enScoreOffset", routingConfig.enScoreOffset)
             put("vadMode", vadMode.name)
             put("viTtsEngine", BuildConfig.VI_TTS_ENGINE)
+            when (BuildConfig.VI_TTS_ENGINE) {
+                "SUPERTONIC" -> put(
+                    "viTtsConfig",
+                    "voice=${BuildConfig.SUPERTONIC_VOICE} steps=${BuildConfig.SUPERTONIC_STEPS} " +
+                        "speed=${BuildConfig.SUPERTONIC_SPEED} threads=${BuildConfig.SUPERTONIC_THREADS}",
+                )
+                "VIENEU" -> put(
+                    "viTtsConfig",
+                    "voice=${BuildConfig.VIENEU_VOICE} steps=${BuildConfig.VIENEU_STEPS} " +
+                        "cfg=${BuildConfig.VIENEU_CFG} speed=${BuildConfig.VIENEU_SPEED} " +
+                        "threads=${BuildConfig.VIENEU_THREADS} seed=${BuildConfig.VIENEU_SEED}",
+                )
+            }
             put("kokoroThreads", BuildConfig.KOKORO_THREADS)
             put("audioRoutePreference", audioRoutePreference.name)
         }

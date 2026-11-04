@@ -13,9 +13,10 @@ OneVoice Link is on-device, utterance-bounded speech-to-speech translation
   RNN-T decoder/joiner and whole-utterance Kokoro EN execute on CPU.
 - EN→VI: Parakeet-TDT-CTC-110M (CTC head, sherpa-onnx SM8550 binary,
   UFIXED_16 I/O) and MarianMT execute on Hexagon HTP; greedy CTC decoding and
-  whole-utterance Vietnamese TTS execute on CPU: Kokoro VI by default, or
-  Supertonic-3 with `-PviTtsEngine=SUPERTONIC`. It replaced the LibriSpeech-only
-  Zipformer-small, which failed on Vietnamese-accented English.
+  whole-utterance Vietnamese TTS execute on CPU: VieNeu-TTS v3 Nano by
+  default, or Kokoro VI / Supertonic-3 with `-PviTtsEngine=KOKORO|SUPERTONIC`.
+  Parakeet replaced the LibriSpeech-only Zipformer-small, which failed on
+  Vietnamese-accented English.
 - The default source-language router is dual ASR, not a headset assignment:
   both ASRs score every bounded utterance and the app compares average emitted-
   token log-probability.
@@ -74,7 +75,11 @@ Gradle properties that change runtime behavior:
 -PdualAsrPriorWeight=0.15              # soft turn prior, nats/token (>= margin = hard prior)
 -PkokoroThreads=4                      # ORT threads per Kokoro session (2/4/5 measured)
 -PvadMode=SILERO                       # SILERO (bundled asset) or legacy ENERGY RMS gate
--PviTtsEngine=KOKORO                   # Vietnamese speech: KOKORO or SUPERTONIC (Supertonic-3 int8)
+-PviTtsEngine=VIENEU                   # Vietnamese speech: VIENEU (VieNeu-TTS v3 Nano, default), KOKORO or
+                                       # SUPERTONIC (Supertonic-3 int8). VIENEU needs build-sea-g2p-android.sh
+                                       # (libsea_g2p_rs.so; the jniLibs merge refuses without it) and
+                                       # prepare-vieneu-nano.py (models-vieneu/, staged by push-npu-models.sh)
+-PvieneuVoice=minh_quan -PvieneuSteps=16 -PvieneuCfg=3.0 -PvieneuSeed=1234
 -PsupertonicVoice=F1 -PsupertonicSteps=5 -PsupertonicSpeed=1.15 -PsupertonicThreads=4
 -PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
 -PqnnPdMode=auto                        # auto (default), signed or unsigned
@@ -260,6 +265,15 @@ they are the calibration contract.
   feeds espeak-ng `vi` (tones as digits, đ as ɗ), which it silently dropped.
   `tools/models/kokoro-vi-espeak-tokens.txt` aliases them (round-trip CER
   9.8% → 0.0%). Deploy that table, never the upstream tokens.txt.
+- VieNeu-TTS v3 Nano (default, staged under `en-vi/tts_vieneu/`) is a 48M
+  flow-matching model ported from the `vieneu` 3.8.3 SDK to ONNX Runtime Java
+  (`VieNeuNanoTts`): 16 Euler steps, CFG 3.0, a fixed noise seed so a render
+  is reproducible. Text goes through sea-g2p (Rust, `libsea_g2p_rs.so` behind
+  the `sea_g2p_jni` dlopen shim), which also spells out digits, dates and
+  units. On the 91 EN→VI dataset turns: Whisper round-trip WER 1.8% (Kokoro
+  6.4%, Supertonic 5.3%), first audio p50 3.06 s (4.30 s), PSS on par with
+  Kokoro. Not yet checked: naturalness (MOS) and English names inside
+  Vietnamese sentences, which upstream flags as a Nano weakness. Apache-2.0.
 - Supertonic-3 (`-PviTtsEngine=SUPERTONIC`, staged under `en-vi/tts_supertonic/`)
   reads graphemes, but its `unicode_indexer` only knows NFKD text and
   sherpa-onnx 1.13.4 decomposes just a few Latin-1 accents: precomposed
@@ -272,8 +286,8 @@ they are the calibration contract.
   a word in roughly one sentence in six. Weights are OpenRAIL-M.
 - Both Marian directions execute on HTP. Their repeated logical graph names
   require direction-qualified loaded-context keys.
-- Kokoro is whole-utterance CPU by design to preserve continuous prosody. Do
-  not restore the old fixed-window Full-QNN TTS selector.
+- CPU TTS (Kokoro EN, VieNeu VI) is whole-utterance by design to preserve
+  continuous prosody. Do not restore the old fixed-window Full-QNN TTS selector.
 - With the Bluetooth route selected, a missing/ambiguous communication headset
   fails closed before capture; Auto falls back to the phone route instead. A floor/no-prior/ASR-branch failure fails closed after capture. A
   selected MT failure may take the atomic CPU whole-utterance recovery path.
