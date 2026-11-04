@@ -55,9 +55,9 @@ class MainActivity : ComponentActivity() {
         micGranted = hasMicPermission()
         bluetoothConnectGranted = hasBluetoothConnectPermission()
 
-        // Hybrid is the only user-facing pipeline. The verified Bluetooth mic
-        // route and headset assignment select direction; CPU execution is an
-        // internal degraded path, never a user-selectable mode.
+        // Hybrid is the only user-facing pipeline. Dual-ASR confidence routing
+        // selects the direction per utterance (the audio route picks devices
+        // only); CPU execution is an internal recovery path, never a mode.
         val hybridEngine = NpuEngine(
             applicationContext,
             NpuTtsMode.CPU_WHOLE_UTTERANCE,

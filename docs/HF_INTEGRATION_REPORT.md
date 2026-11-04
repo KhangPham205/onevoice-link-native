@@ -1,8 +1,19 @@
 # Báo cáo tích hợp: chạy thử cascade S2ST bằng model HuggingFace trên máy ảo
 
+> [!IMPORTANT]
+> **Báo cáo lịch sử, không mô tả app hiện tại.** App hiện chỉ build `arm64-v8a`
+> và chỉ có một backend Hybrid (QNN trên Hexagon v73, SM8550): không còn chọn
+> backend, không còn nút đổi chiều dịch, không chạy được trên emulator.
+> `QnnEngineBackend`, `BackendSelector` và `DirectionToggle` đã bị xoá;
+> `HfEngineBackend` còn trong mã nhưng không được khởi tạo ở đâu. Chiều dịch do
+> dual-ASR router chọn cho từng câu. Các model HF trong báo cáo này nay là tài
+> nguyên **khôi phục CPU** (ASR + Marian, chỉ nạp khi Marian trên HTP lỗi) và
+> Kokoro EN/VI; Kokoro EN vẫn là giọng đích tiếng Anh, còn giọng Việt mặc định là
+> VieNeu-TTS v3 Nano. Kiến trúc hiện tại: [ARCHITECTURE.md](ARCHITECTURE.md);
+> cách tạo và đẩy các model này: [EMULATOR_TESTING.md](EMULATOR_TESTING.md).
+>
 > Tài liệu này mô tả **những gì đã làm** để tích hợp và chạy thử 3 model HuggingFace
-> trên Android Studio emulator (chưa có Samsung S23/NPU để test đường QNN).
-> Hướng dẫn **cách chạy** từng bước nằm ở [EMULATOR_TESTING.md](EMULATOR_TESTING.md).
+> trên Android Studio emulator (lúc đó chưa có Samsung S23/NPU để test đường QNN).
 
 ## 1. Mục tiêu & ràng buộc
 
@@ -109,7 +120,7 @@ Cả hai script convert đã tự ghi metadata này (parakeet có thêm `--meta-
 | 6 | `adb push /sdcard/...` đẩy sai đích trong Git Bash | MSYS path conversion dịch `/sdcard` thành path Windows | `MSYS_NO_PATHCONV=1` + local path kiểu `D:/...` (script PowerShell không bị) |
 | 7 | Dialog "app isn't 16 KB compatible" trên emulator | Image `sdk_gphone16k` (page 16 KB) + prebuilt x86_64 upstream chưa align | `android:pageSizeCompat="enabled"` trong manifest |
 
-## 7. Trạng thái & giới hạn hiện tại
+## 7. Trạng thái & giới hạn tại thời điểm báo cáo
 
 - ✅ APK build xanh 2 ABI (222 MB); đường `.bin`/QNN không đổi hành vi trên arm64.
 - ✅ `models-hf/` đủ 3 model đã convert + metadata, đã push lên emulator.

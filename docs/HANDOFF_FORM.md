@@ -4,12 +4,15 @@
 > model thử nghiệm và model đã bị thay thế. Dấu hiệu “deploy/main” trong tài liệu
 > bàn giao cũ không còn quyết định runtime hiện tại.
 >
-> **Production hiện tại chỉ dùng sáu QNN context:** mỗi chiều có ASR encoder,
-> Marian encoder và Marian decoder. RNN-T decoder/joiner và Kokoro chạy CPU.
-> Routing hướng dịch nằm ngoài QNN model manifest và hiện chỉ được cấp bởi
-> headset identity của microphone Bluetooth đã xác thực cùng assignment VI/EN.
-> Không còn model classifier. Auracast tự nó là downlink và không xác định người
-> đang nói.
+> **Production hiện tại chỉ dùng sáu QNN context:** mỗi chiều có ASR, Marian
+> encoder và Marian decoder. RNN-T decoder/joiner của GIPFormer VI, greedy CTC
+> của Parakeet EN và toàn bộ TTS chạy CPU.
+> Hướng dịch nằm ngoài QNN model manifest: với mỗi utterance, **dual-ASR** cho cả
+> GIPFormer VI và Parakeet EN chấm điểm cùng một đoạn PCM rồi so log-prob trung
+> bình mỗi token (floor, margin, offset EN, prior mềm). Headset identity và
+> assignment VI/EN trong Settings không quyết định hướng. SpeechFlow LID
+> (`shared/speechflow_*`) chỉ còn cho bản build A/B `-ProutingMode=LID`, không
+> phải QNN context. Auracast tự nó là downlink và không xác định người đang nói.
 
 ## 1. Nguồn chân lý và target
 
@@ -30,11 +33,13 @@ $QNN_SDK/bin/x86_64-linux-clang/qnn-context-binary-utility \
 
 Thông tin chung của **sáu context production**:
 
-- QAIRT build ID: `v2.45.0.260326154327`.
+- QAIRT build ID: `v2.45.0.260326154327`, trừ Parakeet EN (build v2.40, nạp
+  được trên runtime 2.47).
 - `socModel`: `43` = SM8550, Snapdragon 8 Gen 2, Hexagon HTP v73.
 - Runtime: QNN context binary AOT; không chạy trên CPU x86 hoặc đời HTP khác.
-- Tất cả tensor QNN production bên dưới là `FLOAT_32` hoặc `INT_32`; không có
-  scale/offset quantization.
+- Tensor của năm context GIPFormer/Marian là `FLOAT_32` hoặc `INT_32`, không có
+  quantization. Riêng Parakeet EN dùng I/O `UFIXED_POINT_16`; scale/offset được
+  generator đọc từ binary vào `npu_manifest.json`.
 - Graph name phải dùng đúng từng ký tự. Không suy ra graph name từ tên file.
 
 ## 2. Production Hybrid — sáu QNN context chính xác
@@ -58,7 +63,7 @@ Hai Marian bundle lặp graph name. Vì vậy runtime key bắt buộc có prefi
 > bản `-10s` đầu CTC). Zipformer-small EN cũ chỉ huấn luyện trên LibriSpeech
 > nên nhận rất kém tiếng Anh giọng Việt.
 
-Parakeet EN (graph `model`, QAIRT build v2.40, nạp được trên runtime 2.45):
+Parakeet EN (graph `model`, QAIRT build v2.40, nạp được trên runtime 2.47):
 
 ```text
 INPUT   x          UFIXED_POINT_16 [1,1000,80]  scale 1.2464652536e-4 offset -31906
@@ -93,7 +98,9 @@ OUTPUT
 
 ### 2.2 Host RNN-T decoder/joiner — contract chính xác
 
-Phần này chạy ONNX Runtime trên CPU, không phải QNN context.
+Phần này chạy ONNX Runtime trên CPU, không phải QNN context. Production chỉ còn
+GIPFormer VI dùng RNN-T; dòng Zipformer EN dưới đây là lịch sử (EN nay là
+Parakeet CTC, không có decoder/joiner).
 
 Contract chung của prediction network:
 
@@ -173,21 +180,43 @@ khi argmax và dừng ở `eos_token_id=0`.
 EN→VI có `target_prefix_token_id=3` từ tokenizer config; token này được thêm ở
 đầu chuỗi source trước SentencePiece. VI→EN không có target prefix.
 
-## 3. TTS production — whole-utterance CPU Kokoro
+## 3. TTS production — whole-utterance trên CPU
 
-QNN Kokoro fixed-window trong catalog **không phải production path**. Hybrid gọi
-sherpa-onnx `OfflineTts` một lần cho toàn bộ câu để giữ prosody liên tục và tránh
-đường nối bucket gây giật/ngắt âm.
+QNN Kokoro fixed-window trong catalog **không phải production path**. Hybrid
+tổng hợp một lần cho toàn bộ câu để giữ prosody liên tục và tránh đường nối
+bucket gây giật/ngắt âm.
+
+| Ngôn ngữ output | Engine | Cách chọn |
+| :-- | :-- | :-- |
+| EN (VI→EN) | Kokoro EN, sherpa-onnx `OfflineTts` | luôn dùng |
+| VI (EN→VI) | VieNeu-TTS v3 Nano, ONNX Runtime | mặc định (`viTtsEngine=VIENEU`) |
+| VI (EN→VI) | Kokoro VI, sherpa-onnx | `-PviTtsEngine=KOKORO` |
+| VI (EN→VI) | Supertonic-3 int8, sherpa-onnx | `-PviTtsEngine=SUPERTONIC` |
+
+Cả ba engine tiếng Việt đều được `push-npu-models.sh` đẩy lên máy, nên đổi engine
+chỉ cần build lại APK. Mọi engine ra PCM mono 24 kHz (Supertonic được resample),
+runtime kiểm tra waveform hữu hạn rồi scale toàn câu nếu peak vượt 0.90.
+
+Model Kokoro (dùng cho EN, và cho VI khi chọn `KOKORO`):
 
 | Ngôn ngữ output | Model CPU | Kích thước | Voice asset hiện có |
 | :-- | :-- | --: | :-- |
 | EN (VI→EN) | `models-hf/tts-en/model.onnx` | 345,555,491 B | `voices.bin` 5,755,904 B, 11 speaker IDs |
 | VI (EN→VI) | `models-hf/tts-vi/model.onnx` | 325,732,252 B | `voices.bin` 522,240 B, một voice `default` |
 
-Hai model khai sample rate 24 kHz. Runtime kiểm tra sample rate, toàn bộ waveform
-phải hữu hạn, rồi scale toàn câu nếu peak vượt 0.90 trước khi phát PCM float.
+**VieNeu-TTS v3 Nano** (`pnnbao-ump/VieNeu-TTS-v3-Nano`, Apache-2.0, 48M tham
+số, flow matching) nằm ở `en-vi/tts_vieneu/`: bốn graph ONNX
+(`text_encoder`, `duration_predictor`, `vector_estimator`, `codec_decoder`),
+`nano.json`, `null_spk.bin`, `null_style.bin`, `voices.bin` và từ điển G2P
+`sea_g2p.bin`. Chuẩn hoá văn bản + G2P tiếng Việt do `libsea_g2p_rs.so` (Rust,
+`tools/models/build-sea-g2p-android.sh`) đảm nhận; thư mục model do
+`tools/models/prepare-vieneu-nano.py` tạo. Mặc định: voice `minh_quan`, 16 bước
+Euler, CFG 3.0, seed 1234 (đầu ra lặp lại được). Trên 91 lượt EN→VI của bộ dữ
+liệu, Whisper round-trip WER 1.8% (Kokoro 6.4%, Supertonic 5.3%), first audio
+p50 3.06 s (Kokoro 4.30 s, Supertonic 4.22 s), bộ nhớ ngang Kokoro. MOS và tên
+riêng tiếng Anh trong câu tiếng Việt chưa được kiểm tra.
 
-**Token table VI phải là `tools/models/kokoro-vi-espeak-tokens.txt`, không phải
+**Token table Kokoro VI phải là `tools/models/kokoro-vi-espeak-tokens.txt`, không phải
 `tokens.txt` gốc.** Kokoro-Vietnamese được huấn luyện với G2P `vig2p` (thanh
 điệu là mũi tên `→ ↘ ↗ ↓`), còn sherpa-onnx phiên âm bằng espeak-ng `vi` (thanh
 điệu là chữ số, đ là `ɗ`). Ký hiệu lạ bị sherpa bỏ âm thầm, nên mọi thanh điệu
@@ -195,7 +224,7 @@ biến mất. Bảng đã vá thêm alias chữ số → mũi tên, `ɗ → d`, 
 vòng TTS → GIPFormer trên 6 câu: CER 9.8% → 0.0%. Còn thiếu: ngã/nặng mất `ʔ`,
 cặp s/x, tr/ch, gi/d chưa phân biệt; muốn triệt để phải dùng G2P `vig2p`.
 
-**Phương án thay thế cho tiếng Việt: Supertonic-3** (`-PviTtsEngine=SUPERTONIC`).
+**Phương án thay thế thứ hai cho tiếng Việt: Supertonic-3** (`-PviTtsEngine=SUPERTONIC`).
 Bản int8 của sherpa-onnx (`sherpa-onnx-supertonic-3-tts-int8-2026-05-11`, code MIT,
 weights OpenRAIL-M) được đẩy vào `en-vi/tts_supertonic/`. Model đọc thẳng chữ
 viết (không qua espeak), ra 44.1 kHz; runtime resample về 24 kHz và cắt khoảng
@@ -256,8 +285,8 @@ x         FLOAT_32 [1,1000,80]
 output_0  FLOAT_32 [1,248,512]
 ```
 
-Bundle cũ này không có prediction network/joiner. Nó khác với cả GIPFormer VI
-production và Zipformer-small EN production.
+Bundle cũ này không có prediction network/joiner. Nó khác với GIPFormer VI
+production và với Zipformer-small EN (cũng đã bị thay).
 
 ### 4.4 NLLB-200 distilled 600M
 
@@ -314,29 +343,27 @@ Lưu ý:
 
 ```text
 <filesDir>/models/npu/
+├── shared/
+│   └── speechflow_{langid.tflite,labels.json,contract.json}   (chỉ LID A/B)
 ├── vi-en/
 │   ├── asr_gipformer_encoder.bin
 │   ├── asr_gipformer_{decoder,joiner}.onnx
-│   ├── asr_gipformer_tokens.txt
+│   ├── asr_gipformer_{tokens.txt,bpe.model,config.json}
 │   ├── mt_{encoder,decoder}.bin
-│   ├── mt_source.spm
-│   ├── mt_vocab.json
-│   ├── mt_config.json
-│   ├── tts_cpu.onnx
-│   ├── tts_tokens.txt
-│   ├── tts_voices.bin
-│   └── fallback/...
+│   ├── mt_{source,target}.spm, mt_vocab.json, mt_config.json
+│   ├── tts_cpu.onnx, tts_tokens.txt, tts_voices.bin        (Kokoro EN)
+│   ├── espeak-ng-data/
+│   └── fallback/{asr,mt}/...
 └── en-vi/
     ├── asr_parakeet_ctc.bin
     ├── asr_parakeet_tokens.txt
     ├── mt_{encoder,decoder}.bin
-    ├── mt_source.spm
-    ├── mt_vocab.json
-    ├── mt_config.json
-    ├── tts_cpu.onnx
-    ├── tts_tokens.txt
-    ├── tts_voices.bin
-    └── fallback/...
+    ├── mt_{source,target}.spm, mt_vocab.json, mt_config.json
+    ├── tts_vieneu/          (VieNeu-TTS v3 Nano, mặc định)
+    ├── tts_supertonic/      (Supertonic-3, tuỳ chọn)
+    ├── tts_cpu.onnx, tts_tokens.txt, tts_voices.bin        (Kokoro VI, tuỳ chọn)
+    ├── espeak-ng-data/
+    └── fallback/{asr,mt}/...
 ```
 
 `tools/models/push-npu-models.sh auto <serial>` là mapping triển khai thực tế.

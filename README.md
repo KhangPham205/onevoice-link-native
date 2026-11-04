@@ -1,133 +1,139 @@
 # OneVoice Link
 
-> **Offline, on-device Speech-to-Speech Translation (S2ST) for Android**, with CPU, Qualcomm® QNN/Hexagon™ and hybrid execution paths.
+Offline Vietnamese ↔ English speech-to-speech translation on a Snapdragon 8 Gen 2
+phone. Two people take turns speaking into one phone (or one shared Bluetooth
+earbud pair). The app works out which language each sentence is in, translates
+it and speaks the result. Nothing leaves the device: the APK declares no
+`INTERNET` permission.
 
-**Submitted to the OneVoice AI Challenge 2026.**
+Submitted to the OneVoice AI Challenge 2026.
 
-OneVoice Link turns a Snapdragon® phone into an offline interpreter. The complete path is `AudioRecord` → energy VAD → NeMo CTC ASR → MarianMT → Kokoro TTS → `AudioTrack`; it runs locally without network or cloud. Hybrid mode is the VI→EN default: ASR and translation execute on Hexagon HTP, while Kokoro renders the complete translated sentence on CPU for smooth speech.
+## How it works
 
----
+Each sentence is cut by voice activity detection (Silero, at most 10 s), then:
 
-## Runtime paths
+| Step | Vietnamese speaker (VI→EN) | English speaker (EN→VI) | Runs on |
+|---|---|---|---|
+| Speech recognition | GIPFormer (RNN-T) | Parakeet-TDT-CTC-110M | Hexagon NPU (decoder on CPU) |
+| Language routing | both recognisers score the sentence; the more confident one wins | | CPU |
+| Translation | MarianMT vi→en | MarianMT en→vi | Hexagon NPU |
+| Speech synthesis | Kokoro EN | VieNeu-TTS v3 Nano | CPU, whole sentence |
 
-| Path | Current capability |
+Audio is strictly half-duplex: the mic is closed while the translation plays.
+Audio can use the phone's mic and loudspeaker or a Bluetooth headset. That
+choice only picks devices; it never sets the translation direction.
+
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Measured on device
+
+These results come from the organisers' 200-sentence dataset on an SM8550 phone in
+airplane mode
+([full report, Vietnamese](docs/proposal/evidence/P3_ket-qua-do_2026-11-02.md)):
+
+| Metric | VI→EN | EN→VI |
+|---|---|---|
+| Language routed correctly | 100 / 100 | 91 / 100 |
+| ASR word error rate | 1.3 % | 11.5 % |
+| Translation COMET | 0.789 | 0.761 |
+| Time to first audio (p50, from end of sentence detection) | 3.4 s | 3.06 s (VieNeu) |
+| Peak app memory (RSS) | 1.7 GB | |
+
+Speech detection also waits 1 s of silence before closing a sentence, so the
+listener waits 1 s longer than these figures.
+
+Known weak spots:
+- English sentences longer than 10 s are rejected.
+- An English sentence can be misrouted when the Vietnamese recogniser outputs a
+  single confident token.
+- Routing on real microphone recordings needs more labelled data.
+
+## Quick install
+
+**You need:**
+- An arm64 Snapdragon 8 Gen 2 phone (`SM8550`, Hexagon v73) with USB debugging enabled.
+- Linux with `adb`, JDK 21, Android SDK 36 and NDK 27.2.12479018.
+- Rust (`rustup target add aarch64-linux-android`).
+- Python 3 with `numpy`.
+- Network access for step 1. `ANDROID_NDK_HOME` defaults to
+  `~/Android/Sdk/ndk/27.2.12479018`.
+
+**Inputs not in git.** They are large or license-restricted; get them from the team:
+
+| Path | Contents |
 |---|---|
-| **Hybrid (default)** | Complete VI→EN: QNN ASR + MarianMT on HTP, followed by whole-utterance CPU Kokoro. This is the recommended listening path. |
-| **Offline CPU** | Complete VI→EN / EN→VI ASR → MT → TTS reference pipeline. Only one direction is resident; queues and audio buffers are bounded. |
-| **Full QNN** | Complete six-stage VI→EN execution on HTP. Fixed-window Kokoro decoding requires host bucketing and currently has audible seam/continuity limitations. |
+| `native-core/third_party/qnn_sdk/` | Qualcomm AI Runtime (QAIRT) SDK 2.47 (the context binaries were built with 2.45 and 2.40 and load on it) |
+| `android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar` | from the k2-fsa/sherpa-onnx v1.13.4 release |
+| `onevoice-npu-bins/` | QNN context binaries for SM8550 |
+| `models-hf/`, `models-npu-generated/` | tokenizers, Kokoro, eSpeak data, CPU recovery models, LID A/B files |
 
----
+**Then:**
 
-## Architecture at a glance
+```bash
+# 1. Vietnamese voice: sea-g2p for arm64 + VieNeu Nano weights (~345 MB)
+tools/models/build-sea-g2p-android.sh
+python3 tools/models/prepare-vieneu-nano.py
 
-```mermaid
-flowchart LR
-  UI["Compose dashboard"] --> Hybrid["Hybrid backend (default)"]
-  UI --> HF["Offline CPU backend"]
-  UI --> QNN["Full-QNN backend"]
-  Mic([Mic]) --> HF
-  Mic --> Hybrid
-  Mic --> QNN
-  HF --> ASR["sherpa NeMo CTC"] --> MT["ORT MarianMT"] --> TTS["sherpa Kokoro"] --> Speaker([Speaker])
-  Hybrid --> JNI["OneVoiceNative / C++"] --> HTP["QNN ASR + MT contexts"]
-  HTP --> CPUK["whole-utterance CPU Kokoro"] --> Speaker
-  QNN --> JNI6["host tensor glue"] --> HTP6["6 QNN contexts on HTP"] --> Speaker
+# 2. Build and install the debug APK (debuggable is required to stage models)
+cd android-app
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew :app:installDebug
+cd ..
+
+# 3. Copy all models (~2.7 GB) into the app's private storage; re-runs skip
+#    files whose sha256 already matches
+tools/models/push-npu-models.sh auto <adb-serial>
 ```
 
-Full details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+**On the phone:**
+1. Open **OneVoice Link** and allow the microphone.
+2. Pick **Phone** (one shared handset) or **Bluetooth** (earbuds).
+3. Tap **Load Hybrid Pipeline** and wait for the engine status **Ready**.
+4. Tap **Start Translating** and speak in turns.
 
----
+**Live demo & metrics** (side menu) shows the offline status, memory and per-turn
+timings for recording. Its session log can be exported as JSONL.
 
-## Repository layout
+Builds stop with an explanation if a required input is missing. For build
+troubleshooting see [docs/BUILD.md](docs/BUILD.md); for model staging see
+[docs/NPU_DEPLOY.md](docs/NPU_DEPLOY.md).
 
-```
-onevoice-link-native/
-|-- android-app/            Jetpack Compose app (Kotlin DSL, Gradle version catalog)
-|   `-- app/src/main/
-|       |-- java/com/onevoice/link/
-|       |   |-- MainActivity.kt          M3 dashboard + runtime permissions + lifecycle
-|       |   |-- core/OneVoiceNative.kt   JNI bridge to the native core
-|       |   |-- core/NpuEngine.kt        per-stage cascade loading + status
-|       |   |-- core/NpuManifest.kt      parses assets/npu_manifest.json
-|       |   `-- hf/                      runnable ASR / MarianMT / Kokoro backend
-|       |-- assets/npu_manifest.json     stage -> .bin + exact QNN graph name
-|       |-- jniLibs/arm64-v8a/           extra prebuilt libs (QNN staged here by Gradle)
-|       `-- AndroidManifest.xml          RECORD_AUDIO + Bluetooth (P2P) permissions
-|-- native-core/            C++ realtime engine -> libonevoice_core.so
-|   |-- CMakeLists.txt
-|   |-- include/            audio_engine.h, ring_buffer.h, qnn_runtime.h
-|   |-- src/                main_jni.cpp, audio_engine.cpp, ring_buffer.cpp, qnn_runtime.cpp
-|   `-- third_party/
-|       |-- oboe/           Google Oboe (committed, built from source)
-|       `-- qnn_sdk/        Qualcomm QNN SDK (VENDORED LOCALLY, NOT committed; see below)
-|-- onevoice-npu-bins/      QNN context binaries from the model team (~5.9 GB, NOT committed)
-|-- models-hf/              converted offline artifacts (NOT committed)
-|-- tools/models/           push-hf-models.sh, push-npu-models.sh, conversion/manifest tools
-`-- docs/                   Architecture, build, JNI API, QNN integration, NPU deploy
+## Build options
+
+Runtime policy is baked into the APK from `android-app/gradle.properties`; override per build:
+
+```bash
+./gradlew :app:assembleDebug -PviTtsEngine=KOKORO   # VI voice: VIENEU (default), KOKORO, SUPERTONIC
+./gradlew :app:assembleDebug -ProutingMode=LID      # SpeechFlow language-ID A/B instead of dual ASR
+./gradlew :app:testDebugUnitTest                    # unit tests (no device, no Rust needed)
 ```
 
-> **Deploying to a phone:** Hybrid needs the QNN ASR/MT artifacts plus a Kokoro
-> CPU model; `push-npu-models.sh` stages the complete VI→EN bundle. Use
-> `push-hf-models.sh` for the bidirectional CPU reference path. See
-> [`docs/NPU_DEPLOY.md`](docs/NPU_DEPLOY.md).
+The full list is in [CLAUDE.md](CLAUDE.md#build-and-deploy).
 
----
+## Repository
 
-## Quick start
-
-**Prerequisites:** Android Studio (or CLI) with SDK Platform **36**, NDK **26–29**, CMake **3.22.1**, and a JDK **17+**. Target device: an **arm64-v8a Snapdragon** phone with a Hexagon NPU.
-
-1. **Vendor the QNN SDK.** The Qualcomm AI Runtime SDK is *not* committed (large, license-restricted). Extract it so that these paths exist:
-   ```
-   native-core/third_party/qnn_sdk/include/QNN/
-   native-core/third_party/qnn_sdk/lib/aarch64-android/
-   ```
-   Without it, the core still compiles in **stub mode** (via `__has_include` guards) so wiring can be exercised on any toolchain.
-
-2. **Build the debug APK:**
-   ```bash
-   cd android-app
-   ./gradlew :app:assembleDebug
-   ```
-
-3. **Install & run:**
-   ```bash
-   ./gradlew :app:installDebug
-   cd ..
-   tools/models/push-npu-models.sh vi-en R5CW72TP4EP
-   ```
-   Grant microphone permission, leave **Hybrid** selected, tap **Load**, then **Start Translating**.
-
-See [`docs/BUILD.md`](docs/BUILD.md) for the full toolchain matrix, build flags, and troubleshooting.
-
----
+```
+android-app/    Kotlin/Compose app: pipeline, routing, half-duplex audio, UI
+native-core/    C++ JNI: QNN runtime loader, ASR frontends, sea-g2p shim
+tools/models/   model conversion, staging and push scripts
+tools/eval/     dataset evaluation harness (WER, BLEU, COMET, latency)
+docs/           architecture, build, deployment, evidence
+```
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Threading model, data flow, latency budget, the lock-free ring buffer. |
-| [docs/BUILD.md](docs/BUILD.md) | Toolchain, QNN vendoring, Gradle↔CMake binding, compiler flags, troubleshooting. |
-| [docs/JNI_API.md](docs/JNI_API.md) | The native ABI contract and the Kotlin bridge (`OneVoiceNative`). |
-| [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md) | QNN SDK layout, packaging `.so` into the APK, and the runtime `dlopen` chain. |
-| [docs/MODEL_HANDOFF.md](docs/MODEL_HANDOFF.md) | Contract for the AI/model team: everything to deliver alongside the `.bin`. |
-| [docs/OFFLINE_PIPELINE.md](docs/OFFLINE_PIPELINE.md) | Runnable pipeline, per-direction model layout and safe deployment. |
-| [QNN 0x36b1 incident](docs/incidents/2026-08-08-qnn-0x36b1-fastrpc-linker-policy.md) | FastRPC linker-policy root cause, fix and testsig/signing lessons. |
-
----
-
-## Project status
-
-- ✅ **Builds green** — `./gradlew :app:assembleDebug` produces a signed-debug APK for `arm64-v8a`.
-- ✅ **Runnable offline S2ST** — Hybrid VI→EN and CPU VI→EN / EN→VI produce transcript, translation, Kokoro waveform and replay entirely on device.
-- ✅ **QNN execution** — unsigned-PD FastRPC and `graphExecute` are working on SM8550/v73. Full QNN runs ASR, MT, Kokoro encoder, W8A8 prosody and decoder as six HTP contexts; its frontend uses exact eSpeak tokenization through a tiny bridge model.
-- ✅ **Hybrid default** — QNN ASR/MT feed whole-utterance CPU Kokoro, avoiding the audible seams of the fixed 25-frame QNN decoder.
-- 🚧 **Full-QNN TTS quality** — for the same test sentence, synthesis took about 1.2 s over three QNN buckets versus about 2.7 s in Hybrid. Playback delivered all frames, but QNN bucket seams remain less smooth than continuous CPU Kokoro.
-
-See the roadmap notes in [docs/QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md#status--roadmap).
-
----
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Pipeline, dual-ASR routing, half-duplex audio, threading |
+| [BUILD.md](docs/BUILD.md) | Toolchain, out-of-repo inputs, Gradle flags, troubleshooting |
+| [NPU_DEPLOY.md](docs/NPU_DEPLOY.md) | Model layout on the device and how it is staged |
+| [OFFLINE_PIPELINE.md](docs/OFFLINE_PIPELINE.md) | Runtime behaviour per direction and failure handling |
+| [QNN_INTEGRATION.md](docs/QNN_INTEGRATION.md) | QNN loading order, contexts, DSP skeleton |
+| [JNI_API.md](docs/JNI_API.md) | Kotlin ↔ C++ boundary |
+| [tools/eval/README.md](tools/eval/README.md) | Re-running the dataset measurements |
+| [Evidence report](docs/proposal/evidence/P3_ket-qua-do_2026-11-02.md) | Round 3 measurements (Vietnamese) |
 
 ## License
 
-See [LICENSE](LICENSE). Google Oboe is Apache-2.0. The Qualcomm QNN / AI Runtime SDK is subject to Qualcomm's own license and is not redistributed in this repository.
+See [LICENSE](LICENSE). VieNeu-TTS and sea-g2p are Apache-2.0, and Kokoro is
+Apache-2.0. Supertonic-3 weights (optional) are OpenRAIL-M. The Qualcomm AI Runtime
+SDK is under Qualcomm's license and is not redistributed here.

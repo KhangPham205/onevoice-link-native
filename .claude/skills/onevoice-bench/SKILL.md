@@ -11,22 +11,27 @@ against the acceptance gates.
 
 ## Before anything else: two facts that shape every number
 
-**TTFA equals total compute.** Kokoro synthesises the whole utterance in one
-call (`NpuPipeline.synthesize`), and playback only starts once the full waveform
-exists. Nothing reaches the speaker earlier, so there is no meaningful "first
-chunk" time:
+**TTFA equals total compute.** The CPU TTS (Kokoro EN; VieNeu-TTS v3 Nano for
+Vietnamese by default, or Kokoro VI / Supertonic-3 by `-PviTtsEngine`)
+synthesises the whole utterance in one call (`NpuPipeline.synthesize`), and
+playback only starts once the full waveform exists. Nothing reaches the speaker
+earlier, so there is no meaningful "first chunk" time:
 
 ```
-ttfa_ms = lid + asr + mt + tts
+ttfa_ms = asr + mt + tts
 e2e_ms  = ttfa_ms + duration_of_the_synthesised_audio
 ```
 
-Measured on R5CW72TP4EP, TTS is **~86% of TTFA**. Any latency work that does not
-touch TTS is rounding error.
+Measured on R5CW72TP4EP, TTS is **~80–86% of TTFA**. Any latency work that does
+not touch TTS is rounding error.
 
-**LID is on the critical path.** SpeechFlow runs synchronously before ASR
-(`NpuEngine.pipelineLoop`), so `lid_ms` is part of what a speaker waits for.
-It costs 16–45 ms, which is small — but it is not free and it is not parallel.
+**Routing is on the critical path.** In a routed run (`--routing auto`, the
+default) both ASR branches run before MT, so `asr_ms` is the shared frontend
+plus the dual-ASR wall clock, not one encoder. QNN `graphExecute` is serialized,
+so the two HTP encoders never overlap; only one branch's CPU decode overlaps the
+other's encoder. In a `-ProutingMode=LID` build SpeechFlow instead runs
+synchronously before ASR (16–45 ms) and its time is **not** inside `asr_ms`; it
+is logged as `lid.latencyMs` in the `OneVoiceRouting` row.
 
 ## Gate source
 
@@ -83,8 +88,10 @@ python3 .claude/skills/onevoice-bench/scripts/report.py bench-results \
   --out bench-results/report.md
 ```
 
-Useful flags: `--iterations N`, `--direction vi-en|en-vi|both`,
-`--power-mode burst|sustained_high_performance|balanced`,
+Useful flags: `--iterations N`, `--direction vi-en|en-vi|both` (which fixtures
+to feed; both directions stay resident either way),
+`--routing auto|explicit` (production router, or force the fixture language's
+branch), `--power-mode burst|sustained_high_performance|balanced`,
 `--no-profile-cohort` (faster, but forfeits G3 evidence).
 
 ### Why two cohorts
@@ -111,8 +118,9 @@ cohort via `QnnHtpPerfInfrastructure`.
 Per utterance (`bench.csv`): stage timings, `ttfa_ms`, `e2e_ms`, and the
 explanatory variables without which those timings cannot be compared —
 `mt_output_tokens` (the Marian decoder is autoregressive), `tts_output_audio_s`
-(Kokoro cost scales with audio produced), `speech_duration_s`,
-`forced_boundary`, `lid_decision`, `execution_path`.
+(TTS cost scales with audio produced), `speech_duration_s`,
+`forced_boundary`, `route_source` (the routing reason: `explicit`, `margin`,
+`soft_margin`, `prior`, `lid`), `execution_path`.
 
 `hangover_ms` (1000) and `echo_guard_ms` (300) are reported **beside** e2e, not
 inside it. They are fixed VAD policy; folding them in would make a genuine model
@@ -219,22 +227,28 @@ the capture loop hands the inference worker.
 | `en_synth_5.7s.f32` | English | 5.73 s | on-device Kokoro EN |
 | `en_synth_7.9s.f32` | English | 7.90 s | on-device Kokoro EN |
 
-All six are routed by LID with confidence 1.0000, so a rejected utterance in a
-run signals a regression, not a weak fixture. Regenerate with the `synth`
-command (see `BenchControlReceiver`) only if a model changes — fixtures must
-stay byte-identical across runs or the percentiles are not comparable.
+All six were verified with SpeechFlow LID at confidence 1.0000 when created. A
+routed run checks each decision against the language in the filename and
+reports misroutes; a misroute or rejected utterance signals a regression, not a
+weak fixture. Regenerate with the `synth` command (see `BenchControlReceiver`;
+it uses the installed APK's TTS, so new VI fixtures would come from VieNeu, not
+Kokoro VI) only if a model changes — fixtures must stay byte-identical across
+runs or the percentiles are not comparable.
 
 They are clean synthetic speech. They establish latency and placement; they say
 nothing about accuracy or about the 95 dB industrial environment.
 
 ## Memory pressure distorts latency — check this before blaming a model
 
-Both branches stay resident: two Kokoro sessions (EN 330 MB + VI 311 MB), two
-transducer decoder/joiner pairs, the LID graph, and six QNN contexts. Measured
-on R5CW72TP4EP that reaches **PSS ~1.3 GB with system headroom at 13–17%**, and
-the kernel starts paging.
+Both directions are always resident: six QNN contexts, the VI RNN-T
+decoder/joiner, Kokoro EN, the Vietnamese TTS engine (VieNeu by default) and,
+only in LID builds, SpeechFlow. On the 2026-11-02 dataset run that measured
+PSS ~1.6 GB, peak RSS ~1.7 GB, with ~25% system headroom
+(`docs/proposal/evidence/P3_ket-qua-do_2026-11-02.md`).
 
-The symptom is a TTS RTF that looks model-specific but is not:
+An earlier build (two Kokoro sessions, two transducer pairs, LID resident)
+reached system headroom of 13–17%, and the kernel started paging. The symptom
+was a TTS RTF that looked model-specific but was not:
 
 | Where | Model | RTF |
 |---|---|---|
@@ -257,12 +271,12 @@ every inference. Whichever branch ran least recently pays for it.
 Before concluding anything about a model, sample `/proc/<pid>/stat` field 12
 (`majflt`) and `VmSwap`. If majflt is climbing across a run, the latency numbers
 are measuring paging, not compute — and G4/G5 failing is the cause, not a
-separate finding. Loading a single direction (`--direction vi-en`) removes the
-pressure and isolates model cost.
+separate finding. `--direction` only filters fixtures and does not unload the
+other direction, so it cannot relieve the pressure.
 
 ## Interpreting a failure
 
-- **G1 fails** — look at `tts_ms` first; it dominates. Streaming Kokoro per
+- **G1 fails** — look at `tts_ms` first; it dominates. Streaming TTS per
   sentence is the structural fix, at the cost of the prosody continuity that
   whole-utterance synthesis buys.
 - **G3 fails on one stage** — that stage silently fell back to CPU. Check

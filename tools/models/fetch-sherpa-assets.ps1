@@ -4,7 +4,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -File tools/models/fetch-sherpa-assets.ps1
 #
-# 1) sherpa-onnx Android AAR  -> android-app/app/libs/sherpa-onnx-1.13.4.aar
+# 1) sherpa-onnx Android AAR  -> android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar
 #    Official k2-fsa release artifact (Apache-2.0). There is no Maven artifact;
 #    the AAR bundles JNI libs for arm64-v8a AND x86_64 (emulator).
 # 2) espeak-ng-data           -> models-hf/tts/espeak-ng-data/

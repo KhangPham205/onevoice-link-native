@@ -1,21 +1,28 @@
 # Model handoff contract (AI / model team → native integration)
 
 > [!IMPORTANT]
-> Đây là template lịch sử cho thiết kế một graph S2ST/Oboe cũ. Runtime Hybrid
-> hiện tại dùng sáu QNN context cùng host RNN-T/CPU Kokoro; contract production
-> đã đối chiếu từ binary nằm ở [HANDOFF_FORM.md](HANDOFF_FORM.md). Không dùng các
-> tên `onevoice_s2st`, chunk 1 giây hoặc giả định QNN v2.36 bên dưới để sửa app.
+> Đây là template lịch sử cho thiết kế một graph S2ST end-to-end chạy trên Oboe,
+> chunk 1 giây. App hiện tại không chạy theo thiết kế đó: runtime Hybrid dùng sáu
+> QNN context thường trú (`vi-en`/`en-vi` × ASR encoder, Marian encoder, Marian
+> decoder), còn RNN-T decoder/joiner, greedy CTC và TTS cả câu chạy trên CPU.
+> Chiều dịch do dual-ASR router chọn cho từng câu. Tên graph, tensor contract và
+> scale/offset lấy từ `android-app/app/src/main/assets/npu_manifest.json` (sinh
+> bằng `tools/models/gen_npu_manifest.py` từ chính các `.bin`); bảng tensor đã
+> đối chiếu từ binary nằm ở [HANDOFF_FORM.md](HANDOFF_FORM.md). Kiến trúc hiện tại:
+> [ARCHITECTURE.md](ARCHITECTURE.md). Không dùng tên `onevoice_s2st`, chunk 1
+> giây hay đường dẫn `.bin` bên dưới để sửa app; danh sách câu hỏi (graph, tensor,
+> quantization, golden vector) vẫn dùng được khi nhận model mới.
 
 This is the checklist the AI team follows to hand the model over. **A `.bin` alone is not runnable** — the native layer needs the tensor/graph contract below to bind inputs and outputs. Fill in every 🟨 field and deliver the artifacts in [§1](#1-deliverables-checklist).
 
-> How these fields map to code: `graphName`, `contextBinaryPath`, `backendLibPath`, `inputSampleCount` feed `InferenceConfig` ([qnn_inference.h](../native-core/include/qnn_inference.h)); the tensor table drives `mapTensors_()`; the audio/quantization semantics drive `execute()` in [qnn_inference.cpp](../native-core/src/qnn_inference.cpp).
+> How these fields map to code today: they become one stage entry in `assets/npu_manifest.json` (file, graph name, tensor names/dims/dtype, fixed-point scale/offset), which `core/NpuManifest.kt` parses into a `StageSpec` per stage; `native-core/src/qnn_runtime.cpp` then loads the context and retrieves that graph. The original `qnn_inference.{h,cpp}` this template targeted has been removed.
 
 ---
 
 ## 1. Deliverables checklist
 
 - [ ] **Context binary** `*.bin` — one per target HTP architecture (see [§3](#3-target-htp-architectures)).
-- [ ] **QAIRT / QNN SDK version** used to build it (must be ABI-compatible with the app's headers — currently **v2.36**).
+- [ ] **QAIRT / QNN SDK version** used to build it (must load on the app's runtime: the in-tree QAIRT 2.47.0 SDK, QNN API v2.36).
 - [ ] **Graph name(s)** exactly as exported ([§4](#4-graph-identity)).
 - [ ] **Tensor contract table**, fully filled ([§5](#5-tensor-contract-the-critical-part)).
 - [ ] **Audio I/O semantics** ([§6](#6-audio--io-semantics)).
@@ -30,14 +37,14 @@ This is the checklist the AI team follows to hand the model over. **A `.bin` alo
 ## 2. What we already provide (so you don't re-do it)
 
 - **Backend `.so`** — `libQnnHtp.so` (+ `libQnnSystem.so`, `libQnnHtpPrepare.so`, HTP stubs) are packaged into the APK and available at `applicationInfo.nativeLibraryDir`. You do **not** ship these.
-- **Realtime plumbing** — Oboe capture/playback, lock-free ring buffers, threads, and the JNI lifecycle are done. Your model plugs into `execute()`.
+- **Realtime plumbing** — Kotlin owns utterance capture (`AudioRecord` + VAD), strict half-duplex scheduling and stereo `AudioTrack` playback; host feature frontends and decoders run around each graph. (The Oboe/ring-buffer path this template assumed is unreachable legacy code.)
 - **Load path** — the app `dlopen`s the backend and calls `contextCreateFromBinary(.bin)` → `graphRetrieve(graphName)`. No on-device graph compilation.
 
 ---
 
 ## 3. Target HTP architecture(s)
 
-A `.bin` is compiled for a specific Hexagon version. Tell us which SoC(s)/arch(es) to target; deliver one `.bin` per arch (the CPU-side stubs for v68–v81 are already packaged).
+A `.bin` is compiled for a specific Hexagon version. Tell us which SoC(s)/arch(es) to target; deliver one `.bin` per arch (the CPU-side stubs for v68–v81 are already packaged). Today the app targets only Snapdragon 8 Gen 2 (SM8550, Hexagon v73, `socModel` 43) and builds only `arm64-v8a`.
 
 | Snapdragon (example) | Hexagon arch | Stub in APK | Provide `.bin`? |
 |---|---|---|---|
@@ -59,7 +66,7 @@ A `.bin` is compiled for a specific Hexagon version. Tell us which SoC(s)/arch(e
 | If cascade (e.g. ASR → MT → TTS): which graph in which `.bin` | 🟨 |
 | Is the graph **stateful** across chunks? (KV-cache / recurrent tensors) | 🟨 yes/no — if yes, describe the state tensors and reset semantics |
 
-> We currently assume **one** graph named `onevoice_s2st`. If yours differs, we just set `graphName` accordingly — no code change if it's a single graph.
+> This template originally assumed one graph named `onevoice_s2st`. Today every stage's graph name is read from the binary into `npu_manifest.json`; graph names are not guessable from filenames.
 
 ---
 
@@ -101,9 +108,9 @@ For **every** input and output tensor of each graph. Shapes **must be static** (
 | **Input** format the graph expects | 🟨 raw PCM `int16`? float `[-1, 1]`? mel/features? |
 | If input is **features**, is extraction baked into the graph? | 🟨 (**strongly preferred** — otherwise we need the exact feature spec: window, hop, n_mels, etc.) |
 | Input sample rate / channels | 🟨 (we currently capture **16 kHz mono**) |
-| Samples per inference (chunk) | 🟨 (we currently drain **16000** = 1 s; see `inputSampleCount`) |
+| Samples per inference (chunk) | 🟨 (today: one bounded utterance of up to 10 s; the ASR encoders take `[1,1000,80]` feature frames computed on the host) |
 | **Output** format | 🟨 PCM `int16`? float? |
-| Output sample rate / channels | 🟨 (playback stream is 16 kHz mono; tell us if the model outputs a different rate so we can resample) |
+| Output sample rate / channels | 🟨 (today's playback is 24 kHz stereo; other TTS rates are resampled to 24 kHz) |
 | Output length per chunk (static) | 🟨 (fixed # samples, or variable → we need a length/EOS signal) |
 | Source & target **languages** for S2ST | 🟨 (fixed pair? or an input tensor selects language?) |
 
@@ -155,8 +162,8 @@ Deliver: 🟨 the actual commands + the QAIRT/QNN version string (`qnn-net-run -
 
 ## 10. Where the files go at runtime
 
-- The **`.bin` is not committed to git** (large). At runtime the app reads it from `modelDir` — currently `filesDir/models/` (see `MainActivity`), i.e. pushed to the device or bundled as an asset and copied out on first launch.
-- The default paths the app builds are `<modelDir>/onevoice_s2st.bin` and graph `onevoice_s2st` (`OneVoiceNative.initialize`). If your names differ, we change two constants — no structural change.
+- The **`.bin` is not committed to git** (large). Today the app reads each context from internal `<filesDir>/models/npu/<direction>/`, staged with `run-as` by `tools/models/push-npu-models.sh` (see [NPU_DEPLOY.md](NPU_DEPLOY.md)).
+- File and graph names come from `npu_manifest.json`; regenerate it with `tools/models/gen_npu_manifest.py` for every model drop.
 
 ---
 

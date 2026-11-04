@@ -38,7 +38,7 @@ Không commit binary có license. Truyền file từ một thư mục bảo mậ
 ```bash
 cd android-app
 ./gradlew :app:assembleDebug \
-  -PqnnSignedSkel=/secure/qairt-2.47/v73/libQnnHtpV73Skel.so
+  -PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
 ```
 
 Task `prepareQnnSignedDspAssets` đổi tên canonical và đưa file vào generated
@@ -51,7 +51,7 @@ asset `dsp/signed/libQnnHtpV73Skel.so`. `NpuEngine` sẽ:
 Có thể ép mode cho bring-up (mặc định `auto`):
 
 ```bash
-# Chẩn đoán riêng unsigned-PD trên engineering/firmware cho phép
+# Ép unsigned PD, bỏ qua signed skeleton nếu đã stage (đường chạy hiện tại trên máy retail)
 ./gradlew :app:assembleDebug -PqnnPdMode=unsigned
 
 # Không cho phép fallback unsigned
@@ -59,7 +59,8 @@ Có thể ép mode cho bring-up (mặc định `auto`):
   -PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
 ```
 
-`auto` dùng unsigned skeleton đúng bộ QAIRT cho APK thông thường. Signed-PD chỉ
+`auto` dùng unsigned skeleton đúng bộ QAIRT cho APK thông thường (asset
+`dsp/libQnnHtpV73Skel.so`, extract ra `<filesDir>/dsp/unsigned/`). Signed-PD chỉ
 được chọn khi build cung cấp rõ ràng một signed skeleton tương thích. Trên thiết
 bị đang kiểm tra, candidate OEM tồn tại tại:
 
@@ -89,10 +90,10 @@ xác nhận trên thiết bị này; DSP chưa tới bước kiểm tra chữ k�
 ## `ADSP_LIBRARY_PATH`
 
 Android FastRPC examples dùng danh sách thư mục phân cách bằng dấu chấm phẩy.
-Đường dẫn của app hiện là:
+Đường dẫn của app hiện là (thư mục đầu là skeleton vừa extract từ APK):
 
 ```text
-<app-signed-dir nếu có>;
+<filesDir>/dsp/unsigned hoặc <filesDir>/dsp/signed;
 /vendor/lib/rfsa/adsp/snap;
 /vendor/dsp/cdsp;
 /vendor/lib/rfsa/adsp;

@@ -2,7 +2,8 @@
 """Run the organisers' sample dataset through the on-device pipeline, offline.
 
 Every wav goes through the production dual-ASR router (``direction=auto``),
-the selected Marian branch and Kokoro, exactly as a live turn would, except
+the selected Marian branch and the APK's TTS (Kokoro EN; VieNeu VI by
+default), exactly as a live turn would, except
 that the PCM comes from the dataset instead of the microphone. The app writes
 one JSONL row per item (routing scores, stage timings, transcript,
 translation) plus the 24 kHz target waveform; this script collects them with

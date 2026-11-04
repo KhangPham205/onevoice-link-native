@@ -1,21 +1,29 @@
-# `jniLibs/arm64-v8a/` — native libraries packaged into the APK
+# `jniLibs/arm64-v8a/`: native libraries packaged into the APK
 
-The APK's `lib/arm64-v8a/` directory is assembled from **two** sources:
+The APK's `lib/arm64-v8a/` is assembled from three sources:
 
-1. **`libonevoice_core.so`** — built from `../../native-core/CMakeLists.txt` by the
-   `externalNativeBuild` step. It links against the Qualcomm QNN backend, so its
-   ELF `NEEDED` list references `libQnnSystem.so`, `libQnnHtp.so`,
-   `libQnnHtpPrepare.so` and the HTP FastRPC stubs.
+1. **CMake outputs** from `../../native-core/CMakeLists.txt`:
+   `libonevoice_core.so` (JNI, `QnnRuntime`, ASR frontends) and
+   `libsea_g2p_jni.so` (shim for sea-g2p), plus `libc++_shared.so`.
+   The core has **no** QNN `DT_NEEDED` entries: QNN is `dlopen`'d only after
+   `NpuEngine` sets `ADSP_LIBRARY_PATH`, which must happen before
+   `libQnnHtp.so` first loads.
 
-2. **Qualcomm QNN runtime `.so`** — *not* committed here. They are staged
-   automatically by the `copyQnnRuntimeLibs` Gradle task (see
-   [`../../../build.gradle.kts`](../../../build.gradle.kts)) from
+2. **QNN host runtime**, staged by the `copyQnnRuntimeLibs` Gradle task (see
+   [`../../../build.gradle.kts`](../../../../build.gradle.kts)) from
    `native-core/third_party/qnn_sdk/lib/aarch64-android/` into
-   `build/qnnJniLibs/arm64-v8a/`, which is registered as an extra `jniLibs`
-   source dir. This keeps ~96 MB of vendored binaries out of git while still
-   guaranteeing they land in the APK so `System.loadLibrary("onevoice_core")`
-   resolves at runtime.
+   `build/qnnJniLibs/arm64-v8a/`: `libQnnSystem.so`, `libQnnHtp.so`,
+   `libQnnHtpPrepare.so` and `libQnnHtpV*Stub.so`. Nothing is committed.
 
-**This directory is still a live `jniLibs` source root.** Drop any additional
-prebuilt `arm64-v8a` `.so` here (e.g. a signed Hexagon skel) and AGP will merge
-it into the APK alongside the staged QNN libs.
+3. **This directory**, a normal `jniLibs` source root. Its only expected
+   binary is `libsea_g2p_rs.so` (git-ignored, like every `*.so` here), built by
+   `tools/models/build-sea-g2p-android.sh` (Rust `aarch64-linux-android`
+   target + NDK 27.2, 16 KB page alignment). The shim `dlopen`s it for
+   VieNeu-TTS phonemization. With the default `-PviTtsEngine=VIENEU`, the
+   `merge*JniLibFolders` task fails with a clear message if it is missing;
+   unit tests and `KOKORO`/`SUPERTONIC` builds do not need it.
+
+Do **not** put the Hexagon skeleton (`libQnnHtpV73Skel.so`) here: it is a DSP6
+ELF, not an ARM64 library. It ships as an asset (`assets/dsp/` for the
+unsigned skeleton, or `-PqnnSignedSkel` for a signed one) and is extracted to
+`<filesDir>/dsp/{unsigned,signed}/` at runtime.

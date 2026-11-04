@@ -259,7 +259,7 @@ they are the calibration contract.
 - VI ASR is GIPFormer `graph_oa00nu3e` (FP32 `[1,1000,80]` → `[1,248,512]`)
   with CPU RNN-T decoder/joiner ONNX host glue. EN ASR is Parakeet graph
   `model` (UFIXED_16 `[1,1000,80]` → `[1,125,1025]`, QAIRT 2.40 binary that
-  loads on the 2.45 runtime). The manifest records fixed-point scale/offset
+  loads on the in-tree 2.47 runtime). The manifest records fixed-point scale/offset
   from the binary; `StageSpec.quantization` carries them to the host.
 - Kokoro VI was trained on vig2p phonemes (tones as arrows) but sherpa-onnx
   feeds espeak-ng `vi` (tones as digits, đ as ɗ), which it silently dropped.

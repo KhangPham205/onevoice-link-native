@@ -15,8 +15,10 @@ private const val TAG = "OneVoiceBenchCtl"
  *
  * A receiver rather than an exported Activity or a socket: the harness already
  * talks to the device over adb, and `am broadcast` needs no port, no foreground
- * window and no extra permission. It is registered but not exported, so only
- * the shell uid (via `am`) and the app itself can reach it.
+ * window and no extra permission. It must be exported (this Android build drops
+ * shell broadcasts to non-exported receivers; see the manifest), so the guard
+ * is the bench directory below, which only run-as on a debuggable build can
+ * create.
  *
  * Nothing here touches the audio path. Every action either flips a flag read
  * between utterances or writes a file, and all of it is inert unless the
