@@ -106,6 +106,10 @@ defaults in decoder code.
   former 4 GiB Gradle plus 2 GiB Kotlin daemon caused the development laptop to
   be OOM-killed.
 - Open the Android Studio project at `android-app/`, not the repo root.
+- This checkout lives on NTFS with `core.fileMode=false`, so git never sees
+  the executable bit: add new scripts with `git add --chmod=+x <file>` or a
+  Linux clone gets `Permission denied` (gradlew and tools/*.sh once shipped
+  as 100644).
 
 ## Architecture
 
