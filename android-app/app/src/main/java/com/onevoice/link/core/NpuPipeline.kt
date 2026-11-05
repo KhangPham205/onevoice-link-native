@@ -346,6 +346,13 @@ internal class NpuPipeline private constructor(
 
     /** True when this branch consumes the shared Kaldi fbank tensor. */
     val usesSharedRnntFeatures: Boolean get() = asrMode == NpuAsrMode.ZIPFORMER_FAMILY_RNNT
+
+    /**
+     * Parakeet-TDT-CTC emits punctuation and casing; the GIPFormer/Zipformer
+     * RNN-T transcripts are lowercase without punctuation. Long turns use
+     * sentence ends as translation-unit boundaries only where they exist.
+     */
+    val asrEmitsPunctuation: Boolean get() = asrMode != NpuAsrMode.ZIPFORMER_FAMILY_RNNT
     private val ttsIds = direct(512 * Int.SIZE_BYTES)
     private val ttsStyle = direct(256 * Float.SIZE_BYTES)
     private val ttsD = direct(512 * 640 * Float.SIZE_BYTES)
@@ -436,6 +443,11 @@ internal class NpuPipeline private constructor(
                 Double.NEGATIVE_INFINITY
             } else {
                 decoded.rawLogProb / tokenCount
+            },
+            tokens = decoded.ids.indices.mapNotNull { index ->
+                asrTokens.getOrNull(decoded.ids[index])?.let { piece ->
+                    AsrToken(piece, decoded.startFrames[index] * ParakeetCtcContract.SAMPLES_PER_STEP)
+                }
             },
         )
         Log.i(
@@ -533,10 +545,40 @@ internal class NpuPipeline private constructor(
         }
     }
 
-    fun translate(text: String): String = translator.translate(text)
+    /** One Marian pass per sentence; see [splitSentences] for why. */
+    fun translate(text: String): String {
+        var tokens = 0
+        return translateBySentence(text) { sentence ->
+            translator.translate(sentence).also { tokens += translator.lastOutputTokens }
+        }.also { lastMtOutputTokens = tokens }
+    }
 
-    /** Tokens the Marian decoder emitted for the last [translate]. */
-    val lastMtOutputTokens: Int get() = translator.lastOutputTokens
+    /**
+     * [translate] plus whether any sentence's output hit the decoder length
+     * cap without EOS. The long-turn path splits and retries such a unit
+     * instead of playing a cut translation.
+     */
+    fun translateChecked(text: String): MtOutput {
+        var tokens = 0
+        var truncated = false
+        val translation = translateBySentence(text) { sentence ->
+            translator.translate(sentence).also {
+                tokens += translator.lastOutputTokens
+                truncated = truncated || translator.lastOutputHitLimit
+            }
+        }
+        lastMtOutputTokens = tokens
+        return MtOutput(translation, tokens, truncated)
+    }
+
+    /** Largest Marian input among [text]'s sentences, as [translate] will feed them. */
+    fun mtSourceTokens(text: String): Int =
+        splitSentences(text).maxOfOrNull(translator::sourceTokenCount) ?: 0
+
+    /** Tokens the Marian decoder emitted for the last [translate], summed over sentences. */
+    @Volatile
+    var lastMtOutputTokens: Int = 0
+        private set
 
     /**
      * Scale a waveform in place so nothing leaves [-1, 1], returning the peak
@@ -915,6 +957,9 @@ internal class QnnMarianTranslator private constructor(
     private val position = direct(Int.SIZE_BYTES)
 
     companion object {
+        /** Fixed encoder input: target prefix + pieces + EOS. */
+        private const val MAX_SOURCE_SLOTS = 256
+
         fun load(root: File, stagePrefix: String): QnnMarianTranslator {
             val vocabObject = JSONObject(File(root, "mt_vocab.json").readText())
             val vocab = HashMap<String, Int>(vocabObject.length() * 2)
@@ -949,20 +994,44 @@ internal class QnnMarianTranslator private constructor(
         }
     }
 
+    /**
+     * True when the last [translate] stopped at [maxLength] without EOS: the
+     * output is cut, and a caller must not present it as a full translation.
+     */
+    @Volatile
+    var lastOutputHitLimit: Boolean = false
+        private set
+
+    /** Encoder input slots [text] needs: target prefix, pieces and EOS. */
+    fun sourceTokenCount(text: String): Int {
+        val pieces = sentencePiece.encodeToPieces(text).size
+        return if (pieces == 0) 0 else pieces + (if (targetPrefixId != null) 1 else 0) + 1
+    }
+
     fun translate(text: String): String {
         val pieces = sentencePiece.encodeToPieces(text)
+        lastOutputHitLimit = false
         if (pieces.isEmpty()) return ""
         val idsView = ids.asIntBuffer()
         val maskView = mask.asIntBuffer()
-        repeat(256) { idsView.put(it, padId) }
+        var sourceCount = if (targetPrefixId != null) 1 else 0
+        // The encoder tensor is 256 slots: prefix + pieces + EOS. Truncating
+        // here used to drop the tail of the sentence silently.
+        if (pieces.size > MAX_SOURCE_SLOTS - 1 - sourceCount) {
+            throw MarianInputTooLongException(
+                "Marian $stagePrefix input needs ${pieces.size + sourceCount + 1} slots, " +
+                    "the graph holds $MAX_SOURCE_SLOTS",
+            )
+        }
+        repeat(MAX_SOURCE_SLOTS) { idsView.put(it, padId) }
         zero(mask)
-        var sourceCount = 0
+        sourceCount = 0
         targetPrefixId?.let { prefix ->
             idsView.put(sourceCount, prefix)
             maskView.put(sourceCount, 1)
             sourceCount++
         }
-        val pieceCount = minOf(255 - sourceCount, pieces.size)
+        val pieceCount = pieces.size
         repeat(pieceCount) { index ->
             idsView.put(sourceCount, vocab[pieces[index]] ?: 1)
             maskView.put(sourceCount, 1)
@@ -976,6 +1045,7 @@ internal class QnnMarianTranslator private constructor(
         val generated = IntArray(maxLength)
         var generatedSize = 0
         var current = decoderStartId
+        var reachedEos = false
 
         for (step in 0 until minOf(maxLength, 255)) {
             decoderId.putInt(0, current)
@@ -1006,7 +1076,10 @@ internal class QnnMarianTranslator private constructor(
                 }
             }
             check(next >= 0) { "Marian decoder returned no finite token" }
-            if (next == eosId) break
+            if (next == eosId) {
+                reachedEos = true
+                break
+            }
             generated[generatedSize++] = next
 
             repeat(12) { tensor ->
@@ -1024,6 +1097,7 @@ internal class QnnMarianTranslator private constructor(
         // The decoder is autoregressive: mt_ms is proportional to this count, so
         // a latency row without it cannot be compared against another row.
         lastOutputTokens = generatedSize
+        lastOutputHitLimit = !reachedEos
         return buildString {
             repeat(generatedSize) { index ->
                 val token = idToToken.getOrNull(generated[index]) ?: return@repeat
@@ -1039,6 +1113,9 @@ internal class QnnMarianTranslator private constructor(
 
     override fun close() = Unit
 }
+
+/** A Marian input that does not fit the fixed encoder tensor; it is never truncated. */
+internal class MarianInputTooLongException(message: String) : IllegalArgumentException(message)
 
 private fun direct(bytes: Int): ByteBuffer =
     ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())

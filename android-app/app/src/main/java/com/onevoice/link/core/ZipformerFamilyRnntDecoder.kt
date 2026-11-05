@@ -27,6 +27,12 @@ internal data class AsrHypothesis(
     val rawLogProb: Double,
     val tokenCount: Int,
     val normalizedLogProb: Double,
+    /**
+     * Emitted lexical tokens with their window-relative emission sample, for
+     * stitching windows of one long turn. Diagnostic alignment only: it never
+     * enters [rawLogProb] or [normalizedLogProb], so routing is unchanged.
+     */
+    val tokens: List<AsrToken> = emptyList(),
 )
 
 /** CPU decoder/joiner shared by the GIPFormer-VI and Zipformer-EN HTP encoders. */
@@ -42,6 +48,14 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         const val FEATURE_DIM = 80
         const val ENCODER_FRAMES = 248
         const val ENCODER_DIM = 512
+
+        /**
+         * Encoder frame -> window sample. The exported length graph is
+         * (((T - 7) / 2) + 1) / 2 over 10 ms features, so one frame spans four
+         * features (640 samples) and frame j centres near feature 4j + 3.
+         */
+        const val SAMPLES_PER_ENCODER_FRAME = 640
+        const val ENCODER_FRAME_OFFSET_SAMPLES = 480
 
         private const val CONTEXT_SIZE = 2
         private const val BLANK_ID = 0
@@ -222,6 +236,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         }
         val source = encoderOutput.order(ByteOrder.nativeOrder()).asFloatBuffer()
         val emitted = ArrayList<Int>(validFrames / 2)
+        val emittedFrames = ArrayList<Int>(validFrames / 2)
         var rawLogProb = 0.0
 
         // This is the exact stateless-transducer seed used by sherpa-onnx.
@@ -244,6 +259,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
                 // lexical token count or influence language routing.
                 if (tokens[token] != "<sos/eos>") {
                     emitted += token
+                    emittedFrames += frame
                     rawLogProb += selected.logProbability
                 }
                 context.put(0, context.get(1))
@@ -268,6 +284,15 @@ internal class ZipformerFamilyRnntDecoder private constructor(
                 Double.NEGATIVE_INFINITY
             } else {
                 rawLogProb / emitted.size
+            },
+            tokens = emitted.indices.mapNotNull { index ->
+                val piece = tokens[emitted[index]]
+                if (piece == "<blk>" || piece == "<unk>") return@mapNotNull null
+                AsrToken(
+                    piece = piece.lowercase(Locale.ROOT),
+                    sampleOffset = emittedFrames[index] * SAMPLES_PER_ENCODER_FRAME +
+                        ENCODER_FRAME_OFFSET_SAMPLES,
+                )
             },
         )
     }

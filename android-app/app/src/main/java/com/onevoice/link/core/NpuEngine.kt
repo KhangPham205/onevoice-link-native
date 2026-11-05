@@ -7,11 +7,14 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Process
 import android.system.Os
 import android.util.Log
+import androidx.annotation.RequiresApi
 import com.onevoice.link.BuildConfig
 import java.io.File
 import java.lang.ref.WeakReference
@@ -26,6 +29,8 @@ private const val TAG = "OneVoiceNpu"
 private const val HALF_DUPLEX_TAG = "OneVoiceHalfDuplex"
 private const val TUNING_TAG = "OneVoiceRouting"
 private const val VAD_TAG = "OneVoiceVad"
+/** Per-window and per-unit rows of long turns; the per-turn row stays in OneVoiceRouting. */
+private const val LONG_TURN_TAG = "OneVoiceLongTurn"
 
 /** Legacy construction option; production exposes only [CPU_WHOLE_UTTERANCE]. */
 enum class NpuTtsMode {
@@ -92,6 +97,9 @@ class NpuEngine(
     private val nativeLibDir: String = context.applicationInfo.nativeLibraryDir
     private val appContext = context.applicationContext
     private val routingConfig = RoutingConfig.fromBuildConfig()
+    /** Build-time long-turn policy; a bench replay may run a baseline (B0..B3) instead. */
+    private val buildLongTurnConfig = LongTurnConfig.fromBuildConfig()
+    @Volatile private var longTurnConfig = buildLongTurnConfig
     private val vadMode = VadMode.parse(BuildConfig.VAD_MODE)
     private val routePreferences = AudioRoutePreferences(appContext)
 
@@ -220,6 +228,7 @@ class NpuEngine(
             }
             put("kokoroThreads", BuildConfig.KOKORO_THREADS)
             put("audioRoutePreference", audioRoutePreference.name)
+            put("longTurn", longTurnConfig.toJson())
         }
 
     /** JSONL file of the current (or last) live session; null before any turn. */
@@ -270,6 +279,9 @@ class NpuEngine(
          * waveform so accuracy can be scored offline against the references.
          */
         val benchmarkTag: String? = null,
+        /** Set for a bench replay turn: its row goes to the bench log with this tag. */
+        val replayTag: String? = null,
+        val inputMode: String = "microphone",
     )
 
     private val segments = LinkedBlockingQueue<CapturedSegment>(MAX_QUEUED_SEGMENTS)
@@ -287,6 +299,13 @@ class NpuEngine(
     @Volatile private var replayThread: Thread? = null
     @Volatile private var activeRecord: AudioRecord? = null
     @Volatile private var activePlaybackTrack: AudioTrack? = null
+    @Volatile private var ttsThread: Thread? = null
+    @Volatile private var longTurnCoordinator: LongTurnCoordinator? = null
+    @Volatile private var activeLongTurn: LongTurn? = null
+    /** Bumped by stop(): a late result of an older session is never published. */
+    private val sessionGeneration = AtomicLong(0L)
+    /** One archive reused by every long turn; a turn clears it only after the previous one finished. */
+    private var turnArchive: TurnArchive? = null
 
     override fun setPipelineListener(listener: EngineBackend.PipelineListener?) {
         pipelineListener = listener
@@ -612,7 +631,7 @@ class NpuEngine(
             lastError = "NPU pipeline is not initialized."
             return false
         }
-        val staleWorker = listOfNotNull(captureThread, pipelineThread)
+        val staleWorker = listOfNotNull(captureThread, pipelineThread, ttsThread)
             .firstOrNull(Thread::isAlive)
         if (!running.get() && staleWorker != null) {
             lastError = "Previous audio worker ${staleWorker.name} is still stopping."
@@ -630,11 +649,26 @@ class NpuEngine(
         }
         if (!running.compareAndSet(false, true)) return true
         lastError = null
+        longTurnConfig = buildLongTurnConfig
         segments.clear()
         halfDuplex.reset()
-        pipelineThread = Thread(::pipelineLoop, "onevoice-npu-pipeline").apply { start() }
-        captureThread = Thread(::captureLoop, "onevoice-npu-capture").apply { start() }
+        startInferenceWorkers(longTurnConfig)
+        captureThread = Thread(::liveCaptureLoop, "onevoice-npu-capture").apply { start() }
         return true
+    }
+
+    /** LEGACY: one whole-utterance worker. ADAPTIVE: the long-turn inference and TTS workers. */
+    private fun startInferenceWorkers(config: LongTurnConfig) {
+        if (config.mode == LongTurnMode.ADAPTIVE) {
+            val coordinator = LongTurnCoordinator(checkNotNull(pipeline), longTurnListener)
+            longTurnCoordinator = coordinator
+            pipelineThread = Thread(coordinator::runInferenceLoop, "onevoice-longturn-inference")
+                .apply { start() }
+            ttsThread = Thread(coordinator::runTtsLoop, "onevoice-longturn-tts").apply { start() }
+        } else {
+            longTurnCoordinator = null
+            pipelineThread = Thread(::pipelineLoop, "onevoice-npu-pipeline").apply { start() }
+        }
     }
 
     /**
@@ -674,12 +708,18 @@ class NpuEngine(
             lastError = "benchFeed refused: audio replay is running."
             return false
         }
-        if (!running.get() && pipelineThread?.isAlive == true) {
+        if (!running.get() && (pipelineThread?.isAlive == true || ttsThread?.isAlive == true)) {
             lastError = "benchFeed refused: previous pipeline worker is still stopping."
             return false
         }
+        if (running.get() && longTurnCoordinator != null) {
+            lastError = "benchFeed refused: a long-turn session owns the workers."
+            return false
+        }
         if (running.compareAndSet(false, true)) {
-            // No capture thread: the fixture is the only producer.
+            // No capture thread: the fixture is the only producer. Fixtures
+            // are whole utterances, so they always run the legacy worker.
+            longTurnCoordinator = null
             segments.clear()
             pipelineThread = Thread(::pipelineLoop, "onevoice-npu-pipeline").apply { start() }
         }
@@ -714,6 +754,8 @@ class NpuEngine(
         direction: TranslationDirection,
     ): FloatArray? {
         if (telemetry?.enabled != true) return null
+        // The TTS session belongs to the inference workers while a session runs.
+        if (running.get()) return null
         val active = pipeline ?: return null
         return runCatching { active.synthesize(text, direction) }.getOrNull()
     }
@@ -721,7 +763,13 @@ class NpuEngine(
     @Synchronized
     override fun stop() {
         running.set(false)
+        sessionGeneration.incrementAndGet()
         halfDuplex.cancel("engine_stop")
+        activeLongTurn?.let { turn ->
+            turn.cancelled = true
+            turn.audio.cancel()
+        }
+        longTurnCoordinator?.cancelAll()
         activeRecord?.let { runCatching { it.stop() } }
         activePlaybackTrack?.let { active ->
             runCatching { active.pause() }
@@ -729,17 +777,22 @@ class NpuEngine(
         }
         val capture = captureThread
         val inference = pipelineThread
+        val tts = ttsThread
         val replay = replayThread
         capture?.interrupt()
         inference?.interrupt()
+        tts?.interrupt()
         replay?.interrupt()
         joinWorker(capture, CAPTURE_JOIN_MS)
         joinWorker(inference, PIPELINE_JOIN_MS)
+        joinWorker(tts, PIPELINE_JOIN_MS)
         joinWorker(replay, REPLAY_JOIN_MS)
         if (capture?.isAlive != true && captureThread === capture) captureThread = null
         if (inference?.isAlive != true && pipelineThread === inference) pipelineThread = null
+        if (tts?.isAlive != true && ttsThread === tts) ttsThread = null
         if (replay?.isAlive != true && replayThread === replay) replayThread = null
         segments.clear()
+        activeLongTurn = null
     }
 
     @Synchronized
@@ -749,19 +802,22 @@ class NpuEngine(
         val loaded = pipeline
         pipeline = null
         lastAudio = null
-        val worker = pipelineThread?.takeIf(Thread::isAlive)
-        if (worker == null) {
+        // Native/ORT sessions are closed only after every worker that can
+        // still be inside a model call (inference or TTS) has returned.
+        val workers = listOfNotNull(pipelineThread, ttsThread).filter(Thread::isAlive)
+        if (workers.isEmpty()) {
             releasePipeline(loaded)
         } else if (releasePending.compareAndSet(false, true)) {
             Thread({
                 try {
-                    worker.join()
+                    workers.forEach(Thread::join)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 } finally {
                     releasePipeline(loaded)
                     releasePending.set(false)
-                    if (pipelineThread === worker) pipelineThread = null
+                    if (pipelineThread in workers) pipelineThread = null
+                    if (ttsThread in workers) ttsThread = null
                 }
             }, "onevoice-npu-release").start()
         }
@@ -773,7 +829,7 @@ class NpuEngine(
         // A live capture worker owns the explicit half-duplex coordinator.
         // Replay is therefore available only after capture has stopped.
         if (running.get()) return false
-        if (captureThread?.isAlive == true || pipelineThread?.isAlive == true) {
+        if (captureThread?.isAlive == true || pipelineThread?.isAlive == true || ttsThread?.isAlive == true) {
             lastError = "Audio replay refused: previous live workers are still stopping."
             return false
         }
@@ -802,28 +858,54 @@ class NpuEngine(
         return true
     }
 
-    @SuppressLint("MissingPermission")
-    private fun captureLoop() {
+    // --------------------------------------------------------------- capture
+
+    /** Microphone session: resolves the per-turn route and opens AudioRecord per turn. */
+    private fun liveCaptureLoop() {
         val audioManager = appContext.getSystemService(AudioManager::class.java)
         if (audioManager == null) {
             running.set(false)
             notifyPipelineStopped("Android AudioManager is unavailable.")
             pipelineThread?.interrupt()
+            ttsThread?.interrupt()
             return
         }
+        val adaptive = longTurnConfig.mode == LongTurnMode.ADAPTIVE
+        if (adaptive) {
+            // Inference and TTS now run while the microphone is open. The read
+            // loop must not be starved into an AudioRecord overrun.
+            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) }
+        }
+        captureLoop(LiveCaptureProvider(audioManager, largeBuffer = adaptive))
+    }
+
+    private fun captureLoop(provider: CaptureProvider) {
         var activeTurnId: Long? = null
         // One detector per session: Silero's recurrent state is reset per turn,
         // but loading the graph per turn would add latency to every capture.
         val detector = createSpeechDetector(vadMode, appContext.assets, VAD_RMS_THRESHOLD)
-        Log.i(TAG, "capture VAD=${detector.name} (configured ${vadMode.name})")
+        val config = longTurnConfig
+        Log.i(
+            TAG,
+            "capture VAD=${detector.name} (configured ${vadMode.name}) input=${provider.inputMode} " +
+                "longTurn=${config.mode.name}",
+        )
         try {
-            while (running.get()) {
+            while (running.get() && !provider.exhausted) {
                 val turnId = turnIds.incrementAndGet()
                 activeTurnId = turnId
                 if (!halfDuplex.awaitIdleThenCapture(turnId)) break
-                val captured = captureOneTurn(audioManager, turnId, detector)
+                if (config.mode == LongTurnMode.ADAPTIVE) {
+                    runLongTurn(provider, turnId, detector, config)
+                    activeTurnId = null
+                    continue
+                }
+                val captured = captureOneTurn(provider, turnId, detector)
                 if (captured == null) {
-                    halfDuplex.finishTurn(turnId, "capture_cancelled_or_noise")
+                    halfDuplex.finishTurn(
+                        turnId,
+                        if (provider.exhausted) "input_end" else "capture_cancelled_or_noise",
+                    )
                     activeTurnId = null
                     continue
                 }
@@ -844,6 +926,7 @@ class NpuEngine(
                 running.set(false)
                 notifyPipelineStopped("Microphone capture failed: ${failure.message}")
                 pipelineThread?.interrupt()
+                ttsThread?.interrupt()
             }
         } finally {
             activeTurnId?.let { halfDuplex.finishTurn(it, "capture_worker_exit") }
@@ -851,15 +934,64 @@ class NpuEngine(
         }
     }
 
-    @SuppressLint("MissingPermission")
+    /** LEGACY: one bounded utterance per capture; the 10 s ceiling closes the input. */
     private fun captureOneTurn(
-        audioManager: AudioManager,
+        provider: CaptureProvider,
         turnId: Long,
         detector: SpeechActivityDetector,
     ): CapturedSegment? {
-        check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            "Communication-device routing requires Android 12 or newer."
+        val capture = provider.open(turnId) ?: return null
+        var bounded: BoundedUtterance? = null
+        try {
+            bounded = readBoundedUtterance(capture, detector, capture.guardSamples)
+        } finally {
+            capture.close()
         }
+        val utterance = bounded ?: return null
+        return CapturedSegment(
+            id = turnId,
+            samples = utterance.samples,
+            enqueuedNs = System.nanoTime(),
+            forcedBoundary = utterance.forcedBoundary,
+            route = capture.route,
+            communicationAddress = capture.communicationAddress,
+            communicationName = capture.communicationName,
+            captureSetupMs = capture.setupMs,
+            scoCloseMs = capture.scoCloseMs,
+            scoClosedNs = capture.scoClosedNs,
+            replayTag = provider.replayTag,
+            inputMode = provider.inputMode,
+        )
+    }
+
+    private inner class LiveCaptureProvider(
+        private val audioManager: AudioManager,
+        private val largeBuffer: Boolean,
+    ) : CaptureProvider {
+        override val inputMode = "microphone"
+        override val replayTag: String? = null
+        override val blockingSubmit = false
+        override val exhausted = false
+        override fun open(turnId: Long): TurnCapture {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                throw IllegalStateException("Communication-device routing requires Android 12 or newer.")
+            }
+            return openLiveCapture(audioManager, turnId, largeBuffer)
+        }
+    }
+
+    /**
+     * Resolve the route, claim SCO for Bluetooth, open AudioRecord and prove
+     * the actual input device. Everything claimed is released if any step
+     * fails, exactly as the single-utterance capture always did.
+     */
+    @SuppressLint("MissingPermission")
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun openLiveCapture(
+        audioManager: AudioManager,
+        turnId: Long,
+        largeBuffer: Boolean,
+    ): LiveCapture {
         val setupStartedNs = System.nanoTime()
         // Resolved per turn, so connecting or removing a headset between turns
         // takes effect without restarting the session.
@@ -875,10 +1007,6 @@ class NpuEngine(
             }
         }
         var record: AudioRecord? = null
-        var bounded: BoundedUtterance? = null
-        var setupMs = 0L
-        var scoCloseMs = 0L
-        var scoClosedNs = 0L
         try {
             val minimumBuffer = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
@@ -886,7 +1014,13 @@ class NpuEngine(
                 AudioFormat.ENCODING_PCM_16BIT,
             )
             check(minimumBuffer > 0) { "AudioRecord does not support 16 kHz mono PCM." }
-            record = AudioRecord(
+            // A long turn keeps reading while inference and TTS load the CPU;
+            // a 2 s buffer absorbs scheduling stalls the 250 ms one could not.
+            val bufferBytes = maxOf(
+                minimumBuffer,
+                if (largeBuffer) LONG_TURN_RECORD_BUFFER_BYTES else SAMPLE_RATE / 2,
+            )
+            val active = AudioRecord(
                 // HFP needs the communication source to open SCO. The built-in
                 // mic uses VOICE_RECOGNITION: half-duplex already removes the
                 // echo AEC would cancel, and ASR prefers less call processing.
@@ -898,21 +1032,22 @@ class NpuEngine(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minimumBuffer, SAMPLE_RATE / 2),
+                bufferBytes,
             )
-            check(record.state == AudioRecord.STATE_INITIALIZED) {
+            record = active
+            check(active.state == AudioRecord.STATE_INITIALIZED) {
                 "AudioRecord initialization failed"
             }
-            activeRecord = record
+            activeRecord = active
             val builtInMic = if (communication == null) builtInMicrophone(audioManager) else null
-            builtInMic?.let(record::setPreferredDevice)
-            record.startRecording()
+            builtInMic?.let(active::setPreferredDevice)
+            active.startRecording()
             val routedInput = if (communication != null) {
-                awaitBluetoothInputRoute(record, communication)
+                awaitBluetoothInputRoute(active, communication)
             } else {
-                awaitPhoneInputRoute(record)
+                awaitPhoneInputRoute(active)
             }
-            setupMs = (System.nanoTime() - setupStartedNs) / 1_000_000L
+            val setupMs = (System.nanoTime() - setupStartedNs) / 1_000_000L
             lastRouteLabel = routeLabel(
                 route,
                 communication?.productName?.toString()?.trim().orEmpty()
@@ -922,24 +1057,87 @@ class NpuEngine(
                 HALF_DUPLEX_TAG,
                 "turn=$turnId route=${route.name.lowercase(Locale.ROOT)} captureSetupMs=$setupMs " +
                     "requested=${describeDevice(communication ?: builtInMic)} " +
-                    "routed=${describeDevice(routedInput)} sampleRate=${record.sampleRate}",
+                    "routed=${describeDevice(routedInput)} sampleRate=${active.sampleRate}",
             )
-            bounded = readBoundedUtterance(
-                record,
-                detector,
-                // The loudspeaker tail of the previous translation reaches the
-                // built-in mic after AudioTrack reports drained; a headset does
-                // not. Guarded audio cannot open a turn but is kept as pre-roll.
-                guardSamples = if (communication == null) PHONE_ECHO_GUARD_SAMPLES else 0,
+            return LiveCapture(
+                audioManager = audioManager,
+                turnId = turnId,
+                record = active,
+                communication = communication,
+                route = route,
+                setupMs = setupMs,
+                bufferFrames = bufferBytes / Short.SIZE_BYTES,
+                trackLag = largeBuffer,
             )
-        } finally {
-            val closeStartedNs = System.nanoTime()
+        } catch (failure: Throwable) {
             record?.let { active ->
                 runCatching {
                     if (active.recordingState == AudioRecord.RECORDSTATE_RECORDING) active.stop()
                 }
                 runCatching { active.release() }
             }
+            if (activeRecord === record) activeRecord = null
+            if (communication != null) runCatching { audioManager.clearCommunicationDevice() }
+            throw failure
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private inner class LiveCapture(
+        private val audioManager: AudioManager,
+        private val turnId: Long,
+        private val record: AudioRecord,
+        private val communication: AudioDeviceInfo?,
+        override val route: AudioRouteKind,
+        override val setupMs: Long,
+        private val bufferFrames: Int,
+        private val trackLag: Boolean,
+    ) : TurnCapture {
+        override val communicationAddress: String? = communication?.let { visibleAddress(it.address) }
+        override val communicationName: String = communication?.productName?.toString()?.trim()
+            ?.ifEmpty { "Bluetooth headset" }
+            ?: PHONE_ROUTE_NAME
+        // The loudspeaker tail of the previous translation reaches the
+        // built-in mic after AudioTrack reports drained; a headset does
+        // not. Guarded audio cannot open a turn but is kept as pre-roll.
+        override val guardSamples: Int = if (communication == null) PHONE_ECHO_GUARD_SAMPLES else 0
+        override var scoCloseMs: Long = 0L
+            private set
+        override var scoClosedNs: Long = 0L
+            private set
+        override var maxReadLagMs: Long = 0L
+            private set
+        override var overrunSuspected: Int = 0
+            private set
+        private var closed = false
+        private var framesRead = 0L
+        private var reads = 0
+        private val timestamp = AudioTimestamp()
+
+        override fun read(frame: ShortArray): Int {
+            val count = record.read(frame, 0, frame.size)
+            if (count < 0) error("AudioRecord.read failed with code $count")
+            framesRead += count
+            if (trackLag && ++reads % READ_LAG_CHECK_READS == 0 &&
+                record.getTimestamp(timestamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS
+            ) {
+                // Frames the HAL captured that this loop has not read yet. At
+                // the buffer size, AudioRecord starts overwriting audio.
+                val lag = (timestamp.framePosition - framesRead).coerceAtLeast(0L)
+                maxReadLagMs = maxOf(maxReadLagMs, lag * 1_000L / SAMPLE_RATE)
+                if (lag >= bufferFrames) overrunSuspected++
+            }
+            return count
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            val closeStartedNs = System.nanoTime()
+            runCatching {
+                if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) record.stop()
+            }
+            runCatching { record.release() }
             if (activeRecord === record) activeRecord = null
             // Always release the app-owned communication route. Keeping it set
             // leaves the TWS in SCO/call mode even if AudioRecord is gone. The
@@ -949,24 +1147,372 @@ class NpuEngine(
             scoCloseMs = (scoClosedNs - closeStartedNs) / 1_000_000L
             Log.i(HALF_DUPLEX_TAG, "turn=$turnId scoCloseMs=$scoCloseMs")
         }
-        val utterance = bounded ?: return null
-        return CapturedSegment(
-            id = turnId,
-            samples = utterance.samples,
-            enqueuedNs = System.nanoTime(),
-            forcedBoundary = utterance.forcedBoundary,
-            route = route,
-            communicationAddress = communication?.let { visibleAddress(it.address) },
-            communicationName = communication?.productName?.toString()?.trim()
-                ?.ifEmpty { "Bluetooth headset" }
-                ?: PHONE_ROUTE_NAME,
-            captureSetupMs = setupMs,
-            scoCloseMs = scoCloseMs,
-            scoClosedNs = scoClosedNs,
-        )
+    }
+
+    // ------------------------------------------------------------ long turns
+
+    private fun archiveFor(config: LongTurnConfig): TurnArchive =
+        turnArchive?.takeIf { it.capacity == config.archiveCapacitySamples }
+            ?: TurnArchive(config.archiveCapacitySamples).also { turnArchive = it }
+
+    /**
+     * ADAPTIVE turn: the microphone stays open across ASR windows while the
+     * coordinator recognizes, translates and synthesizes them. When the turn
+     * ends the input is closed (SCO released), and only then does this same
+     * thread prove the output route and play, so capture and playback can
+     * never overlap. The next turn starts only after every worker finished
+     * with this one, which is also what makes reusing the archive safe.
+     */
+    private fun runLongTurn(
+        provider: CaptureProvider,
+        turnId: Long,
+        detector: SpeechActivityDetector,
+        config: LongTurnConfig,
+    ) {
+        val coordinator = checkNotNull(longTurnCoordinator) { "long-turn workers are not running" }
+        val capture = provider.open(turnId)
+        if (capture == null) {
+            halfDuplex.finishTurn(turnId, "input_end")
+            return
+        }
+        val archive = archiveFor(config)
+        archive.clear()
+        val turn = LongTurn(turnId, sessionGeneration.get(), archive, config, System.nanoTime())
+        activeLongTurn = turn
+        var ended: SegmenterEvent.TurnEnded? = null
+        var turnOpened = false
+        try {
+            val segmenter = TurnSegmenter(
+                detector = detector,
+                archive = archive,
+                config = config,
+                guardSamples = capture.guardSamples,
+                log = { Log.i(TAG, it) },
+            )
+            val frame = ShortArray(FRAME_SAMPLES)
+            val vadLog = VadDebugLog(detector)
+            var inputEnded = false
+            while (running.get() && ended == null && !inputEnded) {
+                val abort = turn.abortRequest
+                val events: List<SegmenterEvent> = if (abort != null) {
+                    // Inference failed closed (e.g. routing rejected): stop
+                    // capturing now instead of recording a turn nobody will hear.
+                    listOfNotNull(segmenter.abort(abort))
+                } else {
+                    val count = capture.read(frame)
+                    if (count == 0) continue
+                    if (count < 0) {
+                        // End of a replay: flush an open turn, else there is nothing left.
+                        inputEnded = true
+                        segmenter.finish(TurnEndReason.INPUT_END)
+                    } else {
+                        val live = !segmenter.guarding
+                        segmenter.accept(frame, count).also {
+                            vadLog.onFrame(live, segmenter.lastFrameSpeech)
+                        }
+                    }
+                }
+                turn.capturedSamples = archive.size
+                turnOpened = turnOpened || segmenter.turnOpen || events.isNotEmpty()
+                for (event in events) {
+                    if (event is SegmenterEvent.TurnEnded) {
+                        ended = event
+                        turn.turnEndDetectedNs = System.nanoTime()
+                        // The terminal event must reach the worker even under
+                        // backlog: it is what releases this turn.
+                        coordinator.submitBlocking(turn, event)
+                    } else if (provider.blockingSubmit) {
+                        coordinator.submitBlocking(turn, event)
+                    } else if (!coordinator.submit(turn, event)) {
+                        turn.error = "Long-turn inference backlog overflow"
+                        turn.abortRequest = TurnEndReason.FAILED
+                    }
+                }
+                if (abort != null && events.isEmpty()) break
+            }
+        } finally {
+            capture.close()
+            turn.captureClosedNs = capture.scoClosedNs
+        }
+
+        if (ended == null) {
+            if (turnOpened) {
+                // Stopped while a turn was open: release the worker, report nothing played.
+                turn.cancelled = true
+                turn.audio.cancel()
+                runCatching {
+                    coordinator.submitBlocking(
+                        turn,
+                        SegmenterEvent.TurnEnded(TurnEndReason.CANCELLED, archive.size, archive.size, 0),
+                    )
+                }
+            }
+            halfDuplex.finishTurn(turnId, if (provider.exhausted) "input_end" else "capture_cancelled_or_noise")
+            activeLongTurn = null
+            return
+        }
+        val terminal = checkNotNull(ended)
+        var playback: LongTurnPlayback? = null
+        val failedClosed = terminal.reason == TurnEndReason.ROUTING_REJECTED ||
+            terminal.reason == TurnEndReason.FAILED || turn.error != null
+        if (!failedClosed && running.get()) {
+            halfDuplex.transition(
+                turnId,
+                HalfDuplexState.CAPTURING,
+                HalfDuplexState.PROCESSING,
+                "long_turn_ended_capture_closed",
+            )
+            playback = try {
+                playLongTurn(turn, capture, allowSoleFallback = provider.replayTag != null)
+            } catch (interrupted: InterruptedException) {
+                throw interrupted
+            } catch (failure: Throwable) {
+                val message = "Playback failed: ${failure.message ?: failure.javaClass.simpleName}"
+                if (turn.error == null) turn.error = message
+                // stop() stops the track under the writer; that is a cancel, not a fault.
+                if (running.get()) {
+                    Log.e(TAG, "Long turn $turnId playback failed", failure)
+                    notifyPipelineError(message)
+                }
+                null
+            }
+        }
+        while (!turn.awaitWorker(LONG_TURN_WORKER_POLL_MS) && running.get()) Unit
+        val complete = playback?.completed == true && turn.error == null
+        val direction = turn.direction
+        if (complete && direction != null) {
+            // Once per turn, after it was heard in full. A turn cut by the cap
+            // expects the same speaker to continue; otherwise the other one.
+            pipeline?.commitTurn(direction, sameSpeakerNext = terminal.reason == TurnEndReason.TURN_CAP)
+        }
+        if (terminal.reason == TurnEndReason.TURN_CAP && turn.error == null) {
+            notifyPipelineError(
+                "Turn reached the ${config.maxTurnSamples / SAMPLE_RATE} s limit; " +
+                    "speech after it was not captured.",
+            )
+        }
+        reportLongTurn(turn, terminal, capture, playback, provider)
+        halfDuplex.finishTurn(turnId, turn.error?.let { "long_turn_failed" } ?: "turn_complete")
+        activeLongTurn = null
+    }
+
+    private class LongTurnPlayback(
+        val a2dpRestoreMs: Long,
+        val routePollMs: Long,
+        val playbackMs: Long,
+        val unitsPlayed: Int,
+        /** Content frames written after the route proof, pauses included. */
+        val framesWritten: Long,
+        val underruns: Int,
+        /**
+         * Underruns up to the last write. The end of the stream always
+         * underruns once while draining; this one counts only gaps between units.
+         */
+        val underrunsBeforeDrain: Int,
+        /** Time the track had played everything written while the next unit was not ready. */
+        val starvedMs: Long,
+        val completed: Boolean,
+        val outcome: String,
+    )
+
+    /**
+     * One AudioTrack for the whole turn: route proof once, then every unit is
+     * appended in order with a short pause between units. The proof runs while
+     * the last units are still being synthesized. Stereo frames are staged in
+     * small blocks instead of one turn-sized interleaved copy.
+     */
+    private fun playLongTurn(
+        turn: LongTurn,
+        capture: TurnCapture,
+        allowSoleFallback: Boolean,
+    ): LongTurnPlayback {
+        var locked = false
+        var track: AudioTrack? = null
+        val replay = ReplayAccumulator(turn.config.replayMaxBytes)
+        try {
+            playbackLock.lockInterruptibly(); locked = true
+            val proven = openProvenTrack(
+                sampleRate = TTS_SAMPLE_RATE,
+                bufferFrames = TTS_SAMPLE_RATE,
+                route = capture.route,
+                communicationAddress = capture.communicationAddress,
+                communicationName = capture.communicationName,
+                scoClosedNs = capture.scoClosedNs,
+                turnId = turn.turnId,
+                coordinated = true,
+                allowSoleFallback = allowSoleFallback,
+            )
+            turn.routeConfirmedNs = System.nanoTime()
+            val activeTrack = proven.track
+            track = activeTrack
+            val scratch = FloatArray(PLAYBACK_BLOCK_FRAMES * 2)
+            val pauseFrames = turn.config.unitPauseMs * TTS_SAMPLE_RATE / 1_000
+            var unitsPlayed = 0
+            var written = 0L
+            var baselineUnderruns = 0
+            var starvedMs = 0L
+            var playbackStartedNs = 0L
+            fun delivered(): Long =
+                ((activeTrack.playbackHeadPosition.toLong() and 0xffff_ffffL) - proven.contentStartFrame)
+                    .coerceAtLeast(0L)
+            var outcome = "stopped"
+            loop@ while (true) {
+                when (val take = turn.audio.take(LONG_TURN_PLAYBACK_POLL_MS)) {
+                    is AudioTake.Item -> {
+                        val audio = take.audio
+                        if (audio.revision != turn.revision) continue@loop
+                        val direction = checkNotNull(turn.direction)
+                        if (unitsPlayed == 0) {
+                            // Lost the race with a CPU recovery: its units replace this one.
+                            if (!turn.markPlaybackStarted()) continue@loop
+                            baselineUnderruns = activeTrack.underrunCount
+                            halfDuplex.transition(
+                                turn.turnId,
+                                HalfDuplexState.PROCESSING,
+                                HalfDuplexState.PLAYING,
+                                if (capture.route == AudioRouteKind.PHONE) "speaker_route_ready" else "a2dp_route_confirmed",
+                            )
+                            playbackStartedNs = System.nanoTime()
+                            turn.firstContentWriteNs = playbackStartedNs
+                        } else {
+                            written += writeSilence(activeTrack, pauseFrames, scratch)
+                            replay.appendSilence(pauseFrames)
+                        }
+                        written += writeStereoBlocks(activeTrack, audio.mono, direction, capture.route, scratch)
+                        replay.append(audio.mono)
+                        unitsPlayed++
+                    }
+                    AudioTake.Finished -> {
+                        outcome = "complete"
+                        break@loop
+                    }
+                    is AudioTake.Failed -> {
+                        outcome = if (unitsPlayed > 0) "partial_failure" else "failed"
+                        break@loop
+                    }
+                    AudioTake.Cancelled -> {
+                        outcome = "cancelled"
+                        break@loop
+                    }
+                    AudioTake.Timeout -> {
+                        if (!running.get()) break@loop
+                        if (unitsPlayed > 0 && delivered() >= written) starvedMs += LONG_TURN_PLAYBACK_POLL_MS
+                    }
+                }
+            }
+            val underrunsBeforeDrain = if (unitsPlayed > 0) activeTrack.underrunCount - baselineUnderruns else 0
+            if (unitsPlayed > 0) {
+                val remainingMs = (written - delivered()).coerceAtLeast(0L) * 1_000L / TTS_SAMPLE_RATE
+                val deadlineNs = System.nanoTime() + (remainingMs + PLAYBACK_DRAIN_GRACE_MS) * 1_000_000L
+                while (delivered() < written &&
+                    activeTrack.playState == AudioTrack.PLAYSTATE_PLAYING &&
+                    System.nanoTime() < deadlineNs
+                ) {
+                    Thread.sleep(PLAYBACK_DRAIN_POLL_MS)
+                }
+            }
+            val drained = delivered() >= written
+            val underruns = if (unitsPlayed > 0) activeTrack.underrunCount - baselineUnderruns else 0
+            telemetry?.noteAudio(requested = written, written = written, underrun = underruns > 0)
+            Log.i(
+                TAG,
+                "Long-turn playback turn=${turn.turnId} outcome=$outcome units=$unitsPlayed " +
+                    "frames=$written delivered=${delivered()} underruns=$underruns starvedMs=$starvedMs " +
+                    "targetChannel=${targetChannelLabel(capture.route, turn.direction)}",
+            )
+            val played = if (unitsPlayed > 0) replay.result() else null
+            turn.replayAudio = played
+            if (played != null) {
+                played.let { mono ->
+                    lastAudio = ReplayAudio(
+                        mono = mono,
+                        sampleRate = TTS_SAMPLE_RATE,
+                        direction = checkNotNull(turn.direction),
+                        route = capture.route,
+                        communicationAddress = capture.communicationAddress,
+                        communicationName = capture.communicationName,
+                    )
+                    runCatching { pipelineListener?.onAudioReady() }
+                }
+            }
+            return LongTurnPlayback(
+                a2dpRestoreMs = proven.a2dpRestoreMs,
+                routePollMs = proven.routePollMs,
+                playbackMs = if (playbackStartedNs == 0L) 0L else (System.nanoTime() - playbackStartedNs) / 1_000_000L,
+                unitsPlayed = unitsPlayed,
+                framesWritten = written,
+                underruns = underruns,
+                underrunsBeforeDrain = underrunsBeforeDrain,
+                starvedMs = starvedMs,
+                completed = outcome == "complete" && unitsPlayed > 0 && drained,
+                outcome = if (outcome == "complete" && !drained) "drain_timeout" else outcome,
+            )
+        } finally {
+            track?.let { runCatching { it.stop() }; runCatching { it.release() } }
+            if (activePlaybackTrack === track) activePlaybackTrack = null
+            if (locked) playbackLock.unlock()
+        }
+    }
+
+    private fun targetChannelLabel(route: AudioRouteKind, direction: TranslationDirection?): String = when {
+        route == AudioRouteKind.PHONE -> "both_speaker"
+        direction == TranslationDirection.EN_TO_VI -> "left_vi"
+        else -> "right_en"
+    }
+
+    /** Mono -> stereo in fixed blocks: target VI left, EN right on Bluetooth; both on the phone. */
+    private fun writeStereoBlocks(
+        track: AudioTrack,
+        mono: FloatArray,
+        direction: TranslationDirection,
+        route: AudioRouteKind,
+        scratch: FloatArray,
+    ): Long {
+        val blockFrames = scratch.size / 2
+        val target = if (direction == TranslationDirection.EN_TO_VI) 0 else 1
+        var frame = 0
+        while (frame < mono.size) {
+            val count = minOf(blockFrames, mono.size - frame)
+            for (index in 0 until count) {
+                val sample = mono[frame + index]
+                if (route == AudioRouteKind.PHONE) {
+                    scratch[index * 2] = sample
+                    scratch[index * 2 + 1] = sample
+                } else {
+                    scratch[index * 2 + target] = sample
+                    scratch[index * 2 + 1 - target] = 0f
+                }
+            }
+            writeFully(track, scratch, count * 2)
+            frame += count
+        }
+        return mono.size.toLong()
+    }
+
+    private fun writeSilence(track: AudioTrack, frames: Int, scratch: FloatArray): Long {
+        java.util.Arrays.fill(scratch, 0f)
+        var remaining = frames
+        while (remaining > 0) {
+            val count = minOf(scratch.size / 2, remaining)
+            writeFully(track, scratch, count * 2)
+            remaining -= count
+        }
+        return frames.toLong()
+    }
+
+    /** A blocking write may still accept part of the buffer; loop until all floats are in. */
+    private fun writeFully(track: AudioTrack, data: FloatArray, floats: Int) {
+        var offset = 0
+        while (offset < floats) {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+            val count = track.write(data, offset, floats - offset, AudioTrack.WRITE_BLOCKING)
+            check(count > 0) { "AudioTrack.write failed with code $count" }
+            offset += count
+        }
     }
 
     @SuppressLint("MissingPermission")
+    @RequiresApi(Build.VERSION_CODES.S)
     private fun resolveCaptureRoute(audioManager: AudioManager): RouteChoice<AudioDeviceInfo> {
         val candidates = audioManager.availableCommunicationDevices.filter { device ->
             device.isSink && isBluetoothCommunicationType(device.type)
@@ -1039,40 +1585,45 @@ class NpuEngine(
     }
 
     private fun readBoundedUtterance(
-        record: AudioRecord,
+        capture: TurnCapture,
         detector: SpeechActivityDetector,
         guardSamples: Int = 0,
     ): BoundedUtterance? {
         val frame = ShortArray(FRAME_SAMPLES)
         val segmenter = UtteranceSegmenter(detector, guardSamples, log = { Log.i(TAG, it) })
-        var vadFrames = 0
-        var vadSpeechFrames = 0
-        var vadPeakScore = 0f
+        val vadLog = VadDebugLog(detector)
         while (running.get()) {
-            val count = record.read(frame, 0, frame.size)
-            if (count < 0) error("AudioRecord.read failed with code $count")
+            val count = capture.read(frame)
+            if (count < 0) return null
             if (count == 0) continue
             val live = !segmenter.guarding
             val utterance = segmenter.accept(frame, count)
-            if (BuildConfig.DEBUG && live) {
-                // One line per second of capture: peak detector score and how
-                // many 20 ms frames it called speech. Debug builds only.
-                vadPeakScore = maxOf(vadPeakScore, detector.lastScore)
-                if (segmenter.lastFrameSpeech) vadSpeechFrames++
-                if (++vadFrames == VAD_LOG_FRAMES) {
-                    Log.d(
-                        VAD_TAG,
-                        "${detector.name} peak=${"%.3f".format(vadPeakScore)} " +
-                            "speechFrames=$vadSpeechFrames/$vadFrames",
-                    )
-                    vadFrames = 0
-                    vadSpeechFrames = 0
-                    vadPeakScore = 0f
-                }
-            }
+            vadLog.onFrame(live, segmenter.lastFrameSpeech)
             if (utterance != null) return utterance
         }
         return null
+    }
+
+    /** One line per second of capture: peak detector score and speech frames. Debug builds only. */
+    private class VadDebugLog(private val detector: SpeechActivityDetector) {
+        private var frames = 0
+        private var speechFrames = 0
+        private var peakScore = 0f
+
+        fun onFrame(live: Boolean, speech: Boolean) {
+            if (!BuildConfig.DEBUG || !live) return
+            peakScore = maxOf(peakScore, detector.lastScore)
+            if (speech) speechFrames++
+            if (++frames == VAD_LOG_FRAMES) {
+                Log.d(
+                    VAD_TAG,
+                    "${detector.name} peak=${"%.3f".format(peakScore)} speechFrames=$speechFrames/$frames",
+                )
+                frames = 0
+                speechFrames = 0
+                peakScore = 0f
+            }
+        }
     }
 
     /**
@@ -1252,6 +1803,7 @@ class NpuEngine(
                             scoClosedNs = captured.scoClosedNs,
                             turnId = captured.id,
                             coordinated = !captured.benchmark,
+                            allowSoleFallback = captured.benchmark || captured.replayTag != null,
                         )
                     }
                     recordBenchRow(
@@ -1329,22 +1881,33 @@ class NpuEngine(
         val firstAudioNs: Long,
     )
 
-    private fun playStereo(
-        mono: FloatArray,
+    /** A playing AudioTrack whose actual output route has been proven. */
+    private class ProvenTrack(
+        val track: AudioTrack,
+        /** Stream frame where content starts: the route-proof silence already written. */
+        val contentStartFrame: Long,
+        val a2dpRestoreMs: Long,
+        val routePollMs: Long,
+    )
+
+    /**
+     * Build a stereo float track, feed it route-proof silence, start it and
+     * poll the routed device. No translated sample is written before this
+     * returns; on failure the track is released here.
+     */
+    private fun openProvenTrack(
         sampleRate: Int,
-        direction: TranslationDirection,
+        bufferFrames: Int,
         route: AudioRouteKind,
         communicationAddress: String?,
         communicationName: String,
         scoClosedNs: Long,
         turnId: Long,
         coordinated: Boolean,
-    ): PlaybackMetrics {
-        var locked = false
+        allowSoleFallback: Boolean,
+    ): ProvenTrack {
         var track: AudioTrack? = null
-        var playbackStartedNs = 0L
         try {
-            playbackLock.lockInterruptibly(); locked = true
             val audioManager = checkNotNull(
                 appContext.getSystemService(AudioManager::class.java),
             ) { "Android AudioManager is unavailable" }
@@ -1360,7 +1923,7 @@ class NpuEngine(
                         communicationAddress = communicationAddress,
                         communicationName = communicationName,
                         deadlineNs = routeDeadlineNs,
-                        allowSoleFallback = !coordinated,
+                        allowSoleFallback = allowSoleFallback,
                     )
                 } catch (failure: Throwable) {
                     Log.w(
@@ -1384,10 +1947,7 @@ class NpuEngine(
             check(minimum > 0) {
                 "AudioTrack does not support $sampleRate Hz stereo float PCM"
             }
-            val requestedBufferFrames = maxOf(
-                ROUTE_PRIME_FRAMES,
-                minOf(mono.size, sampleRate),
-            )
+            val requestedBufferFrames = maxOf(ROUTE_PRIME_FRAMES, bufferFrames)
             val activeTrack = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -1467,6 +2027,44 @@ class NpuEngine(
                     "preferred=${describeDevice(mediaDevice)} routed=$routeSet",
             )
 
+            return ProvenTrack(activeTrack, routePrimed / 2L, a2dpRestoreMs, routePollMs)
+        } catch (failure: Throwable) {
+            track?.let { runCatching { it.stop() }; runCatching { it.release() } }
+            if (activePlaybackTrack === track) activePlaybackTrack = null
+            throw failure
+        }
+    }
+
+    private fun playStereo(
+        mono: FloatArray,
+        sampleRate: Int,
+        direction: TranslationDirection,
+        route: AudioRouteKind,
+        communicationAddress: String?,
+        communicationName: String,
+        scoClosedNs: Long,
+        turnId: Long,
+        coordinated: Boolean,
+        allowSoleFallback: Boolean = !coordinated,
+    ): PlaybackMetrics {
+        var locked = false
+        var track: AudioTrack? = null
+        var playbackStartedNs = 0L
+        try {
+            playbackLock.lockInterruptibly(); locked = true
+            val proven = openProvenTrack(
+                sampleRate = sampleRate,
+                bufferFrames = minOf(mono.size, sampleRate),
+                route = route,
+                communicationAddress = communicationAddress,
+                communicationName = communicationName,
+                scoClosedNs = scoClosedNs,
+                turnId = turnId,
+                coordinated = coordinated,
+                allowSoleFallback = allowSoleFallback,
+            )
+            val activeTrack = proven.track
+            track = activeTrack
             // Content is appended behind the proof silence on the same playing
             // track. pause()+flush() used to discard that silence, but on the
             // loudspeaker path the flush is applied late and left frames
@@ -1477,7 +2075,7 @@ class NpuEngine(
                 AudioRouteKind.BLUETOOTH -> interleaveTargetStereo(mono, direction)
                 AudioRouteKind.PHONE -> duplicateMonoStereo(mono)
             }
-            val contentStartFrame = routePrimed / 2L
+            val contentStartFrame = proven.contentStartFrame
             val baselineUnderruns = activeTrack.underrunCount
             if (coordinated) {
                 halfDuplex.transition(
@@ -1539,8 +2137,8 @@ class NpuEngine(
                 )
             }
             return PlaybackMetrics(
-                a2dpRestoreMs = a2dpRestoreMs,
-                routePollMs = routePollMs,
+                a2dpRestoreMs = proven.a2dpRestoreMs,
+                routePollMs = proven.routePollMs,
                 playbackMs = (System.nanoTime() - playbackStartedNs) / 1_000_000L,
                 firstAudioNs = playbackStartedNs,
             )
@@ -1550,6 +2148,353 @@ class NpuEngine(
             track?.let { runCatching { it.stop() }; runCatching { it.release() } }
             if (activePlaybackTrack === track) activePlaybackTrack = null
             if (locked) playbackLock.unlock()
+        }
+    }
+
+    /**
+     * One routing row per long turn (schema 2): the legacy fields keep their
+     * meaning so existing scorers still read it, and `longTurn` adds windows,
+     * units and the endpoint-relative timeline. Window and unit rows are
+     * logged separately (OneVoiceLongTurn) so they never inflate per-turn counts.
+     */
+    private fun reportLongTurn(
+        turn: LongTurn,
+        ended: SegmenterEvent.TurnEnded,
+        capture: TurnCapture,
+        playback: LongTurnPlayback?,
+        provider: CaptureProvider,
+    ) {
+        val routing = turn.routing
+        val units = synchronized(turn.units) { turn.units.filter { it.revision == turn.revision } }
+        val chunks = synchronized(turn.chunks) { turn.chunks.filter { it.revision == turn.revision } }
+        val endpointNs = turn.turnEndDetectedNs
+        fun sinceEndpointMs(ns: Long): Any =
+            if (ns == 0L || endpointNs == 0L) JSONObject.NULL else (ns - endpointNs) / 1_000_000L
+        val realtime = provider.inputMode != "replay_fast"
+        // Live audio arrives in real time, so the last speech sample was
+        // captured this long before the endpoint fired (the hangover).
+        val speechEndNs = if (realtime && endpointNs != 0L) {
+            endpointNs - (ended.archivedSamples - ended.lastSpeechSample).toLong() * 1_000_000_000L / SAMPLE_RATE
+        } else {
+            0L
+        }
+        val firstContent = turn.firstContentWriteNs
+        val endpointToFirstContentMs =
+            if (firstContent != 0L && endpointNs != 0L) (firstContent - endpointNs) / 1_000_000L else null
+        val totalMs = (System.nanoTime() - (endpointNs.takeIf { it != 0L } ?: turn.openedNs)) / 1_000_000L
+        val asrMs = chunks.sumOf { it.asrMs }
+        val mtMs = units.sumOf { it.mtMs }
+        val ttsMs = units.sumOf { it.ttsMs }
+        val outputAudioMs = units.sumOf { it.audioMs }
+        val error = turn.error
+        // Accepted speech, as LEGACY reports it: up to the last owned core,
+        // without the end-of-turn silence that is still in the archive.
+        val acceptedMs = (chunks.maxOfOrNull { it.chunk.coreEnd } ?: ended.lastSpeechSample) * 1_000L / SAMPLE_RATE
+
+        val row = JSONObject().apply {
+            put("schema", 2)
+            put("timestamp", System.currentTimeMillis())
+            put("turnId", turn.turnId)
+            put("inputMode", provider.inputMode)
+            put("audioMs", acceptedMs)
+            put("audioRoute", capture.route.name.lowercase(Locale.ROOT))
+            put("routingMode", routing?.mode?.name ?: routingConfig.mode.name)
+            put("marginThreshold", routingConfig.marginThreshold)
+            put("floorThreshold", routingConfig.floorThreshold)
+            put("priorWeight", routingConfig.priorWeight)
+            put("enScoreOffset", routingConfig.enScoreOffset)
+            put("vi", branchJson(routing?.vi))
+            put("en", branchJson(routing?.en))
+            put("lid", if (routing?.mode == RoutingMode.LID) {
+                JSONObject().apply {
+                    put("language", routing.lidLanguage ?: JSONObject.NULL)
+                    put("confidence", routing.lidConfidence ?: JSONObject.NULL)
+                    put("margin", routing.lidMargin ?: JSONObject.NULL)
+                    put("latencyMs", routing.lidMs ?: JSONObject.NULL)
+                }
+            } else {
+                JSONObject.NULL
+            })
+            put("prior", routing?.priorExpected?.manifestId ?: JSONObject.NULL)
+            put("decision", turn.direction?.manifestId ?: JSONObject.NULL)
+            put("reason", routing?.reason?.logValue ?: "pipeline_error")
+            put("normalizedMargin", routing?.normalizedMargin?.takeIf(Double::isFinite) ?: JSONObject.NULL)
+            put("executionPath", turn.executionPath?.name ?: JSONObject.NULL)
+            put("error", error ?: routing?.error ?: JSONObject.NULL)
+            put("latencyMs", JSONObject().apply {
+                put("captureSetup", capture.setupMs)
+                put("scoClose", capture.scoCloseMs)
+                put("queueWait", chunks.maxOfOrNull { it.queueAgeMs } ?: 0L)
+                put("frontend", routing?.frontendMs ?: 0L)
+                put("dualAsrWall", routing?.dualAsrWallMs ?: 0L)
+                // Stage sums overlap capture and each other; never add them up as wall time.
+                put("selectedAsr", asrMs)
+                put("mt", mtMs)
+                put("tts", ttsMs)
+                put("a2dpRestore", playback?.a2dpRestoreMs ?: JSONObject.NULL)
+                put("routePoll", playback?.routePollMs ?: JSONObject.NULL)
+                put("playback", playback?.playbackMs ?: JSONObject.NULL)
+                // Endpoint (speech end + hangover) -> first translated sample written.
+                put("firstAudio", endpointToFirstContentMs ?: JSONObject.NULL)
+                put("postBoundTotal", totalMs)
+            })
+            put("longTurn", JSONObject().apply {
+                put("mode", turn.config.mode.name)
+                put("splitPolicy", turn.config.splitPolicy.name)
+                put("backgroundTranslation", turn.config.backgroundTranslation)
+                put("endReason", ended.reason.logValue)
+                put("windows", chunks.size)
+                put("forcedCuts", chunks.count { it.chunk.cut == ChunkCut.FORCED })
+                put("units", units.size)
+                put("emptyUnits", turn.emptyUnits)
+                put("revision", turn.revision)
+                put("partialFailure", turn.partialFailure)
+                put("archivedSamples", ended.archivedSamples)
+                put("lastSpeechSample", ended.lastSpeechSample)
+                put("droppedAtCap", ended.droppedAtCap)
+                put("speechEndToFirstContentMs",
+                    if (speechEndNs != 0L && firstContent != 0L) (firstContent - speechEndNs) / 1_000_000L else JSONObject.NULL)
+                put("endpointToFirstContentMs", endpointToFirstContentMs ?: JSONObject.NULL)
+                put("captureClosedMs", sinceEndpointMs(turn.captureClosedNs))
+                put("firstPreparedMs", sinceEndpointMs(turn.firstPreparedNs))
+                put("routeConfirmedMs", sinceEndpointMs(turn.routeConfirmedNs))
+                put("maxBacklogMs", chunks.maxOfOrNull { it.backlogMs } ?: 0L)
+                put("maxQueueAgeMs", chunks.maxOfOrNull { it.queueAgeMs } ?: 0L)
+                put("captureReadLagMaxMs", capture.maxReadLagMs)
+                put("captureOverrunSuspected", capture.overrunSuspected)
+                put("archiveBytes", turn.archive.bytes)
+                put("ttsQueueHighWaterBytes", turn.audio.highWaterBytes)
+                put("unitsPlayed", playback?.unitsPlayed ?: 0)
+                put("playbackOutcome", playback?.outcome ?: JSONObject.NULL)
+                put("underruns", playback?.underruns ?: JSONObject.NULL)
+                put("underrunsBeforeDrain", playback?.underrunsBeforeDrain ?: JSONObject.NULL)
+                put("starvedMs", playback?.starvedMs ?: JSONObject.NULL)
+                put("outputAudioMs", outputAudioMs)
+            })
+        }
+        Log.i(TUNING_TAG, row.toString())
+
+        val sessionRow = JSONObject(row.toString()).apply {
+            put("type", "turn")
+            put("transcript", turn.transcript.ifEmpty { null } ?: JSONObject.NULL)
+            put("translation", turn.translation.ifEmpty { null } ?: JSONObject.NULL)
+            put("ttsAudioMs", outputAudioMs)
+            put("units", org.json.JSONArray().apply {
+                units.forEach { unit ->
+                    put(JSONObject().apply {
+                        put("index", unit.unit.index)
+                        put("reason", unit.unit.reason.logValue)
+                        put("source", unit.unit.text)
+                        put("translation", unit.translation)
+                    })
+                }
+            })
+        }
+        val tag = provider.replayTag
+        if (tag == null) {
+            sessionRecorder.append(sessionRow)
+        } else {
+            val turnTag = "${tag}_t${turn.turnId}"
+            benchRecorder.append(sessionRow.put("tag", turnTag).put("replayTag", tag))
+            turn.replayAudio?.let { audio ->
+                runCatching {
+                    val dir = File(appContext.filesDir, "bench/tts").apply { mkdirs() }
+                    val bytes = java.nio.ByteBuffer.allocate(audio.size * Float.SIZE_BYTES)
+                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    audio.forEach(bytes::putFloat)
+                    File(dir, "$turnTag.f32").writeBytes(bytes.array())
+                }.onFailure { Log.w(TAG, "replay waveform $turnTag not saved", it) }
+            }
+        }
+        val report = TurnReport(
+            turnId = turn.turnId,
+            timestampMs = System.currentTimeMillis(),
+            audioMs = acceptedMs,
+            route = capture.route.name.lowercase(Locale.ROOT),
+            direction = turn.direction,
+            reason = routing?.reason?.logValue ?: "pipeline_error",
+            executionPath = turn.executionPath,
+            transcript = turn.transcript.ifEmpty { null },
+            translation = turn.translation.ifEmpty { null },
+            error = error,
+            viScore = routing?.vi?.hypothesis?.normalizedLogProb?.takeIf(Double::isFinite),
+            enScore = routing?.en?.hypothesis?.normalizedLogProb?.takeIf(Double::isFinite),
+            frontendMs = routing?.frontendMs ?: 0L,
+            dualAsrWallMs = routing?.dualAsrWallMs ?: 0L,
+            mtMs = mtMs,
+            ttsMs = ttsMs,
+            queueWaitMs = chunks.maxOfOrNull { it.queueAgeMs } ?: 0L,
+            ttsAudioMs = outputAudioMs.takeIf { it > 0L },
+            firstAudioMs = endpointToFirstContentMs,
+            postBoundTotalMs = totalMs,
+        )
+        if (isCurrent(turn)) runCatching { pipelineListener?.onTurnReport(report) }
+    }
+
+    private fun branchJson(value: TimedAsrHypothesis?): Any = if (value == null) {
+        JSONObject.NULL
+    } else {
+        JSONObject().apply {
+            put("rawLogProb", value.hypothesis.rawLogProb)
+            put("tokenCount", value.hypothesis.tokenCount)
+            put(
+                "normalizedLogProb",
+                value.hypothesis.normalizedLogProb.takeIf(Double::isFinite) ?: JSONObject.NULL,
+            )
+            put("latencyMs", value.elapsedMs)
+        }
+    }
+
+    private fun isCurrent(turn: LongTurn): Boolean = turn.generation == sessionGeneration.get()
+
+    /** Coordinator hooks: UI updates for the current session, and per-window/unit log rows. */
+    private val longTurnListener = object : LongTurnListener {
+        override fun onTranscript(turn: LongTurn, transcript: String, pending: String, translation: String?) {
+            if (!isCurrent(turn)) return
+            val direction = turn.direction ?: return
+            val shown = listOf(transcript, pending).filter(String::isNotEmpty).joinToString(" ")
+            if (shown.isEmpty()) return
+            notifySegment(shown, translation, direction, turn.executionPath ?: ExecutionPath.HYBRID_NPU)
+        }
+
+        override fun onChunk(turn: LongTurn, record: ChunkRecord) {
+            Log.i(LONG_TURN_TAG, JSONObject().apply {
+                put("type", "window")
+                put("turnId", turn.turnId)
+                put("index", record.chunk.index)
+                put("start", record.chunk.start)
+                put("end", record.chunk.end)
+                put("coreStart", record.chunk.coreStart)
+                put("coreEnd", record.chunk.coreEnd)
+                put("cut", record.chunk.cut.logValue)
+                put("path", record.path?.name ?: JSONObject.NULL)
+                put("asrMs", record.asrMs)
+                put("queueAgeMs", record.queueAgeMs)
+                put("backlogMs", record.backlogMs)
+                put("words", record.words)
+                put("committedWords", record.committedWords)
+                put("revision", record.revision)
+            }.toString())
+        }
+
+        override fun onUnit(turn: LongTurn, record: UnitRecord) {
+            Log.i(LONG_TURN_TAG, JSONObject().apply {
+                put("type", "unit")
+                put("turnId", turn.turnId)
+                put("index", record.unit.index)
+                put("reason", record.unit.reason.logValue)
+                put("words", record.unit.wordCount)
+                put("sourceTokens", record.unit.sourceTokens)
+                put("firstWordSample", record.unit.firstWordSample)
+                put("lastWordSample", record.unit.lastWordSample)
+                record.unit.boundaryGapSamples?.let { put("boundaryGapMs", LongTurnConfig.toMs(it)) }
+                put("path", record.path.name)
+                put("mtMs", record.mtMs)
+                put("outputTokens", record.outputTokens)
+                put("truncationSplits", record.truncationSplits)
+                put("revision", record.revision)
+            }.toString())
+        }
+
+        override fun onUnitAudio(turn: LongTurn, record: UnitRecord) {
+            Log.i(
+                LONG_TURN_TAG,
+                "{\"type\":\"unit_audio\",\"turnId\":${turn.turnId},\"index\":${record.unit.index}," +
+                    "\"ttsMs\":${record.ttsMs},\"audioMs\":${record.audioMs},\"revision\":${record.revision}}",
+            )
+        }
+
+        override fun onTurnFailed(turn: LongTurn, message: String) {
+            Log.w(TAG, "Long turn ${turn.turnId}: $message")
+            if (isCurrent(turn)) notifyPipelineError(message)
+        }
+    }
+
+    /**
+     * Replay a 16 kHz mono recording through the production capture path:
+     * segmenter, coordinator, TTS and playback exactly as live, with a file
+     * instead of the microphone. [baseline] (B0..B3) selects the long-turn
+     * policy for this replay only. The receiver only dispatches; the file is
+     * read on the replay worker.
+     */
+    @Synchronized
+    internal fun benchReplay(
+        file: File,
+        paced: Boolean,
+        baseline: String?,
+        tag: String?,
+        softSplitMs: Int? = null,
+        unitTokens: Pair<Int, Int>? = null,
+        fillLeftContext: Boolean? = null,
+    ): Boolean {
+        if (telemetry?.enabled != true) return false
+        if (pipeline == null) {
+            lastError = "NPU pipeline is not initialized."
+            return false
+        }
+        val busy = listOfNotNull(captureThread, pipelineThread, ttsThread, replayThread).any(Thread::isAlive)
+        if (running.get() || busy) {
+            lastError = "benchReplay refused: a live session or worker owns the engine."
+            return false
+        }
+        val config = runCatching {
+            val chosen = baseline?.let(buildLongTurnConfig::forBaseline) ?: buildLongTurnConfig
+            // Tuning sweep without a rebuild; validated by LongTurnConfig's init.
+            val split = softSplitMs?.let { chosen.copy(softSplitSamples = LongTurnConfig.ms(it)) } ?: chosen
+            val units = unitTokens?.let { (first, later) ->
+                split.copy(firstUnitTargetTokens = first, unitTargetTokens = later)
+            } ?: split
+            fillLeftContext?.let { units.copy(fillLeftContext = it) } ?: units
+        }.getOrElse {
+            lastError = it.message
+            return false
+        }
+        running.set(true)
+        lastError = null
+        longTurnConfig = config
+        segments.clear()
+        halfDuplex.reset()
+        startInferenceWorkers(config)
+        captureThread = Thread({ replayCaptureMain(file, paced, tag, config) }, "onevoice-replay-capture")
+            .apply { start() }
+        return true
+    }
+
+    private fun replayCaptureMain(file: File, paced: Boolean, tag: String?, config: LongTurnConfig) {
+        val startedNs = System.nanoTime()
+        var provider: ReplayCaptureProvider? = null
+        try {
+            val pcm = readReplayPcm(file)
+            val replay = ReplayCaptureProvider(
+                pcm = pcm,
+                paced = paced,
+                replayTag = tag ?: file.nameWithoutExtension.replace(Regex("[^A-Za-z0-9_-]"), "_"),
+                route = standalonePlaybackRoute(),
+                tailSilenceSamples = config.endSilenceSamples + LongTurnConfig.ms(200),
+            )
+            provider = replay
+            Log.i(
+                TAG,
+                "replay start file=${file.name} samples=${pcm.size} durationMs=${pcm.size * 1_000L / SAMPLE_RATE} " +
+                    "input=${replay.inputMode} longTurn=${config.mode} split=${config.splitPolicy} " +
+                    "background=${config.backgroundTranslation} tag=${replay.replayTag}",
+            )
+            captureLoop(replay)
+        } catch (failure: Throwable) {
+            Log.e(TAG, "replay ${file.name} failed", failure)
+            lastError = "Replay failed: ${failure.message ?: failure.javaClass.simpleName}"
+        } finally {
+            Log.i(
+                TAG,
+                "replay done file=${file.name} turns=${provider?.turnsOpened ?: 0} " +
+                    "skippedWhileClosedMs=${(provider?.skippedWhileClosed ?: 0L) * 1_000L / SAMPLE_RATE} " +
+                    "wallMs=${(System.nanoTime() - startedNs) / 1_000_000L}",
+            )
+            running.set(false)
+            halfDuplex.cancel("replay_done")
+            pipelineThread?.interrupt()
+            ttsThread?.interrupt()
+            longTurnConfig = buildLongTurnConfig
         }
     }
 
@@ -1687,6 +2632,7 @@ class NpuEngine(
         val row = JSONObject().apply {
             put("timestamp", System.currentTimeMillis())
             put("turnId", captured.id)
+            put("inputMode", captured.inputMode)
             put("audioMs", captured.samples.size * 1_000L / SAMPLE_RATE)
             put("audioRoute", captured.route.name.lowercase(Locale.ROOT))
             put("routingMode", routing?.mode?.name ?: routingConfig.mode.name)
@@ -1776,7 +2722,13 @@ class NpuEngine(
             firstAudioMs = firstAudioMs,
             postBoundTotalMs = totalMs,
         )
-        sessionRecorder.append(turnRow(row, text, ttsAudioMs))
+        val sessionRow = turnRow(row, text, ttsAudioMs)
+        val tag = captured.replayTag
+        if (tag == null) {
+            sessionRecorder.append(sessionRow)
+        } else {
+            benchRecorder.append(sessionRow.put("tag", tag))
+        }
         runCatching { pipelineListener?.onTurnReport(report) }
     }
 
@@ -1948,6 +2900,14 @@ class NpuEngine(
         const val CAPTURE_JOIN_MS = 2_000L
         const val PIPELINE_JOIN_MS = 4_000L
         const val REPLAY_JOIN_MS = 2_000L
+        /** AudioRecord buffer for long turns: 2 s of 16 kHz PCM16 absorbs CPU contention. */
+        const val LONG_TURN_RECORD_BUFFER_BYTES = SAMPLE_RATE * 2 * 2
+        /** Read-lag sample interval: once per second of 20 ms reads. */
+        const val READ_LAG_CHECK_READS = 50
+        const val LONG_TURN_PLAYBACK_POLL_MS = 50L
+        const val LONG_TURN_WORKER_POLL_MS = 100L
+        /** Stereo staging block for long-turn playback: 100 ms at 24 kHz. */
+        const val PLAYBACK_BLOCK_FRAMES = TTS_SAMPLE_RATE / 10
 
         val HYBRID_QNN_STAGES = setOf("asr", "mt_encoder", "mt_decoder")
 

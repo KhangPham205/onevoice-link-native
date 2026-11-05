@@ -58,6 +58,7 @@ google-services.json
 # Python conversion tooling
 /tools/models/__pycache__/
 /tools/eval/__pycache__/
+/tools/eval/longturn/__pycache__/
 /tools/models/.venv/
 /tools/models/.pip-cache/
 # Prebuilt native libs dropped in for NDK-less UI preview builds.

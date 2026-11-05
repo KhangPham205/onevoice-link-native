@@ -114,6 +114,23 @@ val supertonicThreads = providers.gradleProperty("supertonicThreads").orElse("4"
     .toIntOrNull()
     ?.takeIf { it in 1..8 }
     ?: error("supertonicThreads must be an integer in 1..8")
+// Long turns (docs/LONG_FORM_SPEECH_IMPLEMENTATION.md). LEGACY keeps the strict
+// one-window 10 s turn; ADAPTIVE keeps capturing across ASR windows. The other
+// values are provisional starting points recorded in every session header.
+val longTurnMode = providers.gradleProperty("longTurnMode").orElse("ADAPTIVE").get().also {
+    require(it in setOf("LEGACY", "ADAPTIVE")) { "longTurnMode must be LEGACY or ADAPTIVE (got '$it')" }
+}
+fun longTurnInt(name: String, default: String, range: IntRange): Int =
+    providers.gradleProperty(name).orElse(default).get().toIntOrNull()
+        ?.takeIf { it in range }
+        ?: error("$name must be an integer in $range")
+val longTurnSoftSplitMs = longTurnInt("longTurnSoftSplitMs", "7000", 2_000..9_500)
+val longTurnMicroPauseMs = longTurnInt("longTurnMicroPauseMs", "160", 40..800)
+// A multiple of 80 ms keeps the CTC (80 ms) and RNN-T (40 ms) grids aligned.
+val longTurnOverlapMs = longTurnInt("longTurnOverlapMs", "960", 80..2_000).also {
+    require(it % 80 == 0) { "longTurnOverlapMs must be a multiple of 80 (got $it)" }
+}
+val longTurnMaxTurnS = longTurnInt("longTurnMaxTurnS", "120", 10..300)
 require(dualAsrMarginThreshold >= 0.0) {
     "dualAsrMarginThreshold must be >= 0 (got $dualAsrMarginThreshold)"
 }
@@ -231,6 +248,11 @@ android {
         buildConfigField("float", "VIENEU_SPEED", "${vieneuSpeed}f")
         buildConfigField("int", "VIENEU_THREADS", vieneuThreads.toString())
         buildConfigField("long", "VIENEU_SEED", "${vieneuSeed}L")
+        buildConfigField("String", "LONG_TURN_MODE", "\"$longTurnMode\"")
+        buildConfigField("int", "LONG_TURN_SOFT_SPLIT_MS", longTurnSoftSplitMs.toString())
+        buildConfigField("int", "LONG_TURN_MICRO_PAUSE_MS", longTurnMicroPauseMs.toString())
+        buildConfigField("int", "LONG_TURN_OVERLAP_MS", longTurnOverlapMs.toString())
+        buildConfigField("int", "LONG_TURN_MAX_TURN_S", longTurnMaxTurnS.toString())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

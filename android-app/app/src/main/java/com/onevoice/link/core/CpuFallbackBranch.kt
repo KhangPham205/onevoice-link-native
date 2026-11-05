@@ -66,18 +66,42 @@ internal class CpuFallbackBranch private constructor(
         }
     }
 
-    fun recognize(samples: FloatArray): String {
+    fun recognize(samples: FloatArray): String = recognizeTimed(samples).transcript
+
+    /**
+     * Transcript plus sherpa's per-token timestamps, so long-turn recovery can
+     * stitch overlapping windows the same way the HTP path does. There is no
+     * acoustic confidence here: recovery never feeds the language router.
+     */
+    fun recognizeTimed(samples: FloatArray): AsrHypothesis {
         val stream = recognizer.createStream()
         return try {
             stream.acceptWaveform(samples, SAMPLE_RATE)
             recognizer.decode(stream)
-            recognizer.getResult(stream).text.trim()
+            val result = recognizer.getResult(stream)
+            val pieces = result.tokens
+            val times = result.timestamps
+            val tokens = if (pieces.size == times.size) {
+                pieces.indices.map { index ->
+                    AsrToken(pieces[index], (times[index] * SAMPLE_RATE).toInt())
+                }
+            } else {
+                emptyList()
+            }
+            AsrHypothesis(
+                transcript = result.text.trim(),
+                rawLogProb = Double.NaN,
+                tokenCount = pieces.size,
+                normalizedLogProb = Double.NaN,
+                tokens = tokens,
+            )
         } finally {
             stream.release()
         }
     }
 
-    fun translate(text: String): String = translator.translate(text).trim()
+    /** Sentence by sentence, matching the HTP path so recovery output is comparable. */
+    fun translate(text: String): String = translateBySentence(text, translator::translate)
 
     override fun close() {
         translator.close()

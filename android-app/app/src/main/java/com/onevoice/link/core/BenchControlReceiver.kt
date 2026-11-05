@@ -226,6 +226,61 @@ class BenchControlReceiver : BroadcastReceiver() {
                 Log.i(TAG, "feed ${file.name} samples=${samples.size} tag=$tag accepted=$accepted")
             }
 
+            "replay" -> {
+                // Long-turn harness: a 16 kHz mono WAV (or .f32 fixture) runs
+                // through the live capture path (segmenter, coordinator, TTS,
+                // half-duplex playback) instead of being pushed past it like
+                // "feed". mode=paced follows the wall clock; mode=fast is for
+                // coverage only. baseline=B0..B3 picks the policy for this run.
+                val path = intent.getStringExtra(EXTRA_PATH)
+                val engine = NpuEngine.current()
+                if (path == null || engine == null) {
+                    Log.w(TAG, "replay ignored: path=$path engine=${engine != null}")
+                    return
+                }
+                val file = File(path)
+                if (!file.isFile) {
+                    Log.w(TAG, "replay ignored: $path is not a file")
+                    return
+                }
+                val tag = intent.getStringExtra(EXTRA_TAG)
+                if (tag != null && !TAG_PATTERN.matches(tag)) {
+                    Log.w(TAG, "replay ignored: invalid tag")
+                    return
+                }
+                val paced = when (val mode = intent.getStringExtra(EXTRA_MODE) ?: "paced") {
+                    "paced" -> true
+                    "fast" -> false
+                    else -> {
+                        Log.w(TAG, "replay ignored: mode must be paced or fast (got $mode)")
+                        return
+                    }
+                }
+                val baseline = intent.getStringExtra(EXTRA_BASELINE)
+                val softSplitMs = intent.getStringExtra(EXTRA_SOFT_SPLIT_MS)?.toIntOrNull()
+                // "24,40": first-unit and later-unit word-gap targets (VI), validated by LongTurnConfig.
+                val unitTokens = intent.getStringExtra(EXTRA_UNIT_TOKENS)?.split(',')
+                    ?.mapNotNull { it.trim().toIntOrNull() }
+                    ?.takeIf { it.size == 2 }
+                    ?.let { it[0] to it[1] }
+                // "0"/"1": A/B the filled left context without a rebuild.
+                val fillContext = intent.getStringExtra(EXTRA_FILL_CONTEXT)?.let { it == "1" || it == "true" }
+                val accepted = engine.benchReplay(file, paced, baseline, tag, softSplitMs, unitTokens, fillContext)
+                Log.i(
+                    TAG,
+                    "replay ${file.name} paced=$paced baseline=$baseline tag=$tag accepted=$accepted" +
+                        (if (accepted) "" else " error=${engine.lastError}"),
+                )
+            }
+
+            "stop" -> {
+                // End a replay or live session from the harness. stop() joins
+                // workers for seconds, so it runs off the receiver's main thread.
+                val engine = NpuEngine.current() ?: return
+                Thread({ engine.stop() }, "onevoice-bench-stop").start()
+                Log.i(TAG, "stop requested")
+            }
+
             "newlog" -> {
                 NpuEngine.current()?.rotateBenchLog()
                 Log.i(TAG, "newlog rotated tagged-fixture log")
@@ -248,6 +303,10 @@ class BenchControlReceiver : BroadcastReceiver() {
         const val EXTRA_DIRECTION = "direction"
         const val EXTRA_RAW_PATH = "raw"
         const val EXTRA_TAG = "tag"
+        const val EXTRA_BASELINE = "baseline"
+        const val EXTRA_SOFT_SPLIT_MS = "softSplitMs"
+        const val EXTRA_UNIT_TOKENS = "unitTokens"
+        const val EXTRA_FILL_CONTEXT = "fillContext"
         val TAG_PATTERN = Regex("[A-Za-z0-9_-]{1,64}")
 
         private fun littleEndianFloats(samples: FloatArray): ByteArray {

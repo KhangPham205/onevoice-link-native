@@ -68,7 +68,7 @@ internal class AutoHybridPipeline private constructor(
     private val enToVi: NpuPipeline,
     private val routingConfig: RoutingConfig,
     private val languageIdentifier: SpeechFlowLanguageIdentifier?,
-) : Closeable {
+) : Closeable, LongTurnInference {
     companion object {
         private const val TAG = "OneVoiceAutoHybrid"
         private val ASR_THREAD_ID = AtomicInteger(0)
@@ -159,6 +159,29 @@ internal class AutoHybridPipeline private constructor(
         samples: FloatArray,
         forcedBoundary: Boolean,
     ): RoutedHybridTextResult {
+        val routed = dualAsrRoute(samples)
+        val direction = routed.direction ?: return RoutedHybridTextResult(
+            direction = null,
+            text = null,
+            routing = routed.routing,
+        )
+        val text = translateSelected(
+            samples = samples,
+            direction = direction,
+            transcript = checkNotNull(routed.hypothesis).transcript,
+            // One frontend plus the dual task wall clock, never VI+EN summed.
+            primaryAsrMs = routed.routing.frontendMs + routed.routing.dualAsrWallMs,
+        )
+        if (text.translation.isNotBlank()) turnRouter.commit(direction, forcedBoundary)
+        return RoutedHybridTextResult(direction, text, routed.routing)
+    }
+
+    /**
+     * Dual-ASR decision for one bounded window, without translating or
+     * committing the turn prior. A selected direction always comes with a
+     * non-blank winning hypothesis.
+     */
+    private fun dualAsrRoute(samples: FloatArray): RoutedChunk {
         val frontendStarted = System.nanoTime()
         val validFeatureFrames = try {
             NpuPipeline.prepareSharedRnntFeatures(samples, sharedRnntFeatures)
@@ -167,7 +190,7 @@ internal class AutoHybridPipeline private constructor(
                 mode = RoutingMode.DUAL_ASR,
                 reason = RoutingDecisionReason.ASR_FAILURE,
                 error = "shared frontend: ${failure.message ?: failure.javaClass.simpleName}",
-            )
+            ).let { RoutedChunk(null, null, it.routing) }
         }
         val frontendMs = elapsedMs(frontendStarted)
 
@@ -195,9 +218,9 @@ internal class AutoHybridPipeline private constructor(
                 viOutcome.failure?.let { add("vi=${it.message ?: it.javaClass.simpleName}") }
                 enOutcome.failure?.let { add("en=${it.message ?: it.javaClass.simpleName}") }
             }.joinToString("; ")
-            return RoutedHybridTextResult(
+            return RoutedChunk(
                 direction = null,
-                text = null,
+                hypothesis = null,
                 routing = RoutingDiagnostics(
                     mode = RoutingMode.DUAL_ASR,
                     vi = viOutcome.value,
@@ -228,9 +251,9 @@ internal class AutoHybridPipeline private constructor(
             reason = decision.reason,
             normalizedMargin = decision.normalizedMargin,
         )
-        val direction = decision.direction ?: return RoutedHybridTextResult(
+        val direction = decision.direction ?: return RoutedChunk(
             direction = null,
-            text = null,
+            hypothesis = null,
             routing = diagnostics,
         )
         val selected = when (direction) {
@@ -238,28 +261,29 @@ internal class AutoHybridPipeline private constructor(
             TranslationDirection.EN_TO_VI -> en.hypothesis
         }
         if (selected.transcript.isBlank()) {
-            return RoutedHybridTextResult(null, null, diagnostics.copy(
+            return RoutedChunk(null, null, diagnostics.copy(
                 decision = null,
                 reason = RoutingDecisionReason.FLOOR,
                 error = "selected ASR transcript is empty",
             ))
         }
-
-        val text = translateSelected(
-            samples = samples,
-            direction = direction,
-            transcript = selected.transcript,
-            // One frontend plus the dual task wall clock, never VI+EN summed.
-            primaryAsrMs = frontendMs + dualWallMs,
-        )
-        if (text.translation.isNotBlank()) turnRouter.commit(direction, forcedBoundary)
-        return RoutedHybridTextResult(direction, text, diagnostics)
+        return RoutedChunk(direction, selected, diagnostics)
     }
 
     private fun routeWithLid(
         samples: FloatArray,
         forcedBoundary: Boolean,
     ): RoutedHybridTextResult {
+        val routed = lidRoute(samples)
+        val direction = routed.direction
+            ?: return RoutedHybridTextResult(null, null, routed.routing)
+        val text = recognizeAndTranslate(samples, direction)
+        if (text.translation.isNotBlank()) turnRouter.commit(direction, forcedBoundary)
+        return RoutedHybridTextResult(direction, text, routed.routing)
+    }
+
+    /** SpeechFlow decision only; the caller runs the selected ASR. */
+    private fun lidRoute(samples: FloatArray): RoutedChunk {
         val decision = try {
             checkNotNull(languageIdentifier) { "SpeechFlow is not loaded in LID mode" }
                 .classify(samples)
@@ -268,7 +292,7 @@ internal class AutoHybridPipeline private constructor(
                 mode = RoutingMode.LID,
                 reason = RoutingDecisionReason.LID_REJECTED,
                 error = failure.message ?: failure.javaClass.simpleName,
-            )
+            ).let { RoutedChunk(null, null, it.routing) }
         }
         val direction = decision.direction
         val diagnostics = RoutingDiagnostics(
@@ -285,11 +309,62 @@ internal class AutoHybridPipeline private constructor(
             lidMargin = decision.margin,
             lidMs = decision.inferenceMs,
         )
-        if (direction == null) return RoutedHybridTextResult(null, null, diagnostics)
-        val text = recognizeAndTranslate(samples, direction)
-        if (text.translation.isNotBlank()) turnRouter.commit(direction, forcedBoundary)
-        return RoutedHybridTextResult(direction, text, diagnostics)
+        return RoutedChunk(direction, null, diagnostics)
     }
+
+    // ------------------------------------------------------------ long turns
+
+    override fun routeChunk(samples: FloatArray): RoutedChunk = when (routingConfig.mode) {
+        RoutingMode.DUAL_ASR -> dualAsrRoute(samples)
+        RoutingMode.LID -> lidRoute(samples)
+    }
+
+    override fun recognize(
+        samples: FloatArray,
+        direction: TranslationDirection,
+        path: ExecutionPath,
+    ): AsrHypothesis = when (path) {
+        ExecutionPath.HYBRID_NPU -> branch(direction).recognizeScored(samples)
+        ExecutionPath.CPU_FALLBACK -> cpuFallback(direction).recognizeTimed(samples)
+    }
+
+    override fun translate(
+        text: String,
+        direction: TranslationDirection,
+        path: ExecutionPath,
+    ): MtOutput = when (path) {
+        ExecutionPath.HYBRID_NPU -> branch(direction).translateChecked(text)
+        // The ORT Marian reports no length cap hit; recovery output is
+        // accepted as the legacy recovery path accepts it.
+        ExecutionPath.CPU_FALLBACK -> MtOutput(cpuFallback(direction).translate(text).trim(), 0, false)
+    }
+
+    override fun sourceTokens(text: String, direction: TranslationDirection): Int =
+        branch(direction).mtSourceTokens(text)
+
+    override fun hasPunctuation(direction: TranslationDirection): Boolean =
+        branch(direction).asrEmitsPunctuation
+
+    override fun isNpuTextQuarantined(direction: TranslationDirection): Boolean =
+        direction in disabledNpuTextDirections
+
+    override fun quarantineNpuText(direction: TranslationDirection) {
+        disabledNpuTextDirections += direction
+    }
+
+    /**
+     * Commit the turn prior once per long turn, after it played in full.
+     * [sameSpeakerNext] is true when the turn cap cut the speaker off.
+     */
+    fun commitTurn(direction: TranslationDirection, sameSpeakerNext: Boolean) =
+        turnRouter.commit(direction, sameSpeakerNext)
+
+    fun expectedNextDirection(): TranslationDirection? = turnRouter.expectedNext()
+
+    private fun cpuFallback(direction: TranslationDirection): CpuFallbackBranch =
+        cpuFallbacks[direction] ?: CpuFallbackBranch.load(
+            File(modelRoot, direction.manifestId),
+        ).also { cpuFallbacks[direction] = it }
 
     /**
      * RNN-T branches read the shared Kaldi fbank computed once per utterance.
@@ -380,9 +455,7 @@ internal class AutoHybridPipeline private constructor(
         direction: TranslationDirection,
         primaryFailure: Throwable?,
     ): HybridTextResult = try {
-        val fallback = cpuFallbacks[direction] ?: CpuFallbackBranch.load(
-            File(modelRoot, direction.manifestId),
-        ).also { cpuFallbacks[direction] = it }
+        val fallback = cpuFallback(direction)
         val asrStarted = System.nanoTime()
         val transcript = fallback.recognize(samples)
         val asrMs = elapsedMs(asrStarted)
@@ -408,7 +481,7 @@ internal class AutoHybridPipeline private constructor(
         )
     }
 
-    fun synthesize(text: String, direction: TranslationDirection): FloatArray =
+    override fun synthesize(text: String, direction: TranslationDirection): FloatArray =
         branch(direction).synthesize(text)
 
     /** Tokens the Marian decoder emitted for the last translate on [direction]. */

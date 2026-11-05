@@ -35,6 +35,9 @@ internal object ParakeetCtcContract {
     const val VOCAB_SIZE = 1025
     const val BLANK_ID = 1024
     const val SUBSAMPLING = FEATURE_FRAMES / OUTPUT_FRAMES
+
+    /** One CTC step covers eight 10 ms NeMo frames: 80 ms of 16 kHz audio. */
+    const val SAMPLES_PER_STEP = SUBSAMPLING * 160
 }
 
 /** Greedy CTC result: lexical token ids plus the evidence the router compares. */
@@ -47,6 +50,8 @@ internal data class CtcScoredIds(
     /** Decoded frames whose argmax was not blank. */
     val nonBlankFrames: Int = 0,
     val frames: Int = 0,
+    /** First frame of each emitted token's run, parallel to [ids]. */
+    val startFrames: List<Int> = emptyList(),
 )
 
 /**
@@ -70,6 +75,7 @@ internal fun ctcGreedyDecodeQ16(
         "CTC output holds ${logProbs.limit()} values, need $frames x $vocabSize"
     }
     val ids = ArrayList<Int>()
+    val starts = ArrayList<Int>()
     val scores = ArrayList<Float>()
     var frameSum = 0.0
     var nonBlank = 0
@@ -91,6 +97,7 @@ internal fun ctcGreedyDecodeQ16(
         if (best != blankId && best !in skippedIds) {
             if (best != previous) {
                 ids += best
+                starts += frame
                 scores += logProb
             } else if (scores.isNotEmpty() && logProb > scores.last()) {
                 scores[scores.lastIndex] = logProb
@@ -104,6 +111,7 @@ internal fun ctcGreedyDecodeQ16(
         frameLogProbSum = frameSum,
         nonBlankFrames = nonBlank,
         frames = frames,
+        startFrames = starts,
     )
 }
 
