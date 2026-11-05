@@ -357,4 +357,5 @@ Full offline runtime and deployment notes: `docs/OFFLINE_PIPELINE.md`.
   `.cpp`, so callers need no QNN headers.
 - Comments should explain why, especially uid visibility, `dlopen` ordering,
   fail-closed routing, half-duplex route proof and non-fatal `deviceCreate`.
-- Work happens on `dev`; `main` is the PR target.
+- Branch from `main` for each feature (`feat/...`) and merge back into `main`.
+  `dev` is an older integration branch and is behind `main`.

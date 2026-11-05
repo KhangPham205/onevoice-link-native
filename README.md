@@ -10,7 +10,10 @@ Submitted to the OneVoice AI Challenge 2026.
 
 ## How it works
 
-Each sentence is cut by voice activity detection (Silero, at most 10 s), then:
+A turn lasts until the speaker pauses for 1 s, up to 120 s. Voice activity
+detection (Silero) cuts it into ASR windows of at most 10 s at natural pauses.
+Each window is recognised and translated while the speaker keeps talking, and
+the whole turn is played back once they stop. Each window then goes through:
 
 | Step | Vietnamese speaker (VI→EN) | English speaker (EN→VI) | Runs on |
 |---|---|---|---|
@@ -19,7 +22,9 @@ Each sentence is cut by voice activity detection (Silero, at most 10 s), then:
 | Translation | MarianMT vi→en | MarianMT en→vi | Hexagon NPU |
 | Speech synthesis | Kokoro EN | VieNeu-TTS v3 Nano | CPU, whole sentence |
 
-Audio is strictly half-duplex: the mic is closed while the translation plays.
+The language is decided once, on the first window, and then kept for the
+whole turn. Audio is strictly half-duplex: the mic is closed while the
+translation plays.
 Audio can use the phone's mic and loudspeaker or a Bluetooth headset. That
 choice only picks devices; it never sets the translation direction.
 
@@ -40,10 +45,19 @@ airplane mode
 | Peak app memory (RSS) | 1.7 GB | |
 
 Speech detection also waits 1 s of silence before closing a sentence, so the
-listener waits 1 s longer than these figures.
+listener waits 1 s longer than these figures. These figures use short dataset
+sentences (one window each). For long turns (30–134 s, one real Vietnamese
+speaker, 12 recordings), the first translated audio starts at p95 74 ms after
+the speaker stops, with 3.2 % ASR WER
+([long-turn report](docs/LONG_FORM_SPEECH_VALIDATION.md)).
 
 Known weak spots:
-- English sentences longer than 10 s are rejected.
+- Long turns are tested on recordings replayed through the capture path, not yet
+  live on the microphone, on TWS earbuds, or in a 20–30 min soak.
+- English spoken with a Vietnamese accent can be routed as Vietnamese (the two
+  scores nearly tie and the turn prior decides).
+- A same speaker continuing for a second turn can be routed to the wrong
+  language, because the prior expects the other person to answer.
 - An English sentence can be misrouted when the Vietnamese recogniser outputs a
   single confident token.
 - Routing on real microphone recordings needs more labelled data.
@@ -55,31 +69,44 @@ Known weak spots:
 - Linux with `adb`, JDK 21, Android SDK 36 and NDK 27.2.12479018.
 - Rust (`rustup target add aarch64-linux-android`).
 - Python 3 with `numpy`.
-- Network access for step 1. `ANDROID_NDK_HOME` defaults to
+- Network access for steps 1 and 2. `ANDROID_NDK_HOME` defaults to
   `~/Android/Sdk/ndk/27.2.12479018`.
 
-**Inputs not in git.** They are large or license-restricted; get them from the team:
+**Inputs not in git.** They are large or license-restricted. The QNN context
+binaries were compiled on Qualcomm AI Hub by the model team and cannot be
+downloaded or rebuilt from this repo, so get the first three rows from the team.
+The exact files and a packing command are in
+[BUILD.md](docs/BUILD.md#handing-the-inputs-to-a-new-machine) (about 3 GB plus
+the SDK).
 
 | Path | Contents |
 |---|---|
-| `native-core/third_party/qnn_sdk/` | Qualcomm AI Runtime (QAIRT) SDK 2.47 (the context binaries were built with 2.45 and 2.40 and load on it) |
-| `android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar` | from the k2-fsa/sherpa-onnx v1.13.4 release |
-| `onevoice-npu-bins/` | QNN context binaries for SM8550 |
-| `models-hf/`, `models-npu-generated/` | tokenizers, Kokoro, eSpeak data, CPU recovery models, LID A/B files |
+| `native-core/third_party/qnn_sdk/` | Qualcomm AI Runtime (QAIRT) SDK 2.47 (the context binaries were built with 2.45 and 2.40 and load on it), with `include/` and `lib/` directly under it |
+| `onevoice-npu-bins/` | QNN context binaries for SM8550 (only 4 of its folders are used) |
+| `models-hf/`, `models-npu-generated/lid/` | tokenizers, Kokoro, eSpeak data, CPU recovery models, LID A/B files |
+| `android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar` | public; step 1 downloads it |
 
 **Then:**
 
 ```bash
-# 1. Vietnamese voice: sea-g2p for arm64 + VieNeu Nano weights (~345 MB)
+# 1. Public inputs: the sherpa-onnx AAR, and the unsigned Hexagon v73
+#    skeleton copied out of the SDK (without it, Load fails at runtime)
+curl -fL -o android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-static-link-onnxruntime-1.13.4.aar
+mkdir -p android-app/app/src/main/assets/dsp
+cp native-core/third_party/qnn_sdk/lib/hexagon-v73/unsigned/libQnnHtpV73Skel.so \
+  android-app/app/src/main/assets/dsp/
+
+# 2. Vietnamese voice: sea-g2p for arm64 + VieNeu Nano weights (~345 MB)
 tools/models/build-sea-g2p-android.sh
 python3 tools/models/prepare-vieneu-nano.py
 
-# 2. Build and install the debug APK (debuggable is required to stage models)
+# 3. Build and install the debug APK (debuggable is required to stage models)
 cd android-app
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew :app:installDebug
 cd ..
 
-# 3. Copy all models (~2.7 GB) into the app's private storage; re-runs skip
+# 4. Copy all models (~2.7 GB) into the app's private storage; re-runs skip
 #    files whose sha256 already matches
 tools/models/push-npu-models.sh auto <adb-serial>
 ```
@@ -104,6 +131,7 @@ Runtime policy is baked into the APK from `android-app/gradle.properties`; overr
 ```bash
 ./gradlew :app:assembleDebug -PviTtsEngine=KOKORO   # VI voice: VIENEU (default), KOKORO, SUPERTONIC
 ./gradlew :app:assembleDebug -ProutingMode=LID      # SpeechFlow language-ID A/B instead of dual ASR
+./gradlew :app:assembleDebug -PlongTurnMode=LEGACY  # rollback: one 10 s window per turn (default ADAPTIVE)
 ./gradlew :app:testDebugUnitTest                    # unit tests (no device, no Rust needed)
 ```
 
