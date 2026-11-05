@@ -109,7 +109,7 @@ Hai item 7–10 s bị cắt ở khoảng nghỉ sau 7 s:
 - EV-7738: câu đầu được dịch sớm, mẫu dịch đầu 975 ms (B0: 2513 ms).
 - EV-7496: từ cuối "known" rơi vào cửa sổ chỉ 0,96 s và bị nhận thành "no",
   có hoặc không có ngữ cảnh trái 960 ms. Đây là cái giá của việc cắt sớm; sweep
-  `softSplit` ở §3.5.
+  `softSplit` ở §3.5. Đã sửa bằng ngữ cảnh trái lấp đầy cửa sổ (§3.9).
 
 WER tuyệt đối ~28% của bộ 16 item chủ yếu đến từ các item khó có sẵn (ví dụ
 EV-8062 sai ở cả hai baseline). Dataset eval 200 câu đi qua `cmd=feed`, tức
@@ -246,9 +246,47 @@ luận về người dùng thật; nhưng nó cho thấy rủi ro: với accent 
 vào prior luân phiên, và prior sai khi cùng một người nói nhiều lượt liền. Cần
 bản ghi người Việt nói tiếng Anh thật trước khi chỉnh margin/offset.
 
+### 3.9. Lấp đầy ngữ cảnh trái của cửa sổ (EV-7496)
+
+Trước đây, cửa sổ sau một lần cắt ở khoảng nghỉ chỉ đọc 960 ms ngữ cảnh trái.
+EV-7496 (8,94 s) bị cắt ở 7,98 s sau "or uh", nên cửa sổ cuối chỉ có 1,9 s
+("uh known") và Parakeet đọc thành "No". Graph HTP luôn chạy đủ 10 s, nên giờ mỗi
+cửa sổ từ thứ hai trở đi, khi được cắt ra, đọc ngữ cảnh trái tới mức lấp đầy
+10 s (bước 80 ms tính từ đầu core, cùng lưới với cửa sổ trước;
+`LongTurnConfig.fillLeftContext`). Từ trong ngữ cảnh vẫn bị luật core loại, nên
+không có từ nào được ghi nhận hai lần. Cửa sổ cắt ép đã đủ 10 s thì không đổi.
+Cách này tốt hơn soft split 8,5 s (chỉ dời lỗi sang lượt dài hơn) và hơn việc
+ghép cửa sổ cuối vào cửa sổ trước (phải rút lại những từ đã dịch/đã tổng hợp
+trong B3).
+
+A/B xen kẽ trên cùng bản build (`B3-nofill` là ngữ cảnh 960 ms cũ):
+
+| 16 lượt ngắn, paced (`eval-results/shortturn-fill`) | B0 | B3-nofill | B3 |
+|---|---:|---:|---:|
+| WER tổng | 29,03% | 29,03% | **27,19%** |
+| EV-7496 WER | 0,167 | 0,222 ("or no") | **0,167** ("or known") |
+| Mẫu dịch đầu p50 / p95 | 2968 / 4193 ms | 2534 / 4126 ms | 2870 / 4108 ms |
+
+- 14/16 item chỉ có một cửa sổ, nên giống hệt nhau ở hai cấu hình B3; chênh p50
+  giữa hai cột là nhiễu giữa các lần chạy (cùng cấu hình, VE-9570 lệch 750 ms).
+- Phần giảm WER thêm đến từ EV-7496 và EV-8062. EV-8062 bị tách thành hai lượt
+  một cửa sổ do khác biệt khi capture, không phải do thay đổi này.
+- ASR cửa sổ cuối của EV-7496 (EN): 134 → 138 ms. Với Parakeet CTC, ngữ cảnh
+  thêm gần như không tốn gì.
+
+12 bản ghi VI giọng thật, B3 (`eval-results/real-vi-paced-fill`, so với
+`real-vi-paced-gap`): WER 3,33% → 3,23% (`vi07` 1,8% → 0,9%, cửa sổ cuối cũ chỉ
+0,94 s); mẫu dịch đầu p50 / p95 62 / 74 ms; starvation 0. **Chi phí phía VI:**
+bộ giải mã RNN-T trên CPU chạy hết các frame hợp lệ, nên ASR cửa sổ cuối tăng
+từ 380–765 ms (cửa sổ 0,9–8,4 s) lên 617–915 ms (cửa sổ ~10 s), khoảng +250 ms
+trung vị. Ở lượt dài, việc này không ảnh hưởng mẫu dịch đầu (đã sẵn từ các đơn
+vị trước). Ở lượt VI 7–10 s có cắt ở khoảng nghỉ, nó nằm trên đường găng của
+đơn vị cuối; trường hợp này chưa có trong bộ đo. Nếu cần, có thể giới hạn ngữ
+cảnh thêm cho VI (ví dụ 3–4 s).
+
 ## 4. Kiểm thử
 
-### 4.1. JVM (124 test, PASS)
+### 4.1. JVM (128 test, PASS)
 
 `./gradlew :app:testDebugUnitTest`:
 - `TurnSegmenterTest`: lượt ngắn giống hệt mẫu của `UtteranceSegmenter` legacy;
@@ -256,7 +294,9 @@ bản ghi người Việt nói tiếng Anh thật trước khi chỉnh margin/of
   nghỉ có ngữ cảnh trái cố định; soft split rồi im lặng không sinh cửa sổ rỗng;
   trần lượt kết thúc đúng một lần; đọc mẫu lẻ (1–320 mẫu ngẫu nhiên) vẫn phủ kín;
   detector reset một lần mỗi lượt; cửa sổ đầu dưới floor bị bỏ và tiếp tục nghe;
-  chính sách FIXED; cắt ép ưu tiên khe ngắn; `finish()`. Archive được kiểm từng
+  chính sách FIXED; cắt ép ưu tiên khe ngắn; `finish()`; ngữ cảnh trái lấp đầy
+  cửa sổ (cửa sổ cuối ngắn đọc từ đầu lượt, không vượt 10 s, cửa sổ cắt ép đầy
+  giữ nguyên, tắt được bằng `fillLeftContext=false`). Archive được kiểm từng
   mẫu đánh dấu: không mất, không trùng.
 - `TranscriptAssemblerTest`: ghép theo core; từ trùng và từ bị cả hai cửa sổ bỏ
   ở điểm giữa; từ lặp thật ("có có", "rất rất") giữ nguyên; ngữ cảnh trái không
@@ -298,12 +338,10 @@ bản ghi người Việt nói tiếng Anh thật trước khi chỉnh margin/of
    hai người luân phiên. Một bài nói dài có khoảng ngắt ≥ 1 s bị chia lượt và có
    thể bị đổi ngôn ngữ ở lượt sau nếu điểm hai nhánh sát nhau. Cần hiệu chỉnh
    margin/prior bằng log người nói thật; không đổi ngưỡng dựa trên fixture tổng hợp.
-2. **Cửa sổ cuối quá ngắn** sau một lần cắt ở khoảng nghỉ có thể làm sai từ cuối
-   (EV-7496). Ngữ cảnh trái 960 ms không đủ cho trường hợp đó; soft split
-   8500 ms tránh được nó nhưng chưa chứng minh tốt hơn tổng thể (§3.5). Hướng
-   tiếp: ghép lại cửa sổ cuối với cửa sổ trước khi tổng ≤ 10 s và chưa phát.
-   Prior lan giữa các item cũng làm tăng nhiễu đo; một bộ chấm tách riêng
-   "score-only routing" sẽ giúp so cấu hình.
+2. **Cửa sổ cuối quá ngắn** (EV-7496): đã sửa bằng ngữ cảnh trái lấp đầy cửa
+   sổ (§3.9). Còn lại: chi phí ~+250 ms cho ASR cửa sổ cuối phía VI. Prior lan
+   giữa các item cũng làm tăng nhiễu đo; một bộ chấm tách riêng "score-only
+   routing" sẽ giúp so cấu hình.
 3. **Underrun ~1/lượt** ở cả B1 và B3 trong khi starvation = 0: đó là lúc track
    cạn ở cuối stream. Đã thêm `underrunsBeforeDrain` để tách khỏi gap thật; số
    liệu ở §3 được đo trước thay đổi này.

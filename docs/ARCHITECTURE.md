@@ -118,7 +118,12 @@ window, never the microphone. The spec and acceptance plan are
   a window is cut inside the first pause of at least 160 ms, with no overlap;
   without one it is cut at the 160,000-sample contract (or a shorter gap in its
   second half) with 960 ms of overlap, aligned to the 80 ms CTC/RNN-T frame
-  grid. Window cores tile the turn without gaps. The detector is reset once per
+  grid. Window cores tile the turn without gaps. When a later window is
+  emitted, its left context is widened (in 80 ms steps from its core start) to
+  fill the 10 s model input: the HTP graph is fixed-size, so this costs no NPU
+  time, and a short final window hears the sentence it ends instead of being
+  decoded cold (EV-7496: "or known" read as "no" from a 1.9 s window). Words in
+  the context are dropped by the core rule. The detector is reset once per
   turn, and the onset/minimum/RMS floor decides only whether the turn is
   accepted, never drops a quiet stretch in the middle. Live long-turn capture
   uses a 2 s `AudioRecord` buffer and `THREAD_PRIORITY_URGENT_AUDIO`, and logs

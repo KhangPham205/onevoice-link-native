@@ -70,7 +70,7 @@ class TurnSegmenterTest {
     }
 
     /** Cores tile the turn; windows respect the model contract and hold their core. */
-    private fun assertCoverage(run: Run) {
+    private fun assertCoverage(run: Run, cfg: LongTurnConfig = config) {
         val chunks = run.chunks
         assertTrue("at least one window", chunks.isNotEmpty())
         assertEquals(0, chunks.first().coreStart)
@@ -80,14 +80,13 @@ class TurnSegmenterTest {
             when (previous.cut) {
                 ChunkCut.PAUSE -> {
                     assertEquals("core starts at the pause cut", previous.end, next.coreStart)
-                    assertEquals(
-                        "only fixed left context before it",
-                        maxOf(0, previous.end - config.pauseContextSamples),
-                        next.start,
+                    assertTrue(
+                        "at least the fixed left context before it",
+                        next.start <= maxOf(0, previous.end - cfg.pauseContextSamples),
                     )
                 }
                 ChunkCut.FORCED -> {
-                    assertEquals(previous.end - config.overlapSamples, next.start)
+                    assertTrue(next.start <= previous.end - cfg.overlapSamples)
                     assertEquals(
                         "window grids stay aligned",
                         0,
@@ -95,6 +94,15 @@ class TurnSegmenterTest {
                     )
                 }
                 ChunkCut.TURN_END -> throw AssertionError("TURN_END must be last")
+            }
+        }
+        chunks.drop(1).forEach { chunk ->
+            val grid = LongTurnConfig.OVERLAP_GRID_SAMPLES
+            assertEquals("context on the frame grid", 0, (chunk.coreStart - chunk.start) % grid)
+            if (cfg.fillLeftContext) {
+                // As much context as the model window holds, never less than the minimum.
+                val room = minOf(cfg.maxWindowSamples - (chunk.end - chunk.coreStart), chunk.coreStart)
+                assertTrue("window ${chunk.index} fills its context", chunk.start <= chunk.coreStart - room / grid * grid)
             }
         }
         chunks.forEach { chunk ->
@@ -272,5 +280,64 @@ class TurnSegmenterTest {
         assertEquals(2, events.size)
         assertEquals(TurnEndReason.INPUT_END, (events.last() as SegmenterEvent.TurnEnded).reason)
         assertTrue(segmenter.finish().isEmpty())
+    }
+
+    @Test
+    fun aShortFinalWindowHearsTheSentenceItEnds() {
+        // EV-7496 shape: 8 s of speech, a pause cut, then ~1 s more.
+        val stream = Stream().silence(100).speechMs(7_200).silence(300).speechMs(1_000).silence(1_200).toArray()
+        val run = run(stream)
+
+        assertCoverage(run)
+        assertEquals(listOf(ChunkCut.PAUSE, ChunkCut.TURN_END), run.chunks.map { it.cut })
+        val last = run.chunks.last()
+        // The whole 8.6 s turn fits one model window, so it is read from its
+        // start, short of at most one 80 ms grid step of pre-roll.
+        assertTrue("reads from ${last.start}", last.start < LongTurnConfig.OVERLAP_GRID_SAMPLES)
+        assertEquals("but it owns only the audio after the cut", run.chunks.first().end, last.coreStart)
+    }
+
+    @Test
+    fun filledContextNeverExceedsTheModelWindow() {
+        val stream = Stream().silence(100).apply {
+            repeat(12) { speechMs(2_400); silence(200) }
+            speechMs(600)
+        }.silence(1_200).toArray()
+        val run = run(stream)
+
+        assertCoverage(run)
+        assertTrue(run.chunks.size >= 4)
+        assertTrue(
+            "later windows read more than the fixed 960 ms",
+            run.chunks.drop(1).all { it.coreStart - it.start > config.pauseContextSamples },
+        )
+        assertTrue(run.chunks.all { it.length <= config.maxWindowSamples })
+    }
+
+    @Test
+    fun withoutFillingTheContextStaysAtTheMinimum() {
+        val cfg = config.copy(fillLeftContext = false)
+        val stream = Stream().silence(100).speechMs(7_200).silence(300).speechMs(1_000).silence(1_200).toArray()
+        val run = run(stream, cfg)
+
+        assertCoverage(run, cfg)
+        val last = run.chunks.last()
+        assertEquals(cfg.pauseContextSamples, last.coreStart - last.start)
+    }
+
+    @Test
+    fun forcedOverlapWindowsAreUnchangedButTheShortTailIsFilled() {
+        val stream = Stream().silence(100).speechMs(21_000).silence(1_200).toArray()
+        val run = run(stream)
+
+        assertCoverage(run)
+        val chunks = run.chunks
+        chunks.zipWithNext().dropLast(1).forEach { (previous, full) ->
+            assertEquals("a full forced window has no room to widen", previous.end - config.overlapSamples, full.start)
+            assertEquals(config.maxWindowSamples, full.length)
+        }
+        val (previous, tail) = chunks.zipWithNext().last()
+        assertTrue("the short tail reads past the overlap", tail.start < previous.end - config.overlapSamples)
+        assertTrue("and fills the window to the grid", config.maxWindowSamples - tail.length < LongTurnConfig.OVERLAP_GRID_SAMPLES)
     }
 }

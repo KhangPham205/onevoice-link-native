@@ -34,9 +34,11 @@ internal enum class TurnEndReason(val logValue: String) {
  *
  * Ranges are half-open. `[start, end)` is what the model sees; `[coreStart,
  * coreEnd)` is the part this window owns. Cores of consecutive windows tile the
- * accepted turn without gaps: after a pause cut the next window only reads
+ * accepted turn without gaps: after a pause cut the next window reads at least
  * [LongTurnConfig.pauseContextSamples] of left context it does not own, and
- * a forced cut shares [LongTurnConfig.overlapSamples] split at its midpoint. Indices are Int
+ * a forced cut shares [LongTurnConfig.overlapSamples] split at its midpoint.
+ * With [LongTurnConfig.fillLeftContext] the left context is widened to fill
+ * the model window when the window is emitted. Indices are Int
  * because a turn is capped ([LongTurnConfig.maxTurnSamples] <= 300 s).
  */
 internal data class AudioChunk(
@@ -287,11 +289,26 @@ internal class TurnSegmenter(
         return emitCut(cut, ChunkCut.FORCED)
     }
 
+    /**
+     * Where window [chunkIndex] ending at [end] starts reading. The minimum is
+     * [chunkStart]; with [LongTurnConfig.fillLeftContext] it reaches back as
+     * far as the model window allows, in whole 80 ms steps from [coreStart].
+     * [coreStart] is on the previous window's frame grid (the overlap half and
+     * the pause context are grid multiples), so a shared word keeps identical
+     * frames in both windows. The first window has no earlier audio to read.
+     */
+    private fun readStart(end: Int): Int {
+        if (chunkIndex == 0 || !config.fillLeftContext) return chunkStart
+        val grid = LongTurnConfig.OVERLAP_GRID_SAMPLES
+        val room = minOf(config.maxWindowSamples - (end - coreStart), coreStart)
+        return minOf(chunkStart, coreStart - (room / grid) * grid)
+    }
+
     private fun emitCut(cut: Int, kind: ChunkCut): SegmenterEvent.Chunk? {
         val coreEnd = if (kind == ChunkCut.FORCED) cut - config.overlapSamples / 2 else cut
         val chunk = AudioChunk(
             index = chunkIndex,
-            start = chunkStart,
+            start = readStart(cut),
             end = cut,
             coreStart = coreStart,
             coreEnd = coreEnd,
@@ -333,7 +350,7 @@ internal class TurnSegmenter(
         if (chunkIndex == 0 || speechEnd > coreStart) {
             val chunk = AudioChunk(
                 index = chunkIndex,
-                start = chunkStart,
+                start = readStart(end),
                 end = end,
                 coreStart = coreStart,
                 coreEnd = end,

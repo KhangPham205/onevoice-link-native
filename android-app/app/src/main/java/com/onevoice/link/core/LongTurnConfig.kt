@@ -61,6 +61,16 @@ internal data class LongTurnConfig(
      * the cut are dropped by the core rule, never committed twice.
      */
     val pauseContextSamples: Int = ms(960),
+    /**
+     * Widen every later window's left context, when it is emitted, to fill
+     * the model's fixed 10 s input: HTP runs the whole graph either way, so
+     * the extra context costs no NPU time (the VI RNN-T decoder walks a few
+     * more frames on CPU). A short final window then hears the sentence it
+     * ends: EV-7496 decoded "or known" as "no" from a 1.9 s window. The
+     * context only informs the decode; words outside the core are dropped.
+     * [pauseContextSamples] and the forced overlap stay the minimum context.
+     */
+    val fillLeftContext: Boolean = true,
     /** Hard model contract: every ASR call, context included, holds at most this. */
     val maxWindowSamples: Int = NpuEngine.MAX_SEGMENT_SAMPLES,
     /** Trailing non-speech that ends the turn; kept at the legacy 1 s baseline. */
@@ -125,6 +135,7 @@ internal data class LongTurnConfig(
         put("microPauseMs", toMs(microPauseSamples))
         put("overlapMs", toMs(overlapSamples))
         put("pauseContextMs", toMs(pauseContextSamples))
+        put("fillLeftContext", fillLeftContext)
         put("maxWindowMs", toMs(maxWindowSamples))
         put("endSilenceMs", toMs(endSilenceSamples))
         put("maxTurnMs", toMs(maxTurnSamples))

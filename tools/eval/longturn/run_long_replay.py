@@ -11,6 +11,9 @@ cooler phone. Bench rows (files/bench/turns) and logcat are pulled to --out.
 Baselines (docs/LONG_FORM_SPEECH_IMPLEMENTATION.md section 13.1):
   B0 legacy 10 s turns, B1 fixed windows + overlap with MT/TTS after the turn,
   B2 adaptive windows with MT/TTS after the turn, B3 adaptive + background MT/TTS.
+A "-nofill" suffix (e.g. B3-nofill) keeps the fixed 960 ms left context
+instead of filling each window (LongTurnConfig.fillLeftContext), for an
+interleaved A/B on one build.
 
 Prerequisites: a debuggable build installed, models staged, files/bench
 created, and the Hybrid pipeline loaded (--init taps "Load Hybrid Pipeline").
@@ -177,8 +180,12 @@ def main() -> int:
         extras = {"softSplitMs": args.soft_split_ms} if args.soft_split_ms else {}
         if args.unit_tokens:
             extras["unitTokens"] = args.unit_tokens
+        policy = baseline
+        if baseline.endswith("-nofill"):
+            policy = baseline.removesuffix("-nofill")
+            extras["fillContext"] = "0"
         adb.bench(cmd="replay", path=f"{DEVICE_DIR}/{item['file']}", mode=args.mode,
-                  baseline=baseline, tag=tag, **extras)
+                  baseline=policy, tag=tag, **extras)
         timeout = item["durationS"] * (2 if args.mode == "fast" else 5) + 180
         log = wait_replay(adb, item["file"], timeout)
         wall = time.time() - started

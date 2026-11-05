@@ -2425,6 +2425,7 @@ class NpuEngine(
         tag: String?,
         softSplitMs: Int? = null,
         unitTokens: Pair<Int, Int>? = null,
+        fillLeftContext: Boolean? = null,
     ): Boolean {
         if (telemetry?.enabled != true) return false
         if (pipeline == null) {
@@ -2440,8 +2441,10 @@ class NpuEngine(
             val chosen = baseline?.let(buildLongTurnConfig::forBaseline) ?: buildLongTurnConfig
             // Tuning sweep without a rebuild; validated by LongTurnConfig's init.
             val split = softSplitMs?.let { chosen.copy(softSplitSamples = LongTurnConfig.ms(it)) } ?: chosen
-            unitTokens?.let { (first, later) -> split.copy(firstUnitTargetTokens = first, unitTargetTokens = later) }
-                ?: split
+            val units = unitTokens?.let { (first, later) ->
+                split.copy(firstUnitTargetTokens = first, unitTargetTokens = later)
+            } ?: split
+            fillLeftContext?.let { units.copy(fillLeftContext = it) } ?: units
         }.getOrElse {
             lastError = it.message
             return false
