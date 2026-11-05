@@ -67,6 +67,9 @@ Known weak spots:
 **You need:**
 - An arm64 Snapdragon 8 Gen 2 phone (`SM8550`, Hexagon v73) with USB debugging enabled.
 - Linux with `adb`, JDK 21, Android SDK 36 and NDK 27.2.12479018.
+  Point Gradle at the SDK with `ANDROID_HOME`, or create
+  `android-app/local.properties` with `sdk.dir=/path/to/Android/Sdk`
+  (Android Studio writes it when it opens `android-app/`).
 - Rust (`rustup target add aarch64-linux-android`).
 - Python 3 with `numpy`.
 - Network access for steps 1 and 2. `ANDROID_NDK_HOME` defaults to
@@ -91,7 +94,7 @@ the SDK).
 ```bash
 # 1. Public inputs: the sherpa-onnx AAR, and the unsigned Hexagon v73
 #    skeleton copied out of the SDK (without it, Load fails at runtime)
-curl -fL -o android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar \
+curl -fL --create-dirs -o android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-static-link-onnxruntime-1.13.4.aar
 mkdir -p android-app/app/src/main/assets/dsp
 cp native-core/third_party/qnn_sdk/lib/hexagon-v73/unsigned/libQnnHtpV73Skel.so \
