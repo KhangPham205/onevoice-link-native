@@ -44,7 +44,7 @@ flowchart LR
 |---|---|---|
 | UI and lifecycle | `MainActivity.kt`, `ui/OneVoiceApp.kt`, `ui/screens/{Dashboard,Demo,Settings}Screen.kt` | One Hybrid engine, permissions and lifecycle. Dashboard: load, start/stop, audio route, last turn's text. Live demo: offline/memory vitals, live phase, per-turn timings, session export. Settings: headset inventory and saved VI/EN preferences, which never select direction. |
 | Audio/state | `core/NpuEngine.kt`, `core/HalfDuplexCoordinator.kt`, `core/AudioRoute.kt` | Route resolution, capture, half-duplex ownership, output route proof and stereo playback. |
-| Utterance bounding | `core/UtteranceSegmenter.kt`, `core/SpeechActivityDetector.kt` | Silero (or legacy RMS) frame labels, pre-roll, hangover, echo guard, 10 s ceiling. |
+| Utterance bounding | `core/UtteranceSegmenter.kt`, `core/SpeechActivityDetector.kt` | Silero (or legacy RMS) frame labels, pre-roll, hangover, echo guard, 10 s ceiling (LEGACY turns). ADAPTIVE turns use `core/TurnSegmenter.kt` and `core/LongTurnCoordinator.kt`. |
 | Routing | `core/AutoHybridPipeline.kt`, `core/DualAsrRouter.kt`, `core/RoutingConfig.kt`, `core/ParakeetCtc.kt` | Runs both ASRs, compares normalized confidence, applies the turn prior and fail-closed rules. |
 | CPU model glue | `core/NpuPipeline.kt`, `core/ZipformerFamilyRnntDecoder.kt`, `core/CpuTtsEngine.kt`, `core/VieNeuNanoTts.kt`, `core/SeaG2p.kt`, `core/CpuFallbackBranch.kt` | RNN-T decode/join, Marian host glue, whole-utterance TTS and cold whole-utterance recovery. |
 | Evidence | `core/SessionRecorder.kt`, `core/TurnReport.kt`, `core/DeviceVitals.kt`, `core/BenchControlReceiver.kt`, `core/BenchTelemetry.kt` | Session JSONL, demo-screen figures, benchmark/eval control surface. |

@@ -23,12 +23,62 @@ None of these are committed (large or license-restricted); all are git-ignored.
 |---|---|---|---|
 | QAIRT/QNN SDK | `native-core/third_party/qnn_sdk/` with `include/QNN/` and `lib/aarch64-android/` directly under it | extract the SDK; no extra version folder | native core compiles QNN calls as logged stubs (`#if __has_include(<QnnInterface.h>)`), but `copyQnnRuntimeLibs` (a `preBuild` dependency) fails the Gradle build |
 | Unsigned v73 skeleton | `app/src/main/assets/dsp/libQnnHtpV73Skel.so` | copy `qnn_sdk/lib/hexagon-v73/unsigned/libQnnHtpV73Skel.so` | runtime init fails: `NpuEngine` cannot extract it to `filesDir/dsp/unsigned/` |
-| sherpa-onnx AAR 1.13.4 (static-link ORT) | `app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar` | `tools/models/fetch-sherpa-assets.ps1` | dependency resolution fails |
+| sherpa-onnx AAR 1.13.4 (static-link ORT) | `app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar` | Linux: `curl -fL --create-dirs -o android-app/app/libs/sherpa-onnx-static-link-onnxruntime-1.13.4.aar https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-static-link-onnxruntime-1.13.4.aar`; Windows: `tools/models/fetch-sherpa-assets.ps1` | dependency resolution fails |
 | `libsea_g2p_rs.so` (VieNeu phonemizer) | `app/src/main/jniLibs/arm64-v8a/` | `tools/models/build-sea-g2p-android.sh` (Rust `aarch64-linux-android` target + NDK) | with the default `viTtsEngine=VIENEU`, `merge*JniLibFolders` fails with a clear message; unit tests and `-PviTtsEngine=KOKORO`/`SUPERTONIC` builds do not need it |
 
 Model binaries are never in the APK. Stage them with
 `tools/models/push-npu-models.sh` (debuggable build required for `run-as`); see
 [NPU_DEPLOY.md](NPU_DEPLOY.md).
+
+## Handing the inputs to a new machine
+
+Only the QNN SDK and the model folders below must come from an existing
+machine. The QNN context binaries were compiled on Qualcomm AI Hub by the model
+team; nothing in this repo downloads or rebuilds them. Everything else is
+public (the AAR, sea-g2p, VieNeu weights) and is fetched by the README steps.
+`tools/models/push-npu-models.sh` is the authoritative list: it reads exactly
+these paths and refuses a partial deployment with `MISSING SOURCE`.
+
+| Path (relative to the repo root) | Size | Used for |
+|---|---:|---|
+| `native-core/third_party/qnn_sdk/` | 5.5 GB | QAIRT 2.47: headers, `lib/aarch64-android/`, `lib/hexagon-v73/` |
+| `onevoice-npu-bins/asr/gipformer_65m_rnnt-bundle/` | 409 MB | VI ASR encoder (HTP) + RNN-T decoder/joiner |
+| `onevoice-npu-bins/asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s/` | 111 MB | EN ASR (HTP) |
+| `onevoice-npu-bins/mt/opus_mt_vi_en__float_8gen2/` | 245 MB | VI→EN Marian (HTP) |
+| `onevoice-npu-bins/mt/opus_mt_en_vi__float_8gen2/` | 245 MB | EN→VI Marian (HTP) |
+| `models-hf/{mt-vi-en,mt-en-vi}/` | 250 MB | Marian tokenizers + CPU recovery |
+| `models-hf/{tts-en,tts-vi,tts-vi-supertonic}/` | 787 MB | Kokoro EN/VI, Supertonic |
+| `models-hf/{asr-vi,asr-en}/` | 669 MB | CPU recovery ASR |
+| `models-hf/espeak-ng-data/` | 18 MB | Kokoro phonemizer data |
+| `models-npu-generated/lid/` | 1 MB | SpeechFlow LID A/B |
+
+The other `onevoice-npu-bins/` folders (NLLB, PhoWhisper, Parakeet VI, the old
+Zipformer and QNN Kokoro) are experiments the app no longer loads. The
+`onevoice-npu-bins/HANDOFF.md` shipped with the binaries predates the current
+pipeline: its "DÙNG CHÍNH" (main) labels are stale. Trust
+`push-npu-models.sh` and [NPU_DEPLOY.md](NPU_DEPLOY.md#source-to-device-mapping).
+
+Pack on the old machine from the repo root. Use `tar`, not `zip`: it keeps file
+modes, so the SDK's host tools in `bin/` stay executable.
+
+```bash
+tar -czf onevoice-inputs.tar.gz \
+  native-core/third_party/qnn_sdk \
+  onevoice-npu-bins/asr/gipformer_65m_rnnt-bundle \
+  onevoice-npu-bins/asr/parakeet_tdt_ctc_110m_en__sherpa_SM8550_10s \
+  onevoice-npu-bins/mt/opus_mt_vi_en__float_8gen2 \
+  onevoice-npu-bins/mt/opus_mt_en_vi__float_8gen2 \
+  models-hf/mt-vi-en models-hf/mt-en-vi models-hf/tts-en models-hf/tts-vi \
+  models-hf/tts-vi-supertonic models-hf/asr-vi models-hf/asr-en \
+  models-hf/espeak-ng-data models-npu-generated/lid
+```
+
+Unpack it in the root of the new clone (`tar -xzf onevoice-inputs.tar.gz`):
+every path lands where the build and deploy scripts look. Then follow the
+README "Quick install" steps. The QAIRT SDK is under Qualcomm's license; check
+that it allows the copy before sending it. The evaluation dataset
+(`Vie-Eng dataset/`) and `eval-results/` are also git-ignored and are only
+needed to rerun the measurements in `tools/eval/`.
 
 ## Build
 

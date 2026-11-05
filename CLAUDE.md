@@ -106,6 +106,10 @@ defaults in decoder code.
   former 4 GiB Gradle plus 2 GiB Kotlin daemon caused the development laptop to
   be OOM-killed.
 - Open the Android Studio project at `android-app/`, not the repo root.
+- This checkout lives on NTFS with `core.fileMode=false`, so git never sees
+  the executable bit: add new scripts with `git add --chmod=+x <file>` or a
+  Linux clone gets `Permission denied` (gradlew and tools/*.sh once shipped
+  as 100644).
 
 ## Architecture
 
@@ -357,4 +361,5 @@ Full offline runtime and deployment notes: `docs/OFFLINE_PIPELINE.md`.
   `.cpp`, so callers need no QNN headers.
 - Comments should explain why, especially uid visibility, `dlopen` ordering,
   fail-closed routing, half-duplex route proof and non-fatal `deviceCreate`.
-- Work happens on `dev`; `main` is the PR target.
+- Branch from `main` for each feature (`feat/...`) and merge back into `main`.
+  `dev` is an older integration branch and is behind `main`.

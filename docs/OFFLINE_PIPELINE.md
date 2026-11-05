@@ -25,7 +25,9 @@ never used to guess a language.
 Dashboard audio route (Auto / Phone / Bluetooth), resolved at IDLE -> CAPTURING
   -> AudioRecord: VOICE_COMMUNICATION over SCO, or VOICE_RECOGNITION on the
      built-in mic; the actual routed input is verified
-  -> Silero VAD bounds one utterance (pre-roll, hangover, 10 s ceiling)
+  -> Silero VAD bounds one utterance (pre-roll, hangover, 10 s ceiling); under
+     ADAPTIVE (default) one turn of up to 120 s is cut into such windows
+     and the mic stays open between them (see ARCHITECTURE.md "Long turns")
   -> stop AudioRecord; close SCO on the Bluetooth route
   -> both ASR branches run concurrently on the same PCM
        | VI: Kaldi fbank [1,1000,80] FP32 -> GIPFormer HTP -> CPU RNN-T
@@ -138,7 +140,9 @@ there is no forced-boundary overlap or carried tail.
 
 - Capture: 20 ms frames labelled by Silero VAD (32 ms windows, 0.5 onset /
   0.35 offset; `-PvadMode=ENERGY` restores the legacy RMS gate), 300 ms
-  pre-roll, one-second end hangover, hard 10-second ceiling.
+  pre-roll, one-second end hangover, hard 10-second ceiling (per turn under
+  `LEGACY`; per ASR window under the default `ADAPTIVE`, whose turn ceiling is
+  `longTurnMaxTurnS`, 120 s).
 - Phone route: built-in mic with `VOICE_RECOGNITION` and the loudspeaker. A
   300 ms echo guard after playback warms Silero and fills the pre-roll but
   cannot open a turn, so the loudspeaker tail is ignored while a fast reply
