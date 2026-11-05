@@ -14,8 +14,9 @@ dùng **audio tổng hợp từ dataset** hoặc **item dataset đơn lẻ**. §
 bản ghi giọng thật tiếng Việt** (30–134 s, một người nói): sau khi sửa cách chia
 đơn vị dịch, audio đầu ra p50 66 ms, p95 130 ms sau endpoint, WER 3,3%, không
 starvation. Chưa có bản ghi tiếng Anh, chưa test micro/Bluetooth live, chưa soak
-20–30 phút bằng micro. Vì vậy `LEGACY` vẫn là mặc định; `ADAPTIVE` bật bằng
-`-PlongTurnMode=ADAPTIVE`.
+20–30 phút bằng micro. Dù các mục đó còn mở, `ADAPTIVE` được chốt làm mặc định
+từ 2026-11-05 (quyết định sản phẩm); `-PlongTurnMode=LEGACY` quay lại bản cũ
+bằng một lần build.
 
 ## 1. Môi trường
 

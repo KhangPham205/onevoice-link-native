@@ -104,9 +104,10 @@ second segment captured while the first is processing or playing. A forced
 boundary sets the turn prior to the same language, because the cut speaker is
 expected to continue.
 
-### Long turns (`-PlongTurnMode=ADAPTIVE`)
+### Long turns (`longTurnMode=ADAPTIVE`, default)
 
-The paragraph above is `LEGACY`, still the default. With `ADAPTIVE` a turn may
+The paragraph above is `LEGACY` (`-PlongTurnMode=LEGACY`). With `ADAPTIVE`, the
+default since 2026-11-05, a turn may
 run up to `longTurnMaxTurnS` (120 s); the 10 s model ceiling cuts only an ASR
 window, never the microphone. The spec and acceptance plan are
 `docs/LONG_FORM_SPEECH_IMPLEMENTATION.md`; measured evidence is in

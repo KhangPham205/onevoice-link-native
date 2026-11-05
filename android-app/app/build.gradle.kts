@@ -117,7 +117,7 @@ val supertonicThreads = providers.gradleProperty("supertonicThreads").orElse("4"
 // Long turns (docs/LONG_FORM_SPEECH_IMPLEMENTATION.md). LEGACY keeps the strict
 // one-window 10 s turn; ADAPTIVE keeps capturing across ASR windows. The other
 // values are provisional starting points recorded in every session header.
-val longTurnMode = providers.gradleProperty("longTurnMode").orElse("LEGACY").get().also {
+val longTurnMode = providers.gradleProperty("longTurnMode").orElse("ADAPTIVE").get().also {
     require(it in setOf("LEGACY", "ADAPTIVE")) { "longTurnMode must be LEGACY or ADAPTIVE (got '$it')" }
 }
 fun longTurnInt(name: String, default: String, range: IntRange): Int =

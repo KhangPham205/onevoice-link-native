@@ -81,7 +81,7 @@ Gradle properties that change runtime behavior:
                                        # prepare-vieneu-nano.py (models-vieneu/, staged by push-npu-models.sh)
 -PvieneuVoice=minh_quan -PvieneuSteps=16 -PvieneuCfg=3.0 -PvieneuSeed=1234
 -PsupertonicVoice=F1 -PsupertonicSteps=5 -PsupertonicSpeed=1.15 -PsupertonicThreads=4
--PlongTurnMode=LEGACY                  # LEGACY (default, one 10 s window per turn) or ADAPTIVE
+-PlongTurnMode=ADAPTIVE                # ADAPTIVE (default, turns up to 120 s) or LEGACY (one 10 s window)
 -PlongTurnSoftSplitMs=7000 -PlongTurnMicroPauseMs=160 -PlongTurnOverlapMs=960 -PlongTurnMaxTurnS=120
 -PqnnSignedSkel=/secure/path/libQnnHtpV73Skel.so
 -PqnnPdMode=auto                        # auto (default), signed or unsigned
@@ -156,18 +156,20 @@ splice partial NPU and CPU output. If recovery also fails, fail closed.
 selects a direction before the normal Hybrid branch. LID is an APK-level A/B
 flag, not a UI mode, and all six QNN contexts remain resident in either mode.
 
-### Long turns (opt-in)
+### Long turns (ADAPTIVE, default)
 
-`-PlongTurnMode=ADAPTIVE` keeps the microphone open across ASR windows for
+`longTurnMode=ADAPTIVE` (the default) keeps the microphone open across ASR windows for
 turns up to 120 s: windows are cut at pauses (or forced at the 10 s contract
 with 960 ms grid-aligned overlap), recognized and translated while the speaker
 talks, and played after the turn ends on one AudioTrack. The first window is
 routed once and the direction locked; the prior is committed once per turn.
-`LEGACY` stays the default until docs/LONG_FORM_SPEECH_VALIDATION.md shows the
-gates pass. Spec: `docs/LONG_FORM_SPEECH_IMPLEMENTATION.md`; architecture:
+ADAPTIVE became the default on 2026-11-05, before every gate in
+docs/LONG_FORM_SPEECH_VALIDATION.md passed (live mic, TWS and soak are still
+open); `-PlongTurnMode=LEGACY` is the one-rebuild rollback. Spec: `docs/LONG_FORM_SPEECH_IMPLEMENTATION.md`; architecture:
 `docs/ARCHITECTURE.md` "Long turns"; replay harness and recording scripts:
 `tools/eval/longturn/` (`cmd=replay`, `baseline=B0..B3`). Every statement
-below about one bounded utterance per turn describes LEGACY.
+below about one bounded utterance per turn describes LEGACY, or one ASR window
+under ADAPTIVE.
 
 ### Strict half-duplex audio
 
