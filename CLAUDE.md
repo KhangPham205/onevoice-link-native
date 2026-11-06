@@ -35,7 +35,11 @@ Audio I/O is a persisted Dashboard choice (`AudioRoutePreference`), resolved at
 every IDLE → CAPTURING edge: **Auto** (default) uses Bluetooth when exactly one
 communication headset is usable, otherwise the phone; **Phone** uses the
 built-in mic (`VOICE_RECOGNITION`) and loudspeaker so two people can share one
-handset and developers/judges need no headset; **Bluetooth** keeps the HFP/A2DP
+handset and developers/judges need no headset; a plugged-in USB mic (e.g. a
+wireless lavalier receiver, `TYPE_USB_DEVICE`/`USB_HEADSET`) is preferred over
+the built-in mic when attached. The tested M31-style receiver is mono (both
+transmitters mixed), so it carries no per-speaker channel and routing stays
+dual-ASR; **Bluetooth** keeps the HFP/A2DP
 contract below and fails closed without a headset. The route selects devices
 only, never the translation direction.
 

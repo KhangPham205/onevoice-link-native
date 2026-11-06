@@ -1039,8 +1039,8 @@ class NpuEngine(
                 "AudioRecord initialization failed"
             }
             activeRecord = active
-            val builtInMic = if (communication == null) builtInMicrophone(audioManager) else null
-            builtInMic?.let(active::setPreferredDevice)
+            val phoneMic = if (communication == null) phoneRouteMicrophone(audioManager) else null
+            phoneMic?.let(active::setPreferredDevice)
             active.startRecording()
             val routedInput = if (communication != null) {
                 awaitBluetoothInputRoute(active, communication)
@@ -1052,11 +1052,12 @@ class NpuEngine(
                 route,
                 communication?.productName?.toString()?.trim().orEmpty()
                     .ifEmpty { "Bluetooth headset" },
+                routedInput,
             )
             Log.i(
                 HALF_DUPLEX_TAG,
                 "turn=$turnId route=${route.name.lowercase(Locale.ROOT)} captureSetupMs=$setupMs " +
-                    "requested=${describeDevice(communication ?: builtInMic)} " +
+                    "requested=${describeDevice(communication ?: phoneMic)} " +
                     "routed=${describeDevice(routedInput)} sampleRate=${active.sampleRate}",
             )
             return LiveCapture(
@@ -1539,9 +1540,21 @@ class NpuEngine(
         }
     }
 
-    private fun builtInMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
-        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            .firstOrNull { it.isSource && it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+    /**
+     * Phone-route input: a plugged-in USB microphone (for example a wireless
+     * lavalier receiver) when one is attached, otherwise the built-in mic.
+     * Without the explicit preference the built-in mic wins, so a USB receiver
+     * would be silently ignored. The input selects a device only; a mono
+     * receiver mixes both speakers, so the direction stays with the router.
+     */
+    private fun phoneRouteMicrophone(audioManager: AudioManager): AudioDeviceInfo? {
+        val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).filter { it.isSource }
+        return inputs.firstOrNull { isUsbInputType(it.type) }
+            ?: inputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+    }
+
+    private fun isUsbInputType(type: Int): Boolean =
+        type == AudioDeviceInfo.TYPE_USB_DEVICE || type == AudioDeviceInfo.TYPE_USB_HEADSET
 
     private fun builtInSpeaker(audioManager: AudioManager): AudioDeviceInfo? =
         audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
@@ -1559,7 +1572,7 @@ class NpuEngine(
             routed = record.routedDevice
         }
         check(routed != null && !isBluetoothCommunicationType(routed.type)) {
-            "Phone capture did not open a built-in microphone: routed=${describeDevice(routed)}"
+            "Phone capture did not open a phone or USB microphone: routed=${describeDevice(routed)}"
         }
         return routed
     }
@@ -2498,8 +2511,16 @@ class NpuEngine(
         }
     }
 
-    private fun routeLabel(route: AudioRouteKind, inputName: String): String = when (route) {
-        AudioRouteKind.PHONE -> "Phone mic + loudspeaker"
+    private fun routeLabel(
+        route: AudioRouteKind,
+        inputName: String,
+        routedInput: AudioDeviceInfo?,
+    ): String = when (route) {
+        AudioRouteKind.PHONE -> if (routedInput != null && isUsbInputType(routedInput.type)) {
+            "${routedInput.productName.toString().trim().ifEmpty { "USB" }} mic + loudspeaker"
+        } else {
+            "Phone mic + loudspeaker"
+        }
         AudioRouteKind.BLUETOOTH -> "$inputName (Bluetooth)"
     }
 
@@ -2599,6 +2620,9 @@ class NpuEngine(
         AudioDeviceInfo.TYPE_BLE_HEADSET -> "BLE_HEADSET"
         AudioDeviceInfo.TYPE_BLE_SPEAKER -> "BLE_SPEAKER"
         AudioDeviceInfo.TYPE_BLE_BROADCAST -> "BLE_BROADCAST"
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> "BUILTIN_MIC"
+        AudioDeviceInfo.TYPE_USB_DEVICE -> "USB_DEVICE"
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "USB_HEADSET"
         else -> "TYPE_$type"
     }
 

@@ -11,7 +11,8 @@ enum class AudioRoutePreference(val persistedValue: String) {
     AUTO("auto"),
 
     /**
-     * Built-in microphone and loudspeaker. Lets two people share one handset
+     * Built-in microphone (or a plugged-in USB microphone, such as a wireless
+     * lavalier receiver) and loudspeaker. Lets two people share one handset
      * and lets developers/judges run the full pipeline without a headset.
      */
     PHONE("phone"),

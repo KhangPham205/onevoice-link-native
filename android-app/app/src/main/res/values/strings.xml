@@ -38,7 +38,7 @@
     <string name="audio_route_phone">Phone</string>
     <string name="audio_route_bluetooth">Bluetooth</string>
     <string name="audio_route_auto_hint">Uses a connected Bluetooth headset; otherwise the phone microphone and loudspeaker.</string>
-    <string name="audio_route_phone_hint">Two people share this phone: speak toward the microphone, the translation plays from the loudspeaker.</string>
+    <string name="audio_route_phone_hint">Two people share this phone: speak toward the microphone (a plugged-in USB mic is used when present), the translation plays from the loudspeaker.</string>
     <string name="audio_route_bluetooth_hint">Headset microphone and earbuds only. Vietnamese plays on the left bud, English on the right.</string>
     <string name="audio_route_active">Last turn: %1$s</string>
 
