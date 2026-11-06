@@ -12,8 +12,7 @@ enum class AudioRoutePreference(val persistedValue: String) {
     AUTO("auto"),
 
     /**
-     * Built-in microphone (or a plugged-in USB microphone, such as a wireless
-     * lavalier receiver) and loudspeaker. Lets two people share one handset
+     * Built-in microphone and loudspeaker. Lets two people share one handset
      * and lets developers/judges run the full pipeline without a headset.
      */
     PHONE("phone"),
@@ -29,26 +28,30 @@ enum class AudioRoutePreference(val persistedValue: String) {
 }
 
 /**
- * Build-time input lock (`-PaudioInput`) for a dedicated microphone. DASHBOARD
- * keeps the [AudioRoutePreference] choice. USB always records from a plugged-in
- * USB microphone (for example a wireless lavalier receiver) and plays on the
- * loudspeaker: Bluetooth is never opened, so neither a headset that reconnects
- * nor a stray tap on the Dashboard selector can take over the input. Like the
- * route, it selects devices only, never the translation direction.
+ * Build-time input mode (`-PaudioInput`): which microphone records.
+ *
+ * PHONE (default) uses the built-in mic, so nothing has to be connected. USB
+ * uses only a plugged-in USB-C mic (for example a wireless lavalier receiver)
+ * and fails closed without one. Neither ever records from Bluetooth, so a
+ * headset that reconnects, or a stray tap, cannot take over the input; both
+ * still play to a connected A2DP headset, else on the loudspeaker. DASHBOARD
+ * keeps the older [AudioRoutePreference] selector, Bluetooth mic included.
+ * Like the route, the mode picks devices, never the translation direction.
  */
-enum class AudioInputLock {
-    DASHBOARD,
+enum class AudioInputMode {
+    PHONE,
     USB,
+    DASHBOARD,
     ;
 
     companion object {
-        fun parse(value: String): AudioInputLock =
+        fun parse(value: String): AudioInputMode =
             entries.firstOrNull { it.name == value }
                 ?: throw IllegalArgumentException(
-                    "audioInput must be DASHBOARD or USB (got '$value')",
+                    "audioInput must be PHONE, USB or DASHBOARD (got '$value')",
                 )
 
-        fun fromBuildConfig(): AudioInputLock = parse(BuildConfig.AUDIO_INPUT)
+        fun fromBuildConfig(): AudioInputMode = parse(BuildConfig.AUDIO_INPUT)
     }
 }
 
@@ -71,27 +74,29 @@ internal sealed interface RouteChoice<out T> {
  * an ambiguous Bluetooth set falls back to the phone, whereas an explicit
  * BLUETOOTH preference fails closed so a developer sees the misconfiguration.
  *
- * [inputLock] USB overrides [preference]: the phone route with the USB
- * microphone, or a fail-closed error when none is attached. It does not fall
- * back to the built-in mic, because in a build locked to a dedicated mic a
- * silently different microphone is a wrong demo, not a degraded one.
+ * [inputMode] PHONE and USB override [preference] and never record from
+ * Bluetooth. USB without an attached USB mic fails closed rather than fall
+ * back to the built-in mic: in a build set to a dedicated mic, a silently
+ * different microphone is a wrong demo, not a degraded one.
  */
 internal fun <T> chooseAudioRoute(
     preference: AudioRoutePreference,
     bluetoothCandidates: List<T>,
     currentBluetooth: T?,
-    inputLock: AudioInputLock = AudioInputLock.DASHBOARD,
+    inputMode: AudioInputMode = AudioInputMode.DASHBOARD,
     usbMicrophoneAttached: Boolean = false,
 ): RouteChoice<T> {
-    if (inputLock == AudioInputLock.USB) {
-        return if (usbMicrophoneAttached) {
+    when (inputMode) {
+        AudioInputMode.PHONE -> return RouteChoice.Phone
+        AudioInputMode.USB -> return if (usbMicrophoneAttached) {
             RouteChoice.Phone
         } else {
             RouteChoice.Unavailable(
-                "This build records only from a USB microphone (audioInput=USB) and none " +
-                    "is attached. Plug in the receiver, or build with -PaudioInput=DASHBOARD.",
+                "This build records only from a USB-C microphone (audioInput=USB) and none " +
+                    "is attached. Plug in the receiver, or build with -PaudioInput=PHONE.",
             )
         }
+        AudioInputMode.DASHBOARD -> Unit
     }
     val bluetooth = currentBluetooth ?: bluetoothCandidates.singleOrNull()
     return when (preference) {

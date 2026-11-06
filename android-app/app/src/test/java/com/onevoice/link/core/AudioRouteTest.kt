@@ -15,7 +15,7 @@ class AudioRouteTest {
                     preference,
                     listOf("jbl"),
                     "jbl",
-                    AudioInputLock.USB,
+                    AudioInputMode.USB,
                     usbMicrophoneAttached = true,
                 ),
             )
@@ -28,7 +28,7 @@ class AudioRouteTest {
             AudioRoutePreference.AUTO,
             emptyList<String>(),
             null,
-            AudioInputLock.USB,
+            AudioInputMode.USB,
             usbMicrophoneAttached = false,
         )
         assertTrue(choice is RouteChoice.Unavailable)
@@ -43,17 +43,34 @@ class AudioRouteTest {
                 AudioRoutePreference.BLUETOOTH,
                 listOf("jbl"),
                 null,
-                AudioInputLock.DASHBOARD,
+                AudioInputMode.DASHBOARD,
                 usbMicrophoneAttached = true,
             ),
         )
     }
 
     @Test
-    fun inputLockParsesOnlyKnownValues() {
-        assertEquals(AudioInputLock.USB, AudioInputLock.parse("USB"))
-        assertEquals(AudioInputLock.DASHBOARD, AudioInputLock.parse("DASHBOARD"))
-        assertTrue(runCatching { AudioInputLock.parse("usb") }.isFailure)
+    fun phoneModeNeverUsesAHeadsetOrTheUsbMicChoice() {
+        for (preference in AudioRoutePreference.entries) {
+            assertEquals(
+                RouteChoice.Phone,
+                chooseAudioRoute(
+                    preference,
+                    listOf("jbl"),
+                    "jbl",
+                    AudioInputMode.PHONE,
+                    usbMicrophoneAttached = false,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun inputModeParsesOnlyKnownValues() {
+        assertEquals(AudioInputMode.PHONE, AudioInputMode.parse("PHONE"))
+        assertEquals(AudioInputMode.USB, AudioInputMode.parse("USB"))
+        assertEquals(AudioInputMode.DASHBOARD, AudioInputMode.parse("DASHBOARD"))
+        assertTrue(runCatching { AudioInputMode.parse("usb") }.isFailure)
     }
 
     @Test

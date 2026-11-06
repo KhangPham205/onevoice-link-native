@@ -28,6 +28,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.onevoice.link.R
+import com.onevoice.link.core.AudioInputMode
 import com.onevoice.link.core.AudioRoutePreference
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.NpuEngine
@@ -77,7 +78,7 @@ fun DashboardScreen(
                 modelRootPath = npuEngine?.modelRootPath.orEmpty(),
                 audioRoute = controller.audioRoute,
                 activeRouteLabel = controller.activeRouteLabel,
-                audioInputLocked = npuEngine?.audioInputLocked == true,
+                audioInputMode = npuEngine?.audioInputMode ?: AudioInputMode.DASHBOARD,
             ),
             onInitialize = controller::initialize,
             onToggleTranslation = controller::toggleTranslation,
@@ -131,7 +132,7 @@ fun DashboardContent(
                     activeRouteLabel = state.activeRouteLabel,
                     enabled = state.canChangeAudioRoute,
                     onSelected = onAudioRouteSelected,
-                    locked = state.audioInputLocked,
+                    inputMode = state.audioInputMode,
                 )
             }
             if (state.showTranslationCard) {

@@ -68,7 +68,12 @@ stateDiagram-v2
 ```
 
 - `IDLE`: no live turn owns capture or playback.
-- `CAPTURING`: playback is absent. The persisted audio route is resolved for
+- `CAPTURING`: playback is absent. The build's `audioInput` mode
+  (`AudioInputMode`) picks the microphone: PHONE (default) the built-in mic,
+  USB only a plugged-in USB-C mic (fail closed without one); both take the
+  phone path below and never claim Bluetooth, but their playback moves to a
+  connected A2DP headset when exactly one is connected (stereo split), else
+  the loudspeaker. DASHBOARD resolves the persisted audio route for
   this turn (`AudioRoutePreference`). Auto uses Bluetooth when exactly one
   communication headset is usable (or Android has already selected one) and
   otherwise the phone; Bluetooth fails closed without an unambiguous headset;
@@ -158,6 +163,11 @@ window, never the microphone. The spec and acceptance plan are
   truncated. Marian now rejects an over-long input and reports output that hit
   its 128-token cap without EOS; the coordinator splits and retries such a unit.
   A one-window turn is exactly one unit, like the legacy whole-utterance path.
+  Before MT, `FillerWords` cuts leading hesitation words ("ừ", "ờ", "à", "uh",
+  "um") and skips a unit made only of them (`dropFillerWords`): lavalier noise
+  that passed Silero was decoded as "ừ" and spoken as "Yeah." (16 of 32 turns
+  in one session). A turn of only fillers ends quietly, with no error and no
+  prior change. Answers ("dạ", "vâng", "yes") and trailing particles are kept.
 - **Playback.** One `AudioTrack` per turn: the route proof runs as soon as
   capture closed, while the last units are still synthesizing; units are
   appended in order with a 150 ms pause, staged in 100 ms stereo blocks (VI

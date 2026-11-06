@@ -18,6 +18,8 @@ class LongTurnCoordinatorTest {
      */
     private class FakeInference(
         val routeTo: TranslationDirection? = TranslationDirection.VI_TO_EN,
+        /** The word recognized for each turn second. */
+        val wordFor: (Int) -> String = { "s$it" },
     ) : LongTurnInference {
         val routeCalls = ArrayList<Int>()
         val recognizeCalls = ArrayList<Pair<Int, ExecutionPath>>()
@@ -34,7 +36,7 @@ class LongTurnCoordinatorTest {
             val start = startOf(samples)
             val first = start / 16_000
             val last = (start + samples.size - 1) / 16_000
-            val tokens = (first..last).map { s -> AsrToken("▁s$s", s * 16_000 - start) }
+            val tokens = (first..last).map { s -> AsrToken("▁" + wordFor(s), s * 16_000 - start) }
             return AsrHypothesis(tokens.joinToString(" ") { it.piece.drop(1) }, -1.0, tokens.size, -0.5, tokens)
         }
 
@@ -122,6 +124,44 @@ class LongTurnCoordinatorTest {
         assertEquals(listOf(0, 1, 2), harness.playedUnits())
         assertNull(harness.turn.error)
         assertTrue(harness.turn.workerDone)
+    }
+
+    @Test
+    fun aTurnOfOnlyFillerWordsEndsQuietlyWithoutTranslation() {
+        val fake = FakeInference(wordFor = { "ừ" })
+        val harness = Harness(config, fake, seconds = 2)
+        harness.window(0, 0, 2, ChunkCut.TURN_END, null)
+        harness.end()
+
+        assertTrue("nothing reaches MT", fake.translateCalls.isEmpty())
+        assertTrue("nothing is spoken", fake.synthesized.isEmpty())
+        assertNull("noise is not an error", harness.turn.error)
+        assertTrue(harness.turn.fillerOnly)
+        assertTrue(harness.turn.audio.take(0) is AudioTake.Finished)
+        assertTrue(harness.turn.workerDone)
+    }
+
+    @Test
+    fun leadingFillerWordsAreNotTranslated() {
+        val fake = FakeInference(wordFor = { s -> if (s == 0) "ờ" else "s$s" })
+        val harness = Harness(config, fake, seconds = 3)
+        harness.window(0, 0, 3, ChunkCut.TURN_END, null)
+        harness.end()
+
+        assertEquals(listOf("s1 s2"), fake.translateCalls.map { it.first })
+        assertFalse(harness.turn.fillerOnly)
+        assertEquals(listOf(0), harness.playedUnits())
+    }
+
+    @Test
+    fun fillerWordsAreTranslatedWhenTheFilterIsOff() {
+        val fake = FakeInference(wordFor = { "ừ" })
+        val harness = Harness(config.copy(dropFillerWords = false), fake, seconds = 1)
+        harness.window(0, 0, 1, ChunkCut.TURN_END, null)
+        harness.end()
+
+        assertEquals(listOf("ừ"), fake.translateCalls.map { it.first })
+        assertFalse(harness.turn.fillerOnly)
     }
 
     @Test

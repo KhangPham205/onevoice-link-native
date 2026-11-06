@@ -110,6 +110,10 @@ internal class LongTurn(
     @Volatile var transcript: String = ""
     @Volatile var translation: String = ""
     @Volatile var emptyUnits: Int = 0
+    /** Units of only hesitation words, never sent to MT ([FillerWords]). */
+    @Volatile var fillerUnits: Int = 0
+    /** Every unit was a filler: the turn ends quietly, like noise, and the prior stays. */
+    @Volatile var fillerOnly: Boolean = false
     /** What was played, for the tagged bench waveform; null when over the replay cap. */
     @Volatile var replayAudio: FloatArray? = null
 
@@ -387,6 +391,15 @@ internal class LongTurnCoordinator(
             if (turn.error != null || turn.cancelled) return
             if (turn.revision != revision) return@repeat
             if (work.translations.none(String::isNotBlank)) {
+                if (turn.fillerUnits > 0) {
+                    // Nothing but fillers: end quietly, like noise. No error
+                    // for the UI, and the engine leaves the turn prior alone.
+                    turn.fillerOnly = true
+                    if (!ttsJobs.offer(TtsJob.EndOfTurn(turn, turn.revision))) {
+                        failTurn(turn, "TTS job queue is full")
+                    }
+                    return
+                }
                 failTurn(turn, "Translation produced an empty result.")
                 return
             }
@@ -402,9 +415,20 @@ internal class LongTurnCoordinator(
     private fun translateAndQueue(turn: LongTurn, work: TurnWork, unit: TranslationUnit): Boolean {
         val direction = checkNotNull(turn.direction)
         val revision = turn.revision
+        val source = if (turn.config.dropFillerWords) {
+            FillerWords.stripLeading(unit.text, direction)
+        } else {
+            unit.text
+        }
+        if (source.isBlank()) {
+            // Only "ừ"/"uh": noise or a backchannel, which Marian would turn
+            // into "Yeah." Counted for the log, never translated or spoken.
+            turn.fillerUnits++
+            return true
+        }
         val startedNs = clockNs()
         val result = try {
-            translateWithinCap(unit.text, direction, work.path, depth = 0)
+            translateWithinCap(source, direction, work.path, depth = 0)
         } catch (failure: Exception) {
             if (work.path == ExecutionPath.HYBRID_NPU && failure !is MarianInputTooLongException) {
                 recoverOnCpu(turn, "MT unit ${unit.index}: ${describe(failure)}", pendingChunk = null)

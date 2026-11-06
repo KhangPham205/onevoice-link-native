@@ -20,6 +20,7 @@
     <!-- Status messages -->
     <string name="msg_idle_hybrid_auto">Dual-ASR Hybrid is idle — load the on-device pipeline to begin.</string>
     <string name="msg_initializing_hybrid_auto">Loading both Hybrid translation branches…</string>
+    <string name="msg_initialized_hybrid_fixed">Hybrid is ready. Start translating.</string>
     <string name="msg_initialized_hybrid_auto">Hybrid is ready. Choose an audio route, then start translating.</string>
     <string name="msg_init_failed">Model loading failed.</string>
     <string name="msg_native_error">Native error: %1$s</string>
@@ -38,9 +39,12 @@
     <string name="audio_route_phone">Phone</string>
     <string name="audio_route_bluetooth">Bluetooth</string>
     <string name="audio_route_auto_hint">Uses a connected Bluetooth headset; otherwise the phone microphone and loudspeaker.</string>
-    <string name="audio_route_phone_hint">Two people share this phone: speak toward the microphone (a plugged-in USB mic is used when present), the translation plays from the loudspeaker.</string>
+    <string name="audio_route_phone_hint">Two people share this phone: speak toward the microphone, the translation plays from the loudspeaker.</string>
     <string name="audio_route_bluetooth_hint">Headset microphone and earbuds only. Vietnamese plays on the left bud, English on the right.</string>
-    <string name="audio_route_locked_usb_hint">Fixed by this build (audioInput=USB): the plugged-in USB microphone records and the loudspeaker plays. Bluetooth is not used.</string>
+    <string name="audio_route_fixed_phone">Phone microphone</string>
+    <string name="audio_route_fixed_usb">USB-C microphone</string>
+    <string name="audio_route_fixed_phone_hint">Set by this build (audioInput=PHONE): the phone\'s own microphone records, so nothing has to be connected. A connected Bluetooth headset plays the translation (Vietnamese left, English right); otherwise the loudspeaker does.</string>
+    <string name="audio_route_fixed_usb_hint">Set by this build (audioInput=USB): only the plugged-in USB-C microphone records. A connected Bluetooth headset plays the translation (Vietnamese left, English right); otherwise the loudspeaker does.</string>
     <string name="audio_route_active">Last turn: %1$s</string>
 
     <!-- Actions -->

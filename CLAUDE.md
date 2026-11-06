@@ -31,20 +31,28 @@ and saved VI/EN preferences may remain in Settings, but they do not select the
 source direction. Auracast is a possible one-to-many downlink, not source
 language evidence. See `docs/AURACAST_ROUTING.md`.
 
-Audio I/O is a persisted Dashboard choice (`AudioRoutePreference`), resolved at
-every IDLE → CAPTURING edge: **Auto** (default) uses Bluetooth when exactly one
-communication headset is usable, otherwise the phone; **Phone** uses the
-built-in mic (`VOICE_RECOGNITION`) and loudspeaker so two people can share one
-handset and developers/judges need no headset; a plugged-in USB mic (e.g. a
-wireless lavalier receiver, `TYPE_USB_DEVICE`/`USB_HEADSET`) is preferred over
-the built-in mic when attached. The tested M31-style receiver is mono (both
-transmitters mixed), so it carries no per-speaker channel and routing stays
-dual-ASR. `-PaudioInput=USB` locks the build to that USB mic plus the
-loudspeaker: Bluetooth is never opened (a reconnecting headset or a stray tap
-on the selector cannot take the input), the Dashboard selector is read-only,
-and capture fails closed instead of falling back to the built-in mic; **Bluetooth** keeps the HFP/A2DP
-contract below and fails closed without a headset. The route selects devices
-only, never the translation direction.
+The microphone is a build-time choice, `-PaudioInput` (`AudioInputMode`),
+resolved at every IDLE → CAPTURING edge:
+
+- **PHONE** (default, "normal"): the built-in mic (`VOICE_RECOGNITION`), so
+  nothing has to be connected; developers and judges need no accessory.
+- **USB**: only a plugged-in USB-C mic (`TYPE_USB_DEVICE`/`USB_HEADSET`, e.g.
+  the wireless lavalier receiver). It fails closed without one instead of
+  falling back to the built-in mic. The tested M31-style receiver is mono
+  (both transmitters mixed), so it carries no per-speaker channel and routing
+  stays dual-ASR.
+- **DASHBOARD**: the older persisted Dashboard selector (`AudioRoutePreference`):
+  **Auto** uses Bluetooth when exactly one communication headset is usable,
+  otherwise the phone; **Phone** is the built-in mic and loudspeaker;
+  **Bluetooth** keeps the HFP/A2DP contract below and fails closed without a
+  headset.
+
+PHONE and USB never record from Bluetooth, so neither a headset that
+reconnects nor a stray tap can take the input (the Dashboard shows the mode
+read-only). Their output follows a connected A2DP headset when exactly one is
+connected, with the Bluetooth stereo split below, else the loudspeaker; no SCO
+is opened, so there is no HFP/A2DP switch. The mode selects devices only,
+never the translation direction.
 
 CPU fallback ASR/MT models remain cold, whole-utterance recovery assets; CPU
 Kokoro is the active target-speech renderer. There is no user-facing CPU-only
@@ -82,9 +90,10 @@ Gradle properties that change runtime behavior:
 -PdualAsrPriorWeight=0.15              # soft turn prior, nats/token (>= margin = hard prior)
 -PkokoroThreads=4                      # ORT threads per Kokoro session (2/4/5 measured)
 -PvadMode=SILERO                       # SILERO (bundled asset) or legacy ENERGY RMS gate
--PaudioInput=DASHBOARD                 # DASHBOARD (code default: Auto/Phone/Bluetooth selector) or USB
-                                       # (USB mic + loudspeaker only, never Bluetooth; selector locked;
-                                       # fails closed without a USB mic). feat/usb-mic-input-routing sets USB
+-PaudioInput=PHONE                     # PHONE (default, built-in mic), USB (USB-C mic only, fails closed
+                                       # without one) or DASHBOARD (old Auto/Phone/Bluetooth selector).
+                                       # PHONE/USB play to a connected A2DP headset, else the loudspeaker
+-PdropFillerWords=true                 # skip units of only "ừ"/"à"/"uh" and cut leading ones (FillerWords)
 -PviTtsEngine=VIENEU                   # Vietnamese speech: VIENEU (VieNeu-TTS v3 Nano, default), KOKORO or
                                        # SUPERTONIC (Supertonic-3 int8). VIENEU needs build-sea-g2p-android.sh
                                        # (libsea_g2p_rs.so; the jniLibs merge refuses without it) and
@@ -181,7 +190,10 @@ ADAPTIVE became the default on 2026-11-05, before every gate in
 docs/LONG_FORM_SPEECH_VALIDATION.md passed (live mic, TWS and soak are still
 open); `-PlongTurnMode=LEGACY` is the one-rebuild rollback. Spec: `docs/LONG_FORM_SPEECH_IMPLEMENTATION.md`; architecture:
 `docs/ARCHITECTURE.md` "Long turns"; replay harness and recording scripts:
-`tools/eval/longturn/` (`cmd=replay`, `baseline=B0..B3`). Every statement
+`tools/eval/longturn/` (`cmd=replay`, `baseline=B0..B3`). A unit made only of
+hesitation words ("ừ", "à", "uh") is never translated and leading ones are cut
+(`FillerWords`, `dropFillerWords`): mic noise decoded as "ừ" played "Yeah.". A
+filler-only turn ends quietly and does not move the turn prior. Every statement
 below about one bounded utterance per turn describes LEGACY, or one ASR window
 under ADAPTIVE.
 

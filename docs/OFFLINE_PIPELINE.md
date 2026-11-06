@@ -22,7 +22,8 @@ never used to guess a language.
 ## Per-utterance data flow
 
 ```text
-Dashboard audio route (Auto / Phone / Bluetooth), resolved at IDLE -> CAPTURING
+Build audioInput mode (PHONE built-in mic / USB-C mic / DASHBOARD Auto-Phone-
+Bluetooth selector), resolved at IDLE -> CAPTURING
   -> AudioRecord: VOICE_COMMUNICATION over SCO, or VOICE_RECOGNITION on the
      built-in mic; the actual routed input is verified
   -> Silero VAD bounds one utterance (pre-roll, hangover, 10 s ceiling); under
