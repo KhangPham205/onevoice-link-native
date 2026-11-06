@@ -32,7 +32,7 @@ class AudioRouteTest {
             usbMicrophoneAttached = false,
         )
         assertTrue(choice is RouteChoice.Unavailable)
-        assertTrue((choice as RouteChoice.Unavailable).reason.contains("audioInput=USB"))
+        assertTrue((choice as RouteChoice.Unavailable).reason.contains("USB-C microphone"))
     }
 
     @Test
@@ -66,7 +66,17 @@ class AudioRouteTest {
     }
 
     @Test
+    fun dashboardMicChoiceMapsToItsModeAndDefaultsToThePhone() {
+        assertEquals(AudioInputMode.PHONE, MicInputPreference.PHONE.mode)
+        assertEquals(AudioInputMode.USB, MicInputPreference.USB.mode)
+        assertEquals(MicInputPreference.USB, MicInputPreference.fromPersistedValue("usb"))
+        assertEquals(MicInputPreference.PHONE, MicInputPreference.fromPersistedValue(null))
+        assertEquals(MicInputPreference.PHONE, MicInputPreference.fromPersistedValue("bluetooth"))
+    }
+
+    @Test
     fun inputModeParsesOnlyKnownValues() {
+        assertEquals(AudioInputMode.SELECT, AudioInputMode.parse("SELECT"))
         assertEquals(AudioInputMode.PHONE, AudioInputMode.parse("PHONE"))
         assertEquals(AudioInputMode.USB, AudioInputMode.parse("USB"))
         assertEquals(AudioInputMode.DASHBOARD, AudioInputMode.parse("DASHBOARD"))

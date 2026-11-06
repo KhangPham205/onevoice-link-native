@@ -25,9 +25,8 @@ the whole turn is played back once they stop. Each window then goes through:
 The language is decided once, on the first window, and then kept for the
 whole turn. Audio is strictly half-duplex: the mic is closed while the
 translation plays.
-The microphone is chosen when the app is built: the phone's own mic (default,
-nothing to connect) or a plugged-in USB-C mic such as a wireless lavalier
-receiver. Translations play in a connected Bluetooth headset (Vietnamese left,
+The Dashboard offers two microphones: the phone's own mic (nothing to
+connect) or a plugged-in USB-C mic such as a wireless lavalier receiver. Translations play in a connected Bluetooth headset (Vietnamese left,
 English right), otherwise on the loudspeaker. The microphone never switches to
 the headset, and it never sets the translation direction.
 
@@ -133,9 +132,9 @@ SpeechFlow A/B model and optional Supertonic voice.
 
 **On the phone:**
 1. Open **OneVoice Link** and allow the microphone.
-2. Check the **Audio input / output** card: it names the microphone this build
-   uses (see `audioInput` under Build options). Connect Bluetooth earbuds if
-   you want to hear the translation in them instead of the loudspeaker.
+2. Under **Audio input / output** pick **Phone mic** or **USB-C mic** (plug the
+   receiver in first). The output needs no choice: connected Bluetooth earbuds
+   play the translation, otherwise the loudspeaker does.
 3. Tap **Load Hybrid Pipeline** and wait for the engine status **Ready**.
 4. Tap **Start Translating** and speak in turns.
 
@@ -154,7 +153,7 @@ Runtime policy is baked into the APK from `android-app/gradle.properties`; overr
 ./gradlew :app:assembleDebug -PviTtsEngine=KOKORO   # VI voice: VIENEU (default), KOKORO, SUPERTONIC
 ./gradlew :app:assembleDebug -ProutingMode=LID      # SpeechFlow language-ID A/B instead of dual ASR
 ./gradlew :app:assembleDebug -PlongTurnMode=LEGACY  # rollback: one 10 s window per turn (default ADAPTIVE)
-./gradlew :app:assembleDebug -PaudioInput=USB       # record from a plugged-in USB-C mic (default PHONE: built-in mic)
+./gradlew :app:assembleDebug -PaudioInput=USB       # fix the mic to USB-C (or PHONE); default SELECT lets the Dashboard choose
 ./gradlew :app:testDebugUnitTest                    # unit tests (no device, no Rust needed)
 ```
 
