@@ -30,7 +30,8 @@ enum class AudioRoutePreference(val persistedValue: String) {
 /**
  * Build-time input mode (`-PaudioInput`): which microphone records.
  *
- * PHONE (default) uses the built-in mic, so nothing has to be connected. USB
+ * SELECT (default) lets the Dashboard pick PHONE or USB ([MicInputPreference]).
+ * PHONE uses the built-in mic, so nothing has to be connected. USB
  * uses only a plugged-in USB-C mic (for example a wireless lavalier receiver)
  * and fails closed without one. Neither ever records from Bluetooth, so a
  * headset that reconnects, or a stray tap, cannot take over the input; both
@@ -39,6 +40,7 @@ enum class AudioRoutePreference(val persistedValue: String) {
  * Like the route, the mode picks devices, never the translation direction.
  */
 enum class AudioInputMode {
+    SELECT,
     PHONE,
     USB,
     DASHBOARD,
@@ -48,10 +50,25 @@ enum class AudioInputMode {
         fun parse(value: String): AudioInputMode =
             entries.firstOrNull { it.name == value }
                 ?: throw IllegalArgumentException(
-                    "audioInput must be PHONE, USB or DASHBOARD (got '$value')",
+                    "audioInput must be SELECT, PHONE, USB or DASHBOARD (got '$value')",
                 )
 
         fun fromBuildConfig(): AudioInputMode = parse(BuildConfig.AUDIO_INPUT)
+    }
+}
+
+/**
+ * Dashboard microphone choice of an `audioInput=SELECT` build, persisted.
+ * The evaluator picks it; the output still follows a connected A2DP headset.
+ */
+enum class MicInputPreference(val persistedValue: String, val mode: AudioInputMode) {
+    PHONE("phone", AudioInputMode.PHONE),
+    USB("usb", AudioInputMode.USB),
+    ;
+
+    companion object {
+        fun fromPersistedValue(value: String?): MicInputPreference =
+            entries.firstOrNull { it.persistedValue == value } ?: PHONE
     }
 }
 
@@ -87,13 +104,14 @@ internal fun <T> chooseAudioRoute(
     usbMicrophoneAttached: Boolean = false,
 ): RouteChoice<T> {
     when (inputMode) {
-        AudioInputMode.PHONE -> return RouteChoice.Phone
+        // NpuEngine resolves SELECT to the Dashboard's PHONE or USB first.
+        AudioInputMode.SELECT, AudioInputMode.PHONE -> return RouteChoice.Phone
         AudioInputMode.USB -> return if (usbMicrophoneAttached) {
             RouteChoice.Phone
         } else {
             RouteChoice.Unavailable(
-                "This build records only from a USB-C microphone (audioInput=USB) and none " +
-                    "is attached. Plug in the receiver, or build with -PaudioInput=PHONE.",
+                "The USB-C microphone is selected but none is attached. Plug in the " +
+                    "receiver, or choose the phone microphone.",
             )
         }
         AudioInputMode.DASHBOARD -> Unit
@@ -129,9 +147,17 @@ internal class AudioRoutePreferences(context: Context) {
         preferences.edit().putString(KEY, value.persistedValue).apply()
     }
 
+    fun getMic(): MicInputPreference =
+        MicInputPreference.fromPersistedValue(preferences.getString(MIC_KEY, null))
+
+    fun setMic(value: MicInputPreference) {
+        preferences.edit().putString(MIC_KEY, value.persistedValue).apply()
+    }
+
     private companion object {
         const val FILE_NAME = "audio_route_v1"
         const val KEY = "preference"
+        const val MIC_KEY = "mic_input"
     }
 }
 

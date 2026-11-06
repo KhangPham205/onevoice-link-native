@@ -52,13 +52,13 @@ val dualAsrPriorWeight = providers.gradleProperty("dualAsrPriorWeight")
 val vadMode = providers.gradleProperty("vadMode").orElse("SILERO").get().also {
     require(it in setOf("SILERO", "ENERGY")) { "vadMode must be SILERO or ENERGY (got '$it')" }
 }
-// Which microphone records (AudioInputMode). PHONE: the built-in mic, nothing
-// to connect. USB: a plugged-in USB-C mic only. DASHBOARD: the older Auto/
-// Phone/Bluetooth selector. PHONE and USB never record from Bluetooth but play
-// to a connected A2DP headset.
-val audioInput = providers.gradleProperty("audioInput").orElse("PHONE").get().also {
-    require(it in setOf("PHONE", "USB", "DASHBOARD")) {
-        "audioInput must be PHONE, USB or DASHBOARD (got '$it')"
+// Which microphone records (AudioInputMode). SELECT: the user picks Phone mic
+// or USB-C mic on the Dashboard. PHONE / USB: fixed to that mic. DASHBOARD: the
+// older Auto/Phone/Bluetooth selector. Only DASHBOARD records from Bluetooth;
+// the others play to a connected A2DP headset, else the loudspeaker.
+val audioInput = providers.gradleProperty("audioInput").orElse("SELECT").get().also {
+    require(it in setOf("SELECT", "PHONE", "USB", "DASHBOARD")) {
+        "audioInput must be SELECT, PHONE, USB or DASHBOARD (got '$it')"
     }
 }
 // Drop translation units made only of hesitation words ("ừ", "uh") and cut

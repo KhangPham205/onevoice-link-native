@@ -15,14 +15,15 @@ import androidx.compose.ui.res.stringResource
 import com.onevoice.link.R
 import com.onevoice.link.core.AudioInputMode
 import com.onevoice.link.core.AudioRoutePreference
+import com.onevoice.link.core.MicInputPreference
 import com.onevoice.link.ui.theme.Spacing
 
 /**
  * Audio I/O selector. It picks microphone/speaker devices only; the spoken
- * language of each turn is still decided by the on-device router. A build
- * with a fixed [inputMode] (`audioInput=PHONE` or `USB`) shows its microphone
- * as text instead: there is nothing to tap, so a stray touch cannot move the
- * input to a Bluetooth headset.
+ * language of each turn is still decided by the on-device router. A SELECT
+ * build offers the two microphones (phone or USB-C) and the output follows a
+ * connected Bluetooth headset by itself; a fixed PHONE/USB build shows its
+ * microphone as text. Neither can move the input to a Bluetooth headset.
  */
 @Composable
 fun AudioRouteSelector(
@@ -32,6 +33,8 @@ fun AudioRouteSelector(
     onSelected: (AudioRoutePreference) -> Unit,
     modifier: Modifier = Modifier,
     inputMode: AudioInputMode = AudioInputMode.DASHBOARD,
+    micInput: MicInputPreference = MicInputPreference.PHONE,
+    onMicSelected: (MicInputPreference) -> Unit = {},
 ) {
     val options = AudioRoutePreference.entries
     Surface(
@@ -61,6 +64,24 @@ fun AudioRouteSelector(
                         }
                     }
                 }
+            } else if (inputMode == AudioInputMode.SELECT) {
+                val mics = MicInputPreference.entries
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = Spacing.sm),
+                ) {
+                    mics.forEachIndexed { index, option ->
+                        SegmentedButton(
+                            selected = option == micInput,
+                            onClick = { onMicSelected(option) },
+                            enabled = enabled,
+                            shape = SegmentedButtonDefaults.itemShape(index, mics.size),
+                        ) {
+                            Text(stringResource(option.labelRes()))
+                        }
+                    }
+                }
             } else {
                 Text(
                     text = stringResource(inputMode.fixedLabelRes()),
@@ -70,7 +91,11 @@ fun AudioRouteSelector(
             }
             Text(
                 text = stringResource(
-                    if (inputMode == AudioInputMode.DASHBOARD) selected.hintRes() else inputMode.fixedHintRes(),
+                    when (inputMode) {
+                        AudioInputMode.DASHBOARD -> selected.hintRes()
+                        AudioInputMode.SELECT -> micInput.hintRes()
+                        else -> inputMode.fixedHintRes()
+                    },
                 ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -91,6 +116,16 @@ private fun AudioRoutePreference.labelRes(): Int = when (this) {
     AudioRoutePreference.AUTO -> R.string.audio_route_auto
     AudioRoutePreference.PHONE -> R.string.audio_route_phone
     AudioRoutePreference.BLUETOOTH -> R.string.audio_route_bluetooth
+}
+
+private fun MicInputPreference.labelRes(): Int = when (this) {
+    MicInputPreference.PHONE -> R.string.mic_input_phone
+    MicInputPreference.USB -> R.string.mic_input_usb
+}
+
+private fun MicInputPreference.hintRes(): Int = when (this) {
+    MicInputPreference.PHONE -> R.string.mic_input_phone_hint
+    MicInputPreference.USB -> R.string.mic_input_usb_hint
 }
 
 private fun AudioInputMode.fixedLabelRes(): Int =

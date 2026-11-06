@@ -103,7 +103,7 @@ class NpuEngine(
     private val vadMode = VadMode.parse(BuildConfig.VAD_MODE)
     private val inputMode = AudioInputMode.fromBuildConfig()
 
-    /** Build-time microphone choice; anything but DASHBOARD makes the route selector read-only. */
+    /** Build-time microphone mode: SELECT (Dashboard choice), PHONE, USB or DASHBOARD. */
     val audioInputMode: AudioInputMode get() = inputMode
     private val routePreferences = AudioRoutePreferences(appContext)
 
@@ -117,6 +117,21 @@ class NpuEngine(
             field = value
             routePreferences.set(value)
         }
+
+    /**
+     * Dashboard microphone of a SELECT build, read at the start of every turn
+     * like the route: changing it never interrupts a live turn.
+     */
+    @Volatile
+    var micInputPreference: MicInputPreference = routePreferences.getMic()
+        set(value) {
+            field = value
+            routePreferences.setMic(value)
+        }
+
+    /** The microphone mode this turn uses: SELECT resolved to the Dashboard choice. */
+    private val activeInputMode: AudioInputMode
+        get() = if (inputMode == AudioInputMode.SELECT) micInputPreference.mode else inputMode
 
     /** Human-readable input -> output route of the most recent turn, for the UI. */
     @Volatile
@@ -237,6 +252,7 @@ class NpuEngine(
             put("kokoroThreads", BuildConfig.KOKORO_THREADS)
             put("audioRoutePreference", audioRoutePreference.name)
             put("audioInput", inputMode.name)
+            put("micInput", activeInputMode.name)
             put("dropFillerWords", BuildConfig.DROP_FILLER_WORDS)
             put("longTurn", longTurnConfig.toJson())
         }
@@ -1546,7 +1562,7 @@ class NpuEngine(
             audioRoutePreference,
             candidates,
             current,
-            inputMode,
+            activeInputMode,
             usbMicrophoneAttached = usbMicrophone(audioManager) != null,
         )
     }
@@ -1558,7 +1574,7 @@ class NpuEngine(
     private fun standalonePlaybackRoute(): AudioRouteKind {
         // PHONE/USB builds: the proof in openProvenTrack still moves playback to
         // a connected A2DP headset; only DASHBOARD can claim Bluetooth here.
-        if (inputMode != AudioInputMode.DASHBOARD || audioRoutePreference == AudioRoutePreference.PHONE) {
+        if (activeInputMode != AudioInputMode.DASHBOARD || audioRoutePreference == AudioRoutePreference.PHONE) {
             return AudioRouteKind.PHONE
         }
         val audioManager = appContext.getSystemService(AudioManager::class.java)
@@ -1579,7 +1595,7 @@ class NpuEngine(
      * so the direction stays with the router.
      */
     private fun phoneRouteMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
-        if (inputMode == AudioInputMode.USB) usbMicrophone(audioManager) else builtInMicrophone(audioManager)
+        if (activeInputMode == AudioInputMode.USB) usbMicrophone(audioManager) else builtInMicrophone(audioManager)
 
     private fun usbMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
         audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
@@ -1617,8 +1633,8 @@ class NpuEngine(
         }
         // The route check saw a USB mic, but it can be unplugged before
         // AudioRecord starts, and Android then records from the built-in mic.
-        check(inputMode != AudioInputMode.USB || isUsbInputType(routed.type)) {
-            "This build records only from a USB-C microphone (audioInput=USB), but Android " +
+        check(activeInputMode != AudioInputMode.USB || isUsbInputType(routed.type)) {
+            "The USB-C microphone is selected, but Android " +
                 "routed capture to ${describeDevice(routed)}. Check the receiver connection."
         }
         return routed
@@ -1979,7 +1995,7 @@ class NpuEngine(
             // there plays to the connected A2DP headset when exactly one is
             // connected (stereo split as on the Bluetooth route), else on the
             // loudspeaker. No SCO is opened, so the headset never records.
-            val fixedInputHeadset = if (route == AudioRouteKind.PHONE && inputMode != AudioInputMode.DASHBOARD) {
+            val fixedInputHeadset = if (route == AudioRouteKind.PHONE && activeInputMode != AudioInputMode.DASHBOARD) {
                 soleA2dpOutput(audioManager)
             } else {
                 null

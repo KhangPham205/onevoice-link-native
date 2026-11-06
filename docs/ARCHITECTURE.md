@@ -69,7 +69,9 @@ stateDiagram-v2
 
 - `IDLE`: no live turn owns capture or playback.
 - `CAPTURING`: playback is absent. The build's `audioInput` mode
-  (`AudioInputMode`) picks the microphone: PHONE (default) the built-in mic,
+  (`AudioInputMode`) picks the microphone: SELECT (default) takes the
+  Dashboard's persisted Phone mic / USB-C mic choice (`MicInputPreference`)
+  and then behaves as PHONE or USB; PHONE the built-in mic,
   USB only a plugged-in USB-C mic (fail closed without one); both take the
   phone path below and never claim Bluetooth, but their playback moves to a
   connected A2DP headset when exactly one is connected (stereo split), else

@@ -31,6 +31,7 @@ import com.onevoice.link.R
 import com.onevoice.link.core.AudioInputMode
 import com.onevoice.link.core.AudioRoutePreference
 import com.onevoice.link.core.EngineBackend
+import com.onevoice.link.core.MicInputPreference
 import com.onevoice.link.core.NpuEngine
 import com.onevoice.link.ui.components.AppHeader
 import com.onevoice.link.ui.components.AudioRouteSelector
@@ -79,6 +80,7 @@ fun DashboardScreen(
                 audioRoute = controller.audioRoute,
                 activeRouteLabel = controller.activeRouteLabel,
                 audioInputMode = npuEngine?.audioInputMode ?: AudioInputMode.DASHBOARD,
+                micInput = controller.micInput,
             ),
             onInitialize = controller::initialize,
             onToggleTranslation = controller::toggleTranslation,
@@ -86,6 +88,7 @@ fun DashboardScreen(
             onReplay = controller::replayLast,
             onOpenMenu = onOpenMenu,
             onAudioRouteSelected = controller::selectAudioRoute,
+            onMicInputSelected = controller::selectMicInput,
             modifier = Modifier.padding(innerPadding),
         )
     }
@@ -102,6 +105,7 @@ fun DashboardContent(
     onReplay: () -> Unit = {},
     onOpenMenu: () -> Unit = {},
     onAudioRouteSelected: (AudioRoutePreference) -> Unit = {},
+    onMicInputSelected: (MicInputPreference) -> Unit = {},
 ) {
     Column(
         modifier
@@ -133,6 +137,8 @@ fun DashboardContent(
                     enabled = state.canChangeAudioRoute,
                     onSelected = onAudioRouteSelected,
                     inputMode = state.audioInputMode,
+                    micInput = state.micInput,
+                    onMicSelected = onMicInputSelected,
                 )
             }
             if (state.showTranslationCard) {

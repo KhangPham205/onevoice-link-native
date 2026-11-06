@@ -16,6 +16,7 @@ import com.onevoice.link.core.AudioRoutePreference
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.ExecutionPath
 import com.onevoice.link.core.LivePhase
+import com.onevoice.link.core.MicInputPreference
 import com.onevoice.link.core.NpuEngine
 import com.onevoice.link.core.PipelineSegment
 import com.onevoice.link.core.SessionRecorder
@@ -75,8 +76,10 @@ data class DashboardUiState(
     val audioRoute: AudioRoutePreference = AudioRoutePreference.AUTO,
     /** Device route of the most recent turn; null before the first capture. */
     val activeRouteLabel: String? = null,
-    /** Build-time microphone (`audioInput`); anything but DASHBOARD shows a read-only route. */
+    /** Build-time microphone mode (`audioInput`); SELECT shows the two-mic choice. */
     val audioInputMode: AudioInputMode = AudioInputMode.DASHBOARD,
+    /** The Dashboard microphone of a SELECT build. */
+    val micInput: MicInputPreference = MicInputPreference.PHONE,
 ) {
     val running: Boolean get() = stage == EngineStage.RUNNING
 
@@ -93,7 +96,8 @@ data class DashboardUiState(
 
     /** A route change applies at the next turn, but not while a start/stop is busy. */
     val canChangeAudioRoute: Boolean get() =
-        supportsLiveTranslation && !busy && audioInputMode == AudioInputMode.DASHBOARD
+        supportsLiveTranslation && !busy &&
+            (audioInputMode == AudioInputMode.DASHBOARD || audioInputMode == AudioInputMode.SELECT)
 
     val showTranslationCard: Boolean get() = supportsLiveTranslation
     val canReplay: Boolean get() =
@@ -141,6 +145,10 @@ class EngineController(
         private set
     var activeRouteLabel by mutableStateOf<String?>(null)
         private set
+    var micInput by mutableStateOf(
+        (backend as? NpuEngine)?.micInputPreference ?: MicInputPreference.PHONE,
+    )
+        private set
 
     /**
      * Every live turn since the session began, oldest first. It survives
@@ -172,10 +180,12 @@ class EngineController(
             stage = if (initialized) EngineStage.INITIALIZED
             else EngineStage.NOT_INITIALIZED
             message = if (initialized) {
-                val fixedInput = (backend as? NpuEngine)?.audioInputMode
-                    ?.let { it != AudioInputMode.DASHBOARD } == true
                 UiMessage(
-                    if (fixedInput) R.string.msg_initialized_hybrid_fixed else R.string.msg_initialized_hybrid_auto,
+                    when ((backend as? NpuEngine)?.audioInputMode) {
+                        AudioInputMode.SELECT -> R.string.msg_initialized_hybrid_select
+                        AudioInputMode.PHONE, AudioInputMode.USB -> R.string.msg_initialized_hybrid_fixed
+                        else -> R.string.msg_initialized_hybrid_auto
+                    },
                 )
             } else {
                 backendFailure(R.string.msg_init_failed)
@@ -184,6 +194,15 @@ class EngineController(
             stage = EngineStage.NOT_INITIALIZED
             message = nativeFailure(failure)
         }
+    }
+
+    /** SELECT builds: persisted, and used from the next IDLE -> CAPTURING edge. */
+    fun selectMicInput(choice: MicInputPreference) {
+        if (busy || shutdownRequested) return
+        val engine = backend as? NpuEngine ?: return
+        if (engine.audioInputMode != AudioInputMode.SELECT) return
+        engine.micInputPreference = choice
+        micInput = choice
     }
 
     /** Persisted by the engine and resolved again at the next IDLE -> CAPTURING edge. */

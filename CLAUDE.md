@@ -34,7 +34,10 @@ language evidence. See `docs/AURACAST_ROUTING.md`.
 The microphone is a build-time choice, `-PaudioInput` (`AudioInputMode`),
 resolved at every IDLE → CAPTURING edge:
 
-- **PHONE** (default, "normal"): the built-in mic (`VOICE_RECOGNITION`), so
+- **SELECT** (default): the Dashboard offers **Phone mic** and **USB-C mic**
+  (`MicInputPreference`, persisted) so an evaluator picks the microphone; each
+  behaves exactly like the fixed mode below.
+- **PHONE** ("normal"): the built-in mic (`VOICE_RECOGNITION`), so
   nothing has to be connected; developers and judges need no accessory.
 - **USB**: only a plugged-in USB-C mic (`TYPE_USB_DEVICE`/`USB_HEADSET`, e.g.
   the wireless lavalier receiver). It fails closed without one instead of
@@ -47,8 +50,8 @@ resolved at every IDLE → CAPTURING edge:
   **Bluetooth** keeps the HFP/A2DP contract below and fails closed without a
   headset.
 
-PHONE and USB never record from Bluetooth, so neither a headset that
-reconnects nor a stray tap can take the input (the Dashboard shows the mode
+SELECT, PHONE and USB never record from Bluetooth, so a headset that
+reconnects cannot take the input (a fixed PHONE/USB build shows its mode
 read-only). Their output follows a connected A2DP headset when exactly one is
 connected, with the Bluetooth stereo split below, else the loudspeaker; no SCO
 is opened, so there is no HFP/A2DP switch. The mode selects devices only,
@@ -90,9 +93,10 @@ Gradle properties that change runtime behavior:
 -PdualAsrPriorWeight=0.15              # soft turn prior, nats/token (>= margin = hard prior)
 -PkokoroThreads=4                      # ORT threads per Kokoro session (2/4/5 measured)
 -PvadMode=SILERO                       # SILERO (bundled asset) or legacy ENERGY RMS gate
--PaudioInput=PHONE                     # PHONE (default, built-in mic), USB (USB-C mic only, fails closed
-                                       # without one) or DASHBOARD (old Auto/Phone/Bluetooth selector).
-                                       # PHONE/USB play to a connected A2DP headset, else the loudspeaker
+-PaudioInput=SELECT                    # SELECT (default: Dashboard Phone mic / USB-C mic), PHONE, USB
+                                       # (USB-C mic only, fails closed without one) or DASHBOARD (old
+                                       # Auto/Phone/Bluetooth selector). All but DASHBOARD play to a
+                                       # connected A2DP headset, else the loudspeaker
 -PdropFillerWords=true                 # skip units of only "ừ"/"à"/"uh" and cut leading ones (FillerWords)
 -PviTtsEngine=VIENEU                   # Vietnamese speech: VIENEU (VieNeu-TTS v3 Nano, default), KOKORO or
                                        # SUPERTONIC (Supertonic-3 int8). VIENEU needs build-sea-g2p-android.sh
