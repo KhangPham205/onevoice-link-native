@@ -74,6 +74,8 @@ data class DashboardUiState(
     val audioRoute: AudioRoutePreference = AudioRoutePreference.AUTO,
     /** Device route of the most recent turn; null before the first capture. */
     val activeRouteLabel: String? = null,
+    /** The build pins input to a USB mic (`audioInput=USB`); the selector is read-only. */
+    val audioInputLocked: Boolean = false,
 ) {
     val running: Boolean get() = stage == EngineStage.RUNNING
 
@@ -89,7 +91,7 @@ data class DashboardUiState(
             !micGranted && !running
 
     /** A route change applies at the next turn, but not while a start/stop is busy. */
-    val canChangeAudioRoute: Boolean get() = supportsLiveTranslation && !busy
+    val canChangeAudioRoute: Boolean get() = supportsLiveTranslation && !busy && !audioInputLocked
 
     val showTranslationCard: Boolean get() = supportsLiveTranslation
     val canReplay: Boolean get() =
@@ -181,6 +183,7 @@ class EngineController(
     /** Persisted by the engine and resolved again at the next IDLE -> CAPTURING edge. */
     fun selectAudioRoute(route: AudioRoutePreference) {
         if (busy || shutdownRequested) return
+        if ((backend as? NpuEngine)?.audioInputLocked == true) return
         (backend as? NpuEngine)?.audioRoutePreference = route
         audioRoute = route
     }

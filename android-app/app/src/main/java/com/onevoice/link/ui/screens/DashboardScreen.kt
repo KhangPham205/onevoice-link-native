@@ -77,6 +77,7 @@ fun DashboardScreen(
                 modelRootPath = npuEngine?.modelRootPath.orEmpty(),
                 audioRoute = controller.audioRoute,
                 activeRouteLabel = controller.activeRouteLabel,
+                audioInputLocked = npuEngine?.audioInputLocked == true,
             ),
             onInitialize = controller::initialize,
             onToggleTranslation = controller::toggleTranslation,
@@ -130,6 +131,7 @@ fun DashboardContent(
                     activeRouteLabel = state.activeRouteLabel,
                     enabled = state.canChangeAudioRoute,
                     onSelected = onAudioRouteSelected,
+                    locked = state.audioInputLocked,
                 )
             }
             if (state.showTranslationCard) {

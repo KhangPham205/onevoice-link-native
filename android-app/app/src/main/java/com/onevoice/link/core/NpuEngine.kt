@@ -101,6 +101,10 @@ class NpuEngine(
     private val buildLongTurnConfig = LongTurnConfig.fromBuildConfig()
     @Volatile private var longTurnConfig = buildLongTurnConfig
     private val vadMode = VadMode.parse(BuildConfig.VAD_MODE)
+    private val inputLock = AudioInputLock.fromBuildConfig()
+
+    /** True when the build pins input to a USB mic; the Dashboard selector is then locked. */
+    val audioInputLocked: Boolean get() = inputLock == AudioInputLock.USB
     private val routePreferences = AudioRoutePreferences(appContext)
 
     /**
@@ -228,6 +232,7 @@ class NpuEngine(
             }
             put("kokoroThreads", BuildConfig.KOKORO_THREADS)
             put("audioRoutePreference", audioRoutePreference.name)
+            put("audioInput", inputLock.name)
             put("longTurn", longTurnConfig.toJson())
         }
 
@@ -1521,7 +1526,13 @@ class NpuEngine(
         val current = audioManager.communicationDevice?.let { active ->
             candidates.firstOrNull { it.id == active.id }
         }
-        return chooseAudioRoute(audioRoutePreference, candidates, current)
+        return chooseAudioRoute(
+            audioRoutePreference,
+            candidates,
+            current,
+            inputLock,
+            usbMicrophoneAttached = usbMicrophone(audioManager) != null,
+        )
     }
 
     /**
@@ -1529,7 +1540,9 @@ class NpuEngine(
      * smoke): honor PHONE, otherwise use Bluetooth media only when one exists.
      */
     private fun standalonePlaybackRoute(): AudioRouteKind {
-        if (audioRoutePreference == AudioRoutePreference.PHONE) return AudioRouteKind.PHONE
+        if (inputLock == AudioInputLock.USB || audioRoutePreference == AudioRoutePreference.PHONE) {
+            return AudioRouteKind.PHONE
+        }
         val audioManager = appContext.getSystemService(AudioManager::class.java)
         val hasA2dp = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             ?.any { it.isSink && it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } == true
@@ -1547,11 +1560,17 @@ class NpuEngine(
      * would be silently ignored. The input selects a device only; a mono
      * receiver mixes both speakers, so the direction stays with the router.
      */
-    private fun phoneRouteMicrophone(audioManager: AudioManager): AudioDeviceInfo? {
-        val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).filter { it.isSource }
-        return inputs.firstOrNull { isUsbInputType(it.type) }
-            ?: inputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
-    }
+    private fun phoneRouteMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
+        usbMicrophone(audioManager)
+            ?: if (inputLock == AudioInputLock.USB) null else builtInMicrophone(audioManager)
+
+    private fun usbMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
+        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .firstOrNull { it.isSource && isUsbInputType(it.type) }
+
+    private fun builtInMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
+        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .firstOrNull { it.isSource && it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
 
     private fun isUsbInputType(type: Int): Boolean =
         type == AudioDeviceInfo.TYPE_USB_DEVICE || type == AudioDeviceInfo.TYPE_USB_HEADSET
@@ -1573,6 +1592,12 @@ class NpuEngine(
         }
         check(routed != null && !isBluetoothCommunicationType(routed.type)) {
             "Phone capture did not open a phone or USB microphone: routed=${describeDevice(routed)}"
+        }
+        // The route check saw a USB mic, but it can be unplugged before
+        // AudioRecord starts, and Android then records from the built-in mic.
+        check(inputLock != AudioInputLock.USB || isUsbInputType(routed.type)) {
+            "This build records only from a USB microphone (audioInput=USB), but Android " +
+                "routed capture to ${describeDevice(routed)}. Check the receiver connection."
         }
         return routed
     }
@@ -2621,6 +2646,7 @@ class NpuEngine(
         AudioDeviceInfo.TYPE_BLE_SPEAKER -> "BLE_SPEAKER"
         AudioDeviceInfo.TYPE_BLE_BROADCAST -> "BLE_BROADCAST"
         AudioDeviceInfo.TYPE_BUILTIN_MIC -> "BUILTIN_MIC"
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "BUILTIN_SPEAKER"
         AudioDeviceInfo.TYPE_USB_DEVICE -> "USB_DEVICE"
         AudioDeviceInfo.TYPE_USB_HEADSET -> "USB_HEADSET"
         else -> "TYPE_$type"

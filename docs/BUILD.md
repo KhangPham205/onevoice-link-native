@@ -108,6 +108,8 @@ with `-P<name>=<value>`. Do not hide threshold defaults in decoder code.
 -PdualAsrPriorWeight=0.15              # soft turn prior, nats/token (>= margin = hard prior)
 -PkokoroThreads=4                      # ORT threads per Kokoro session
 -PvadMode=SILERO                       # SILERO or legacy ENERGY RMS gate
+-PaudioInput=DASHBOARD                 # DASHBOARD (Dashboard route selector) or USB: USB mic +
+                                       # loudspeaker only, Bluetooth never used, selector locked
 -PviTtsEngine=VIENEU                   # Vietnamese speech: VIENEU (default), KOKORO or SUPERTONIC
 -PvieneuVoice=minh_quan -PvieneuSteps=16 -PvieneuCfg=3.0 -PvieneuSeed=1234
 -PvieneuSpeed=1.0 -PvieneuThreads=4

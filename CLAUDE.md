@@ -39,7 +39,10 @@ handset and developers/judges need no headset; a plugged-in USB mic (e.g. a
 wireless lavalier receiver, `TYPE_USB_DEVICE`/`USB_HEADSET`) is preferred over
 the built-in mic when attached. The tested M31-style receiver is mono (both
 transmitters mixed), so it carries no per-speaker channel and routing stays
-dual-ASR; **Bluetooth** keeps the HFP/A2DP
+dual-ASR. `-PaudioInput=USB` locks the build to that USB mic plus the
+loudspeaker: Bluetooth is never opened (a reconnecting headset or a stray tap
+on the selector cannot take the input), the Dashboard selector is read-only,
+and capture fails closed instead of falling back to the built-in mic; **Bluetooth** keeps the HFP/A2DP
 contract below and fails closed without a headset. The route selects devices
 only, never the translation direction.
 
@@ -79,6 +82,9 @@ Gradle properties that change runtime behavior:
 -PdualAsrPriorWeight=0.15              # soft turn prior, nats/token (>= margin = hard prior)
 -PkokoroThreads=4                      # ORT threads per Kokoro session (2/4/5 measured)
 -PvadMode=SILERO                       # SILERO (bundled asset) or legacy ENERGY RMS gate
+-PaudioInput=DASHBOARD                 # DASHBOARD (code default: Auto/Phone/Bluetooth selector) or USB
+                                       # (USB mic + loudspeaker only, never Bluetooth; selector locked;
+                                       # fails closed without a USB mic). feat/usb-mic-input-routing sets USB
 -PviTtsEngine=VIENEU                   # Vietnamese speech: VIENEU (VieNeu-TTS v3 Nano, default), KOKORO or
                                        # SUPERTONIC (Supertonic-3 int8). VIENEU needs build-sea-g2p-android.sh
                                        # (libsea_g2p_rs.so; the jniLibs merge refuses without it) and

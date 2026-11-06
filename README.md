@@ -135,6 +135,7 @@ Runtime policy is baked into the APK from `android-app/gradle.properties`; overr
 ./gradlew :app:assembleDebug -PviTtsEngine=KOKORO   # VI voice: VIENEU (default), KOKORO, SUPERTONIC
 ./gradlew :app:assembleDebug -ProutingMode=LID      # SpeechFlow language-ID A/B instead of dual ASR
 ./gradlew :app:assembleDebug -PlongTurnMode=LEGACY  # rollback: one 10 s window per turn (default ADAPTIVE)
+./gradlew :app:assembleDebug -PaudioInput=USB       # always a plugged-in USB mic + loudspeaker, never Bluetooth
 ./gradlew :app:testDebugUnitTest                    # unit tests (no device, no Rust needed)
 ```
 

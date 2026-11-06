@@ -52,6 +52,12 @@ val dualAsrPriorWeight = providers.gradleProperty("dualAsrPriorWeight")
 val vadMode = providers.gradleProperty("vadMode").orElse("SILERO").get().also {
     require(it in setOf("SILERO", "ENERGY")) { "vadMode must be SILERO or ENERGY (got '$it')" }
 }
+// Audio input lock (AudioInputLock). DASHBOARD: the Dashboard Auto/Phone/
+// Bluetooth choice decides. USB: a plugged-in USB microphone plus the
+// loudspeaker only; Bluetooth is never opened.
+val audioInput = providers.gradleProperty("audioInput").orElse("DASHBOARD").get().also {
+    require(it in setOf("DASHBOARD", "USB")) { "audioInput must be DASHBOARD or USB (got '$it')" }
+}
 val dualAsrEnOffset = providers.gradleProperty("dualAsrEnOffset").orElse("0.0").get()
     .toDoubleOrNull()
     ?.takeIf(Double::isFinite)
@@ -237,6 +243,7 @@ android {
         buildConfigField("double", "DUAL_ASR_EN_OFFSET", dualAsrEnOffset.toString())
         buildConfigField("int", "KOKORO_THREADS", kokoroThreads.toString())
         buildConfigField("String", "VAD_MODE", "\"$vadMode\"")
+        buildConfigField("String", "AUDIO_INPUT", "\"$audioInput\"")
         buildConfigField("String", "VI_TTS_ENGINE", "\"$viTtsEngine\"")
         buildConfigField("String", "SUPERTONIC_VOICE", "\"$supertonicVoice\"")
         buildConfigField("int", "SUPERTONIC_STEPS", supertonicSteps.toString())

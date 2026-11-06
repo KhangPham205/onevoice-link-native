@@ -18,7 +18,9 @@ import com.onevoice.link.ui.theme.Spacing
 
 /**
  * Audio I/O selector. It picks microphone/speaker devices only; the spoken
- * language of each turn is still decided by the on-device router.
+ * language of each turn is still decided by the on-device router. [locked]
+ * (`audioInput=USB` builds) shows the fixed USB mic + loudspeaker route
+ * read-only, because the build ignores the stored choice.
  */
 @Composable
 fun AudioRouteSelector(
@@ -27,8 +29,10 @@ fun AudioRouteSelector(
     enabled: Boolean,
     onSelected: (AudioRoutePreference) -> Unit,
     modifier: Modifier = Modifier,
+    locked: Boolean = false,
 ) {
     val options = AudioRoutePreference.entries
+    val shown = if (locked) AudioRoutePreference.PHONE else selected
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
@@ -46,9 +50,9 @@ fun AudioRouteSelector(
             ) {
                 options.forEachIndexed { index, option ->
                     SegmentedButton(
-                        selected = option == selected,
+                        selected = option == shown,
                         onClick = { onSelected(option) },
-                        enabled = enabled,
+                        enabled = enabled && !locked,
                         shape = SegmentedButtonDefaults.itemShape(index, options.size),
                     ) {
                         Text(stringResource(option.labelRes()))
@@ -56,7 +60,9 @@ fun AudioRouteSelector(
                 }
             }
             Text(
-                text = stringResource(selected.hintRes()),
+                text = stringResource(
+                    if (locked) R.string.audio_route_locked_usb_hint else selected.hintRes(),
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = Spacing.sm),

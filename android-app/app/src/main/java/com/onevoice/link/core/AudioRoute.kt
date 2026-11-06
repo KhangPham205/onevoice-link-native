@@ -1,6 +1,7 @@
 package com.onevoice.link.core
 
 import android.content.Context
+import com.onevoice.link.BuildConfig
 
 /**
  * User-facing audio I/O choice. It selects capture/playback devices only; it
@@ -27,6 +28,30 @@ enum class AudioRoutePreference(val persistedValue: String) {
     }
 }
 
+/**
+ * Build-time input lock (`-PaudioInput`) for a dedicated microphone. DASHBOARD
+ * keeps the [AudioRoutePreference] choice. USB always records from a plugged-in
+ * USB microphone (for example a wireless lavalier receiver) and plays on the
+ * loudspeaker: Bluetooth is never opened, so neither a headset that reconnects
+ * nor a stray tap on the Dashboard selector can take over the input. Like the
+ * route, it selects devices only, never the translation direction.
+ */
+enum class AudioInputLock {
+    DASHBOARD,
+    USB,
+    ;
+
+    companion object {
+        fun parse(value: String): AudioInputLock =
+            entries.firstOrNull { it.name == value }
+                ?: throw IllegalArgumentException(
+                    "audioInput must be DASHBOARD or USB (got '$value')",
+                )
+
+        fun fromBuildConfig(): AudioInputLock = parse(BuildConfig.AUDIO_INPUT)
+    }
+}
+
 /** Physical route that one bounded turn actually used. */
 enum class AudioRouteKind {
     PHONE,
@@ -45,12 +70,29 @@ internal sealed interface RouteChoice<out T> {
  * is one of [bluetoothCandidates]. AUTO never guesses between several headsets:
  * an ambiguous Bluetooth set falls back to the phone, whereas an explicit
  * BLUETOOTH preference fails closed so a developer sees the misconfiguration.
+ *
+ * [inputLock] USB overrides [preference]: the phone route with the USB
+ * microphone, or a fail-closed error when none is attached. It does not fall
+ * back to the built-in mic, because in a build locked to a dedicated mic a
+ * silently different microphone is a wrong demo, not a degraded one.
  */
 internal fun <T> chooseAudioRoute(
     preference: AudioRoutePreference,
     bluetoothCandidates: List<T>,
     currentBluetooth: T?,
+    inputLock: AudioInputLock = AudioInputLock.DASHBOARD,
+    usbMicrophoneAttached: Boolean = false,
 ): RouteChoice<T> {
+    if (inputLock == AudioInputLock.USB) {
+        return if (usbMicrophoneAttached) {
+            RouteChoice.Phone
+        } else {
+            RouteChoice.Unavailable(
+                "This build records only from a USB microphone (audioInput=USB) and none " +
+                    "is attached. Plug in the receiver, or build with -PaudioInput=DASHBOARD.",
+            )
+        }
+    }
     val bluetooth = currentBluetooth ?: bluetoothCandidates.singleOrNull()
     return when (preference) {
         AudioRoutePreference.PHONE -> RouteChoice.Phone

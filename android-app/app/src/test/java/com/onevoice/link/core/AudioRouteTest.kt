@@ -7,6 +7,56 @@ import org.junit.Test
 
 class AudioRouteTest {
     @Test
+    fun usbLockIgnoresTheDashboardAndConnectedHeadsets() {
+        for (preference in AudioRoutePreference.entries) {
+            assertEquals(
+                RouteChoice.Phone,
+                chooseAudioRoute(
+                    preference,
+                    listOf("jbl"),
+                    "jbl",
+                    AudioInputLock.USB,
+                    usbMicrophoneAttached = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun usbLockFailsClosedWithoutAUsbMicrophone() {
+        val choice = chooseAudioRoute(
+            AudioRoutePreference.AUTO,
+            emptyList<String>(),
+            null,
+            AudioInputLock.USB,
+            usbMicrophoneAttached = false,
+        )
+        assertTrue(choice is RouteChoice.Unavailable)
+        assertTrue((choice as RouteChoice.Unavailable).reason.contains("audioInput=USB"))
+    }
+
+    @Test
+    fun dashboardLockKeepsTheStoredChoice() {
+        assertEquals(
+            RouteChoice.Bluetooth("jbl"),
+            chooseAudioRoute(
+                AudioRoutePreference.BLUETOOTH,
+                listOf("jbl"),
+                null,
+                AudioInputLock.DASHBOARD,
+                usbMicrophoneAttached = true,
+            ),
+        )
+    }
+
+    @Test
+    fun inputLockParsesOnlyKnownValues() {
+        assertEquals(AudioInputLock.USB, AudioInputLock.parse("USB"))
+        assertEquals(AudioInputLock.DASHBOARD, AudioInputLock.parse("DASHBOARD"))
+        assertTrue(runCatching { AudioInputLock.parse("usb") }.isFailure)
+    }
+
+    @Test
     fun phonePreferenceIgnoresConnectedHeadsets() {
         assertEquals(
             RouteChoice.Phone,
