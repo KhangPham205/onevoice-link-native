@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import com.onevoice.link.R
+import com.onevoice.link.core.AudioInputMode
 import com.onevoice.link.core.AudioRoutePreference
 import com.onevoice.link.core.EngineBackend
 import com.onevoice.link.core.ExecutionPath
@@ -74,6 +75,8 @@ data class DashboardUiState(
     val audioRoute: AudioRoutePreference = AudioRoutePreference.AUTO,
     /** Device route of the most recent turn; null before the first capture. */
     val activeRouteLabel: String? = null,
+    /** Build-time microphone (`audioInput`); anything but DASHBOARD shows a read-only route. */
+    val audioInputMode: AudioInputMode = AudioInputMode.DASHBOARD,
 ) {
     val running: Boolean get() = stage == EngineStage.RUNNING
 
@@ -89,7 +92,8 @@ data class DashboardUiState(
             !micGranted && !running
 
     /** A route change applies at the next turn, but not while a start/stop is busy. */
-    val canChangeAudioRoute: Boolean get() = supportsLiveTranslation && !busy
+    val canChangeAudioRoute: Boolean get() =
+        supportsLiveTranslation && !busy && audioInputMode == AudioInputMode.DASHBOARD
 
     val showTranslationCard: Boolean get() = supportsLiveTranslation
     val canReplay: Boolean get() =
@@ -168,7 +172,11 @@ class EngineController(
             stage = if (initialized) EngineStage.INITIALIZED
             else EngineStage.NOT_INITIALIZED
             message = if (initialized) {
-                UiMessage(R.string.msg_initialized_hybrid_auto)
+                val fixedInput = (backend as? NpuEngine)?.audioInputMode
+                    ?.let { it != AudioInputMode.DASHBOARD } == true
+                UiMessage(
+                    if (fixedInput) R.string.msg_initialized_hybrid_fixed else R.string.msg_initialized_hybrid_auto,
+                )
             } else {
                 backendFailure(R.string.msg_init_failed)
             }
@@ -181,6 +189,7 @@ class EngineController(
     /** Persisted by the engine and resolved again at the next IDLE -> CAPTURING edge. */
     fun selectAudioRoute(route: AudioRoutePreference) {
         if (busy || shutdownRequested) return
+        if ((backend as? NpuEngine)?.audioInputMode?.let { it != AudioInputMode.DASHBOARD } == true) return
         (backend as? NpuEngine)?.audioRoutePreference = route
         audioRoute = route
     }

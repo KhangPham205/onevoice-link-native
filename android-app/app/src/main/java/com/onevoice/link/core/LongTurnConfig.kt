@@ -71,6 +71,8 @@ internal data class LongTurnConfig(
      * [pauseContextSamples] and the forced overlap stay the minimum context.
      */
     val fillLeftContext: Boolean = true,
+    /** Skip units of only hesitation words and cut leading ones ([FillerWords]). */
+    val dropFillerWords: Boolean = true,
     /** Hard model contract: every ASR call, context included, holds at most this. */
     val maxWindowSamples: Int = NpuEngine.MAX_SEGMENT_SAMPLES,
     /** Trailing non-speech that ends the turn; kept at the legacy 1 s baseline. */
@@ -136,6 +138,7 @@ internal data class LongTurnConfig(
         put("overlapMs", toMs(overlapSamples))
         put("pauseContextMs", toMs(pauseContextSamples))
         put("fillLeftContext", fillLeftContext)
+        put("dropFillerWords", dropFillerWords)
         put("maxWindowMs", toMs(maxWindowSamples))
         put("endSilenceMs", toMs(endSilenceSamples))
         put("maxTurnMs", toMs(maxTurnSamples))
@@ -182,6 +185,7 @@ internal data class LongTurnConfig(
             microPauseSamples = ms(BuildConfig.LONG_TURN_MICRO_PAUSE_MS),
             overlapSamples = ms(BuildConfig.LONG_TURN_OVERLAP_MS),
             maxTurnSamples = ms(BuildConfig.LONG_TURN_MAX_TURN_S * 1_000),
+            dropFillerWords = BuildConfig.DROP_FILLER_WORDS,
         )
     }
 }

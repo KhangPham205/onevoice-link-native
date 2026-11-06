@@ -7,6 +7,73 @@ import org.junit.Test
 
 class AudioRouteTest {
     @Test
+    fun usbLockIgnoresTheDashboardAndConnectedHeadsets() {
+        for (preference in AudioRoutePreference.entries) {
+            assertEquals(
+                RouteChoice.Phone,
+                chooseAudioRoute(
+                    preference,
+                    listOf("jbl"),
+                    "jbl",
+                    AudioInputMode.USB,
+                    usbMicrophoneAttached = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun usbLockFailsClosedWithoutAUsbMicrophone() {
+        val choice = chooseAudioRoute(
+            AudioRoutePreference.AUTO,
+            emptyList<String>(),
+            null,
+            AudioInputMode.USB,
+            usbMicrophoneAttached = false,
+        )
+        assertTrue(choice is RouteChoice.Unavailable)
+        assertTrue((choice as RouteChoice.Unavailable).reason.contains("audioInput=USB"))
+    }
+
+    @Test
+    fun dashboardLockKeepsTheStoredChoice() {
+        assertEquals(
+            RouteChoice.Bluetooth("jbl"),
+            chooseAudioRoute(
+                AudioRoutePreference.BLUETOOTH,
+                listOf("jbl"),
+                null,
+                AudioInputMode.DASHBOARD,
+                usbMicrophoneAttached = true,
+            ),
+        )
+    }
+
+    @Test
+    fun phoneModeNeverUsesAHeadsetOrTheUsbMicChoice() {
+        for (preference in AudioRoutePreference.entries) {
+            assertEquals(
+                RouteChoice.Phone,
+                chooseAudioRoute(
+                    preference,
+                    listOf("jbl"),
+                    "jbl",
+                    AudioInputMode.PHONE,
+                    usbMicrophoneAttached = false,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun inputModeParsesOnlyKnownValues() {
+        assertEquals(AudioInputMode.PHONE, AudioInputMode.parse("PHONE"))
+        assertEquals(AudioInputMode.USB, AudioInputMode.parse("USB"))
+        assertEquals(AudioInputMode.DASHBOARD, AudioInputMode.parse("DASHBOARD"))
+        assertTrue(runCatching { AudioInputMode.parse("usb") }.isFailure)
+    }
+
+    @Test
     fun phonePreferenceIgnoresConnectedHeadsets() {
         assertEquals(
             RouteChoice.Phone,

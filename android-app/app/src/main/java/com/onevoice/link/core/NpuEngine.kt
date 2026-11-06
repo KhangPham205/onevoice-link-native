@@ -101,6 +101,10 @@ class NpuEngine(
     private val buildLongTurnConfig = LongTurnConfig.fromBuildConfig()
     @Volatile private var longTurnConfig = buildLongTurnConfig
     private val vadMode = VadMode.parse(BuildConfig.VAD_MODE)
+    private val inputMode = AudioInputMode.fromBuildConfig()
+
+    /** Build-time microphone choice; anything but DASHBOARD makes the route selector read-only. */
+    val audioInputMode: AudioInputMode get() = inputMode
     private val routePreferences = AudioRoutePreferences(appContext)
 
     /**
@@ -118,6 +122,10 @@ class NpuEngine(
     @Volatile
     var lastRouteLabel: String? = null
         private set
+
+    /** Input half of [lastRouteLabel], so playback can name the output it proved. */
+    @Volatile
+    private var lastInputLabel: String = "Phone mic"
 
     /**
      * The DSP half of the HTP backend, extracted from assets on first run.
@@ -228,6 +236,8 @@ class NpuEngine(
             }
             put("kokoroThreads", BuildConfig.KOKORO_THREADS)
             put("audioRoutePreference", audioRoutePreference.name)
+            put("audioInput", inputMode.name)
+            put("dropFillerWords", BuildConfig.DROP_FILLER_WORDS)
             put("longTurn", longTurnConfig.toJson())
         }
 
@@ -1039,8 +1049,8 @@ class NpuEngine(
                 "AudioRecord initialization failed"
             }
             activeRecord = active
-            val builtInMic = if (communication == null) builtInMicrophone(audioManager) else null
-            builtInMic?.let(active::setPreferredDevice)
+            val phoneMic = if (communication == null) phoneRouteMicrophone(audioManager) else null
+            phoneMic?.let(active::setPreferredDevice)
             active.startRecording()
             val routedInput = if (communication != null) {
                 awaitBluetoothInputRoute(active, communication)
@@ -1048,15 +1058,16 @@ class NpuEngine(
                 awaitPhoneInputRoute(active)
             }
             val setupMs = (System.nanoTime() - setupStartedNs) / 1_000_000L
-            lastRouteLabel = routeLabel(
-                route,
-                communication?.productName?.toString()?.trim().orEmpty()
-                    .ifEmpty { "Bluetooth headset" },
-            )
+            lastInputLabel = inputLabel(route, communication, routedInput)
+            lastRouteLabel = if (route == AudioRouteKind.PHONE) {
+                "$lastInputLabel + loudspeaker"
+            } else {
+                lastInputLabel
+            }
             Log.i(
                 HALF_DUPLEX_TAG,
                 "turn=$turnId route=${route.name.lowercase(Locale.ROOT)} captureSetupMs=$setupMs " +
-                    "requested=${describeDevice(communication ?: builtInMic)} " +
+                    "requested=${describeDevice(communication ?: phoneMic)} " +
                     "routed=${describeDevice(routedInput)} sampleRate=${active.sampleRate}",
             )
             return LiveCapture(
@@ -1280,7 +1291,11 @@ class NpuEngine(
         while (!turn.awaitWorker(LONG_TURN_WORKER_POLL_MS) && running.get()) Unit
         val complete = playback?.completed == true && turn.error == null
         val direction = turn.direction
-        if (complete && direction != null) {
+        if (turn.fillerOnly) {
+            Log.i(TAG, "Long turn $turnId held only filler words (\"${turn.transcript}\"); nothing translated")
+        }
+        if (complete && direction != null && !turn.fillerOnly) {
+            // A filler-only turn is noise, not a speaker change: the prior stays.
             // Once per turn, after it was heard in full. A turn cut by the cap
             // expects the same speaker to continue; otherwise the other one.
             pipeline?.commitTurn(direction, sameSpeakerNext = terminal.reason == TurnEndReason.TURN_CAP)
@@ -1292,7 +1307,14 @@ class NpuEngine(
             )
         }
         reportLongTurn(turn, terminal, capture, playback, provider)
-        halfDuplex.finishTurn(turnId, turn.error?.let { "long_turn_failed" } ?: "turn_complete")
+        halfDuplex.finishTurn(
+            turnId,
+            when {
+                turn.error != null -> "long_turn_failed"
+                turn.fillerOnly -> "filler_only"
+                else -> "turn_complete"
+            },
+        )
         activeLongTurn = null
     }
 
@@ -1370,7 +1392,7 @@ class NpuEngine(
                                 turn.turnId,
                                 HalfDuplexState.PROCESSING,
                                 HalfDuplexState.PLAYING,
-                                if (capture.route == AudioRouteKind.PHONE) "speaker_route_ready" else "a2dp_route_confirmed",
+                                if (proven.outputRoute == AudioRouteKind.PHONE) "speaker_route_ready" else "a2dp_route_confirmed",
                             )
                             playbackStartedNs = System.nanoTime()
                             turn.firstContentWriteNs = playbackStartedNs
@@ -1378,7 +1400,7 @@ class NpuEngine(
                             written += writeSilence(activeTrack, pauseFrames, scratch)
                             replay.appendSilence(pauseFrames)
                         }
-                        written += writeStereoBlocks(activeTrack, audio.mono, direction, capture.route, scratch)
+                        written += writeStereoBlocks(activeTrack, audio.mono, direction, proven.outputRoute, scratch)
                         replay.append(audio.mono)
                         unitsPlayed++
                     }
@@ -1418,7 +1440,7 @@ class NpuEngine(
                 TAG,
                 "Long-turn playback turn=${turn.turnId} outcome=$outcome units=$unitsPlayed " +
                     "frames=$written delivered=${delivered()} underruns=$underruns starvedMs=$starvedMs " +
-                    "targetChannel=${targetChannelLabel(capture.route, turn.direction)}",
+                    "targetChannel=${targetChannelLabel(proven.outputRoute, turn.direction)}",
             )
             val played = if (unitsPlayed > 0) replay.result() else null
             turn.replayAudio = played
@@ -1520,7 +1542,13 @@ class NpuEngine(
         val current = audioManager.communicationDevice?.let { active ->
             candidates.firstOrNull { it.id == active.id }
         }
-        return chooseAudioRoute(audioRoutePreference, candidates, current)
+        return chooseAudioRoute(
+            audioRoutePreference,
+            candidates,
+            current,
+            inputMode,
+            usbMicrophoneAttached = usbMicrophone(audioManager) != null,
+        )
     }
 
     /**
@@ -1528,7 +1556,11 @@ class NpuEngine(
      * smoke): honor PHONE, otherwise use Bluetooth media only when one exists.
      */
     private fun standalonePlaybackRoute(): AudioRouteKind {
-        if (audioRoutePreference == AudioRoutePreference.PHONE) return AudioRouteKind.PHONE
+        // PHONE/USB builds: the proof in openProvenTrack still moves playback to
+        // a connected A2DP headset; only DASHBOARD can claim Bluetooth here.
+        if (inputMode != AudioInputMode.DASHBOARD || audioRoutePreference == AudioRoutePreference.PHONE) {
+            return AudioRouteKind.PHONE
+        }
         val audioManager = appContext.getSystemService(AudioManager::class.java)
         val hasA2dp = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             ?.any { it.isSink && it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } == true
@@ -1539,9 +1571,31 @@ class NpuEngine(
         }
     }
 
+    /**
+     * Phone-route input: the USB-C mic in a USB build, otherwise the built-in
+     * mic. The preference is explicit both ways: without it Android picks a
+     * plugged-in USB mic over the built-in one or the reverse, so each mode
+     * records from exactly one device. A mono receiver mixes both speakers,
+     * so the direction stays with the router.
+     */
+    private fun phoneRouteMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
+        if (inputMode == AudioInputMode.USB) usbMicrophone(audioManager) else builtInMicrophone(audioManager)
+
+    private fun usbMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
+        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .firstOrNull { it.isSource && isUsbInputType(it.type) }
+
     private fun builtInMicrophone(audioManager: AudioManager): AudioDeviceInfo? =
         audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
             .firstOrNull { it.isSource && it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+
+    private fun isUsbInputType(type: Int): Boolean =
+        type == AudioDeviceInfo.TYPE_USB_DEVICE || type == AudioDeviceInfo.TYPE_USB_HEADSET
+
+    private fun soleA2dpOutput(audioManager: AudioManager): AudioDeviceInfo? =
+        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .filter { it.isSink && it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+            .singleOrNull()
 
     private fun builtInSpeaker(audioManager: AudioManager): AudioDeviceInfo? =
         audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
@@ -1559,7 +1613,13 @@ class NpuEngine(
             routed = record.routedDevice
         }
         check(routed != null && !isBluetoothCommunicationType(routed.type)) {
-            "Phone capture did not open a built-in microphone: routed=${describeDevice(routed)}"
+            "Phone capture did not open a phone or USB microphone: routed=${describeDevice(routed)}"
+        }
+        // The route check saw a USB mic, but it can be unplugged before
+        // AudioRecord starts, and Android then records from the built-in mic.
+        check(inputMode != AudioInputMode.USB || isUsbInputType(routed.type)) {
+            "This build records only from a USB-C microphone (audioInput=USB), but Android " +
+                "routed capture to ${describeDevice(routed)}. Check the receiver connection."
         }
         return routed
     }
@@ -1888,6 +1948,8 @@ class NpuEngine(
         val contentStartFrame: Long,
         val a2dpRestoreMs: Long,
         val routePollMs: Long,
+        /** Where the track plays; a PHONE/USB-input turn may play on Bluetooth. */
+        val outputRoute: AudioRouteKind,
     )
 
     /**
@@ -1913,11 +1975,22 @@ class NpuEngine(
             ) { "Android AudioManager is unavailable" }
             val routeDeadlineNs = System.nanoTime() + A2DP_ROUTE_TIMEOUT_MS * 1_000_000L
             val discoveryStartedNs = System.nanoTime()
-            val mediaDevice = when (route) {
-                AudioRouteKind.PHONE -> checkNotNull(builtInSpeaker(audioManager)) {
+            // PHONE/USB builds choose the microphone only. A turn recorded
+            // there plays to the connected A2DP headset when exactly one is
+            // connected (stereo split as on the Bluetooth route), else on the
+            // loudspeaker. No SCO is opened, so the headset never records.
+            val fixedInputHeadset = if (route == AudioRouteKind.PHONE && inputMode != AudioInputMode.DASHBOARD) {
+                soleA2dpOutput(audioManager)
+            } else {
+                null
+            }
+            val outputRoute = if (fixedInputHeadset != null) AudioRouteKind.BLUETOOTH else route
+            val mediaDevice = when {
+                fixedInputHeadset != null -> fixedInputHeadset
+                route == AudioRouteKind.PHONE -> checkNotNull(builtInSpeaker(audioManager)) {
                     "No built-in loudspeaker output is available."
                 }
-                AudioRouteKind.BLUETOOTH -> try {
+                else -> try {
                     awaitMediaOutput(
                         audioManager = audioManager,
                         communicationAddress = communicationAddress,
@@ -1935,7 +2008,7 @@ class NpuEngine(
                     throw failure
                 }
             }
-            fun routeConfirmed(actual: AudioDeviceInfo?): Boolean = when (route) {
+            fun routeConfirmed(actual: AudioDeviceInfo?): Boolean = when (outputRoute) {
                 AudioRouteKind.PHONE -> actual?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
                 AudioRouteKind.BLUETOOTH -> sameMediaDevice(mediaDevice, actual)
             }
@@ -1999,14 +2072,15 @@ class NpuEngine(
             if (!routeConfirmed(routed)) {
                 Log.w(
                     HALF_DUPLEX_TAG,
-                    "turn=$turnId route=${route.name.lowercase(Locale.ROOT)} " +
+                    "turn=$turnId route=${outputRoute.name.lowercase(Locale.ROOT)} " +
                         "routePollMs=$routePollMs result=timeout " +
                         "expected=${describeDevice(mediaDevice)} routed=${describeDevice(routed)}",
                 )
             }
             // Only the Bluetooth route is a privacy/route-proof contract. On the
             // phone route the text is also on screen, so an unexpected output
-            // (e.g. a wired headset) is logged rather than dropping the turn.
+            // (e.g. a wired headset) is logged rather than dropping the turn;
+            // so is a PHONE/USB turn whose A2DP headset left during the proof.
             check(route == AudioRouteKind.PHONE || routeConfirmed(routed)) {
                 "A2DP route was not restored within ${A2DP_ROUTE_TIMEOUT_MS} ms: " +
                     "expected=${describeDevice(mediaDevice)} routed=${describeDevice(routed)}"
@@ -2022,12 +2096,18 @@ class NpuEngine(
             }
             Log.i(
                 HALF_DUPLEX_TAG,
-                "turn=$turnId route=${route.name.lowercase(Locale.ROOT)} " +
+                "turn=$turnId route=${outputRoute.name.lowercase(Locale.ROOT)} " +
                     "a2dpRestoreMs=$a2dpRestoreMs routePollMs=$routePollMs " +
                     "preferred=${describeDevice(mediaDevice)} routed=$routeSet",
             )
+            if (route == AudioRouteKind.PHONE) {
+                val output = fixedInputHeadset?.let {
+                    "${it.productName.toString().trim().ifEmpty { "Bluetooth headset" }} (Bluetooth)"
+                } ?: "loudspeaker"
+                lastRouteLabel = "$lastInputLabel + $output"
+            }
 
-            return ProvenTrack(activeTrack, routePrimed / 2L, a2dpRestoreMs, routePollMs)
+            return ProvenTrack(activeTrack, routePrimed / 2L, a2dpRestoreMs, routePollMs, outputRoute)
         } catch (failure: Throwable) {
             track?.let { runCatching { it.stop() }; runCatching { it.release() } }
             if (activePlaybackTrack === track) activePlaybackTrack = null
@@ -2071,7 +2151,7 @@ class NpuEngine(
             // queued. The stream position where content starts is exactly the
             // number of silence frames already written, so drain accounting
             // needs no flush at all.
-            val stereo = when (route) {
+            val stereo = when (proven.outputRoute) {
                 AudioRouteKind.BLUETOOTH -> interleaveTargetStereo(mono, direction)
                 AudioRouteKind.PHONE -> duplicateMonoStereo(mono)
             }
@@ -2082,7 +2162,7 @@ class NpuEngine(
                     turnId,
                     HalfDuplexState.PROCESSING,
                     HalfDuplexState.PLAYING,
-                    if (route == AudioRouteKind.PHONE) "speaker_route_ready" else "a2dp_route_confirmed",
+                    if (proven.outputRoute == AudioRouteKind.PHONE) "speaker_route_ready" else "a2dp_route_confirmed",
                 )
             }
             playbackStartedNs = System.nanoTime()
@@ -2125,7 +2205,7 @@ class NpuEngine(
                 Log.w(TAG, "AudioTrack drain timed out: delivered=$delivered/${mono.size}")
             } else {
                 val targetChannel = when {
-                    route == AudioRouteKind.PHONE -> "both_speaker"
+                    proven.outputRoute == AudioRouteKind.PHONE -> "both_speaker"
                     direction == TranslationDirection.EN_TO_VI -> "left_vi"
                     else -> "right_en"
                 }
@@ -2247,6 +2327,8 @@ class NpuEngine(
                 put("forcedCuts", chunks.count { it.chunk.cut == ChunkCut.FORCED })
                 put("units", units.size)
                 put("emptyUnits", turn.emptyUnits)
+                put("fillerUnits", turn.fillerUnits)
+                put("fillerOnly", turn.fillerOnly)
                 put("revision", turn.revision)
                 put("partialFailure", turn.partialFailure)
                 put("archivedSamples", ended.archivedSamples)
@@ -2498,9 +2580,15 @@ class NpuEngine(
         }
     }
 
-    private fun routeLabel(route: AudioRouteKind, inputName: String): String = when (route) {
-        AudioRouteKind.PHONE -> "Phone mic + loudspeaker"
-        AudioRouteKind.BLUETOOTH -> "$inputName (Bluetooth)"
+    private fun inputLabel(
+        route: AudioRouteKind,
+        communication: AudioDeviceInfo?,
+        routedInput: AudioDeviceInfo?,
+    ): String = when {
+        route == AudioRouteKind.BLUETOOTH ->
+            "${communication?.productName?.toString()?.trim().orEmpty().ifEmpty { "Bluetooth headset" }} (Bluetooth)"
+        routedInput != null && isUsbInputType(routedInput.type) -> "USB-C mic"
+        else -> "Phone mic"
     }
 
     private fun runningOrStandalone(coordinated: Boolean): Boolean =
@@ -2599,6 +2687,10 @@ class NpuEngine(
         AudioDeviceInfo.TYPE_BLE_HEADSET -> "BLE_HEADSET"
         AudioDeviceInfo.TYPE_BLE_SPEAKER -> "BLE_SPEAKER"
         AudioDeviceInfo.TYPE_BLE_BROADCAST -> "BLE_BROADCAST"
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> "BUILTIN_MIC"
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "BUILTIN_SPEAKER"
+        AudioDeviceInfo.TYPE_USB_DEVICE -> "USB_DEVICE"
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "USB_HEADSET"
         else -> "TYPE_$type"
     }
 

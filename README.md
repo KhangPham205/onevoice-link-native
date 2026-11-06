@@ -25,8 +25,11 @@ the whole turn is played back once they stop. Each window then goes through:
 The language is decided once, on the first window, and then kept for the
 whole turn. Audio is strictly half-duplex: the mic is closed while the
 translation plays.
-Audio can use the phone's mic and loudspeaker or a Bluetooth headset. That
-choice only picks devices; it never sets the translation direction.
+The microphone is chosen when the app is built: the phone's own mic (default,
+nothing to connect) or a plugged-in USB-C mic such as a wireless lavalier
+receiver. Translations play in a connected Bluetooth headset (Vietnamese left,
+English right), otherwise on the loudspeaker. The microphone never switches to
+the headset, and it never sets the translation direction.
 
 Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -114,9 +117,25 @@ cd ..
 tools/models/push-npu-models.sh auto <adb-serial>
 ```
 
+To hand the default Hybrid payload to another machine without copying every
+source-model directory, create two compressed archives with checksums (VI→EN
+and EN→VI):
+
+```bash
+tools/models/package-main-models.sh
+# writes dist/model-packs/onevoice-main-models-{vi-en,en-vi}.tar.zst
+```
+
+They preserve the app-private `models/npu/...` layout when extracted below an
+installed app's `filesDir`. The packages contain the required QNN and CPU
+fallback models and default VieNeu voice; they intentionally omit the
+SpeechFlow A/B model and optional Supertonic voice.
+
 **On the phone:**
 1. Open **OneVoice Link** and allow the microphone.
-2. Pick **Phone** (one shared handset) or **Bluetooth** (earbuds).
+2. Check the **Audio input / output** card: it names the microphone this build
+   uses (see `audioInput` under Build options). Connect Bluetooth earbuds if
+   you want to hear the translation in them instead of the loudspeaker.
 3. Tap **Load Hybrid Pipeline** and wait for the engine status **Ready**.
 4. Tap **Start Translating** and speak in turns.
 
@@ -135,6 +154,7 @@ Runtime policy is baked into the APK from `android-app/gradle.properties`; overr
 ./gradlew :app:assembleDebug -PviTtsEngine=KOKORO   # VI voice: VIENEU (default), KOKORO, SUPERTONIC
 ./gradlew :app:assembleDebug -ProutingMode=LID      # SpeechFlow language-ID A/B instead of dual ASR
 ./gradlew :app:assembleDebug -PlongTurnMode=LEGACY  # rollback: one 10 s window per turn (default ADAPTIVE)
+./gradlew :app:assembleDebug -PaudioInput=USB       # record from a plugged-in USB-C mic (default PHONE: built-in mic)
 ./gradlew :app:testDebugUnitTest                    # unit tests (no device, no Rust needed)
 ```
 

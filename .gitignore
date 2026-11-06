@@ -55,6 +55,8 @@ google-services.json
 # VieNeu-TTS v3 Nano weights + sea-g2p dictionary (~350 MB), from
 # tools/models/prepare-vieneu-nano.py and build-sea-g2p-android.sh.
 /models-vieneu/
+# Generated, distributable archives made by tools/models/package-main-models.sh.
+/dist/model-packs/
 # Python conversion tooling
 /tools/models/__pycache__/
 /tools/eval/__pycache__/

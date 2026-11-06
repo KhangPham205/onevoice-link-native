@@ -52,6 +52,20 @@ val dualAsrPriorWeight = providers.gradleProperty("dualAsrPriorWeight")
 val vadMode = providers.gradleProperty("vadMode").orElse("SILERO").get().also {
     require(it in setOf("SILERO", "ENERGY")) { "vadMode must be SILERO or ENERGY (got '$it')" }
 }
+// Which microphone records (AudioInputMode). PHONE: the built-in mic, nothing
+// to connect. USB: a plugged-in USB-C mic only. DASHBOARD: the older Auto/
+// Phone/Bluetooth selector. PHONE and USB never record from Bluetooth but play
+// to a connected A2DP headset.
+val audioInput = providers.gradleProperty("audioInput").orElse("PHONE").get().also {
+    require(it in setOf("PHONE", "USB", "DASHBOARD")) {
+        "audioInput must be PHONE, USB or DASHBOARD (got '$it')"
+    }
+}
+// Drop translation units made only of hesitation words ("ừ", "uh") and cut
+// leading ones (FillerWords): mic noise decoded as "ừ" was spoken as "Yeah.".
+val dropFillerWords = providers.gradleProperty("dropFillerWords").orElse("true").get().also {
+    require(it == "true" || it == "false") { "dropFillerWords must be true or false (got '$it')" }
+}.toBoolean()
 val dualAsrEnOffset = providers.gradleProperty("dualAsrEnOffset").orElse("0.0").get()
     .toDoubleOrNull()
     ?.takeIf(Double::isFinite)
@@ -237,6 +251,8 @@ android {
         buildConfigField("double", "DUAL_ASR_EN_OFFSET", dualAsrEnOffset.toString())
         buildConfigField("int", "KOKORO_THREADS", kokoroThreads.toString())
         buildConfigField("String", "VAD_MODE", "\"$vadMode\"")
+        buildConfigField("String", "AUDIO_INPUT", "\"$audioInput\"")
+        buildConfigField("boolean", "DROP_FILLER_WORDS", dropFillerWords.toString())
         buildConfigField("String", "VI_TTS_ENGINE", "\"$viTtsEngine\"")
         buildConfigField("String", "SUPERTONIC_VOICE", "\"$supertonicVoice\"")
         buildConfigField("int", "SUPERTONIC_STEPS", supertonicSteps.toString())
