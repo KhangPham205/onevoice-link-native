@@ -117,6 +117,20 @@ cd ..
 tools/models/push-npu-models.sh auto <adb-serial>
 ```
 
+To hand the default Hybrid payload to another machine without copying every
+source-model directory, create two compressed archives with checksums (VI→EN
+and EN→VI):
+
+```bash
+tools/models/package-main-models.sh
+# writes dist/model-packs/onevoice-main-models-{vi-en,en-vi}.tar.zst
+```
+
+They preserve the app-private `models/npu/...` layout when extracted below an
+installed app's `filesDir`. The packages contain the required QNN and CPU
+fallback models and default VieNeu voice; they intentionally omit the
+SpeechFlow A/B model and optional Supertonic voice.
+
 **On the phone:**
 1. Open **OneVoice Link** and allow the microphone.
 2. Check the **Audio input / output** card: it names the microphone this build
