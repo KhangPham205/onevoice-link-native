@@ -10,6 +10,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.nio.LongBuffer
 import java.util.Locale
 import kotlin.math.exp
 import kotlin.math.ln
@@ -33,7 +34,12 @@ internal data class AsrHypothesis(
      * enters [rawLogProb] or [normalizedLogProb], so routing is unchanged.
      */
     val tokens: List<AsrToken> = emptyList(),
+    /** Context-graph bonus of the chosen beam path; diagnostic, never routed on. */
+    val biasScore: Double = 0.0,
 )
+
+/** Decode-time phrase biasing: beam width and the default per-token bonus (nats). */
+internal data class RnntBiasOptions(val beam: Int, val defaultBoost: Double)
 
 /** CPU decoder/joiner shared by the GIPFormer-VI and Zipformer-EN HTP encoders. */
 internal class ZipformerFamilyRnntDecoder private constructor(
@@ -42,6 +48,10 @@ internal class ZipformerFamilyRnntDecoder private constructor(
     private val joiner: OrtSession,
     private val tokens: List<String>,
     private val vocabSize: Int,
+    /** Non-null only when decode-time biasing is built in (-PasrBias=true). */
+    private val beamSearch: RnntBeamSearch? = null,
+    /** Loaded `<prefix>_bias.txt`; null when absent or biasing is off. */
+    val biasList: AsrBiasList? = null,
 ) : Closeable {
     companion object {
         const val FEATURE_FRAMES = 1000
@@ -61,7 +71,11 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         private const val BLANK_ID = 0
         private const val UNK_ID = 2
 
-        fun load(directionRoot: File, artifactPrefix: String): ZipformerFamilyRnntDecoder {
+        fun load(
+            directionRoot: File,
+            artifactPrefix: String,
+            biasOptions: RnntBiasOptions? = null,
+        ): ZipformerFamilyRnntDecoder {
             require(artifactPrefix.matches(Regex("asr_[a-z0-9_]+"))) {
                 "Unsafe RNN-T artifact prefix: $artifactPrefix"
             }
@@ -98,6 +112,30 @@ internal class ZipformerFamilyRnntDecoder private constructor(
                 }
                 validateDecoder(readyDecoder, vocabSize)
                 validateJoiner(readyJoiner, vocabSize)
+                val vocabulary = tokens.take(vocabSize)
+                // The bias list is optional: with biasing built in but no list
+                // staged, the beam still runs, which is how the empty-list
+                // regression run is made.
+                val biasFile = File(directionRoot, "${artifactPrefix}_bias.txt")
+                val biasList = if (biasOptions != null && biasFile.isFile) {
+                    AsrBiasList.parse(
+                        biasFile.readLines(),
+                        vocabulary.withIndex().associate { (id, piece) -> piece to id },
+                        biasOptions.defaultBoost,
+                    )
+                } else {
+                    null
+                }
+                val beamSearch = biasOptions?.let { options ->
+                    RnntBeamSearch(
+                        vocabSize = vocabSize,
+                        blankId = BLANK_ID,
+                        unkId = UNK_ID,
+                        sosEosId = vocabulary.indexOf("<sos/eos>"),
+                        beam = options.beam,
+                        graph = biasList?.phrases?.takeIf { it.isNotEmpty() }?.let(::ContextGraph),
+                    )
+                }
                 return ZipformerFamilyRnntDecoder(
                     environment = environment,
                     decoder = readyDecoder,
@@ -105,8 +143,10 @@ internal class ZipformerFamilyRnntDecoder private constructor(
                     // Some icefall exports append disambiguation symbols such
                     // as #0/#1 after the joiner vocabulary. They are tokenizer
                     // metadata, not logits, and must never extend argmax.
-                    tokens = tokens.take(vocabSize),
+                    tokens = vocabulary,
                     vocabSize = vocabSize,
+                    beamSearch = beamSearch,
+                    biasList = biasList,
                 )
             } catch (failure: Throwable) {
                 runCatching { joiner?.close() }
@@ -225,7 +265,16 @@ internal class ZipformerFamilyRnntDecoder private constructor(
     fun decode(encoderOutput: ByteBuffer, validFrames: Int): String =
         decodeScored(encoderOutput, validFrames).transcript
 
-    /** sherpa-compatible greedy search: at most one emitted symbol per frame. */
+    /** Beam width when decode-time biasing is built in, else null (greedy). */
+    val beamWidth: Int? get() = beamSearch?.beamWidth
+
+    /** Spoken -> display rewrite of the loaded bias list; identity without one. */
+    fun rewrite(text: String): String = biasList?.rewrite(text) ?: text
+
+    /**
+     * sherpa-compatible greedy search (at most one emitted symbol per frame),
+     * or the biased beam search when built with -PasrBias=true.
+     */
     fun decodeScored(encoderOutput: ByteBuffer, validFrames: Int): AsrHypothesis {
         require(encoderOutput.isDirect &&
             encoderOutput.capacity() >= ENCODER_FRAMES * ENCODER_DIM * Float.SIZE_BYTES) {
@@ -235,6 +284,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
             "Invalid RNN-T encoder length $validFrames"
         }
         val source = encoderOutput.order(ByteOrder.nativeOrder()).asFloatBuffer()
+        beamSearch?.let { search -> return decodeBeam(search, source, validFrames) }
         val emitted = ArrayList<Int>(validFrames / 2)
         val emittedFrames = ArrayList<Int>(validFrames / 2)
         var rawLogProb = 0.0
@@ -297,6 +347,89 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         )
     }
 
+    private fun decodeBeam(
+        search: RnntBeamSearch,
+        source: FloatBuffer,
+        validFrames: Int,
+    ): AsrHypothesis {
+        // Decoder outputs depend only on the two-token context, and beam
+        // hypotheses keep the same context across most frames, so cache them
+        // for the utterance.
+        val decoderCache = HashMap<Pair<Long, Long>, FloatArray>()
+        val frameValues = FloatArray(ENCODER_DIM)
+        val result = search.search(validFrames) { frame, contexts ->
+            val missing = contexts.map { it[0] to it[1] }.distinct().filter { it !in decoderCache }
+            if (missing.isNotEmpty()) {
+                val ids = LongArray(missing.size * CONTEXT_SIZE)
+                missing.forEachIndexed { row, (c0, c1) ->
+                    ids[row * CONTEXT_SIZE] = c0
+                    ids[row * CONTEXT_SIZE + 1] = c1
+                }
+                OnnxTensor.createTensor(
+                    environment,
+                    LongBuffer.wrap(ids),
+                    longArrayOf(missing.size.toLong(), CONTEXT_SIZE.toLong()),
+                ).use { input ->
+                    decoder.run(mapOf("y" to input)).use { output ->
+                        val values = (output.get(0) as? OnnxTensor
+                            ?: error("RNN-T decoder returned a non-tensor")).floatBuffer
+                        require(values.remaining() == missing.size * ENCODER_DIM) {
+                            "RNN-T decoder returned ${values.remaining()} values"
+                        }
+                        missing.forEach { key ->
+                            decoderCache[key] = FloatArray(ENCODER_DIM).also { values.get(it) }
+                        }
+                    }
+                }
+            }
+            val base = frame * ENCODER_DIM
+            repeat(ENCODER_DIM) { frameValues[it] = source.get(base + it) }
+            val rows = contexts.size
+            val encoderBatch = FloatArray(rows * ENCODER_DIM)
+            val decoderBatch = FloatArray(rows * ENCODER_DIM)
+            contexts.forEachIndexed { row, context ->
+                frameValues.copyInto(encoderBatch, row * ENCODER_DIM)
+                decoderCache.getValue(context[0] to context[1])
+                    .copyInto(decoderBatch, row * ENCODER_DIM)
+            }
+            val shape = longArrayOf(rows.toLong(), ENCODER_DIM.toLong())
+            OnnxTensor.createTensor(environment, FloatBuffer.wrap(encoderBatch), shape).use { enc ->
+                OnnxTensor.createTensor(environment, FloatBuffer.wrap(decoderBatch), shape).use { dec ->
+                    joiner.run(mapOf("encoder_out" to enc, "decoder_out" to dec)).use { output ->
+                        val logits = (output.get(0) as? OnnxTensor
+                            ?: error("RNN-T joiner returned a non-tensor")).floatBuffer
+                        require(logits.remaining() == rows * vocabSize) {
+                            "RNN-T joiner returned ${logits.remaining()} logits"
+                        }
+                        List(rows) { row -> logSoftmax(logits, row * vocabSize, vocabSize) }
+                    }
+                }
+            }
+        }
+        val spoken = result.tokens.joinToString("") { tokens[it] }
+            .replace('\u2581', ' ').trim().lowercase(Locale.ROOT)
+        return AsrHypothesis(
+            transcript = rewrite(spoken),
+            rawLogProb = result.lexicalLogProb,
+            tokenCount = result.tokens.size,
+            normalizedLogProb = if (result.tokens.isEmpty()) {
+                Double.NEGATIVE_INFINITY
+            } else {
+                result.lexicalLogProb / result.tokens.size
+            },
+            // Tokens keep the spoken pieces: long turns stitch windows on them,
+            // and NpuPipeline rewrites the MT input again.
+            tokens = result.tokens.indices.map { index ->
+                AsrToken(
+                    piece = tokens[result.tokens[index]].lowercase(Locale.ROOT),
+                    sampleOffset = result.frames[index] * SAMPLES_PER_ENCODER_FRAME +
+                        ENCODER_FRAME_OFFSET_SAMPLES,
+                )
+            },
+            biasScore = result.biasScore,
+        )
+    }
+
     private fun runDecoder() {
         decoder.run(mapOf("y" to contextTensor)).use { result ->
             val output = result.get(0) as? OnnxTensor
@@ -327,6 +460,29 @@ internal class ZipformerFamilyRnntDecoder private constructor(
         contextTensor.close()
         joiner.close()
         decoder.close()
+    }
+}
+
+/**
+ * Log-softmax of one joiner row. Non-finite logits map to -inf; a row without a
+ * finite logit is an inference failure, as in [argmaxLogProbability].
+ */
+internal fun logSoftmax(logits: FloatBuffer, offset: Int, vocabSize: Int): FloatArray {
+    var maximum = Double.NEGATIVE_INFINITY
+    for (id in 0 until vocabSize) {
+        val value = logits.get(offset + id).toDouble()
+        if (value.isFinite() && value > maximum) maximum = value
+    }
+    check(maximum.isFinite()) { "RNN-T joiner returned no finite logit" }
+    var sum = 0.0
+    for (id in 0 until vocabSize) {
+        val value = logits.get(offset + id).toDouble()
+        if (value.isFinite()) sum += exp(value - maximum)
+    }
+    val normalizer = maximum + ln(sum)
+    return FloatArray(vocabSize) { id ->
+        val value = logits.get(offset + id).toDouble()
+        if (value.isFinite()) (value - normalizer).toFloat() else Float.NEGATIVE_INFINITY
     }
 }
 

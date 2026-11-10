@@ -1,0 +1,184 @@
+# OneVoice VI ASR bias list: garment / textile factory vocabulary (draft v1, 2026-11-09)
+#
+# Columns (tab-separated):
+#   category  free-form group name
+#   display   default text written into the transcript when rewrite=yes
+#   spoken    how workers SAY it, in Vietnamese syllables, variants separated by " | ".
+#             GIPFormer only emits Vietnamese syllables and single letters, so the
+#             decoder is biased toward these, never toward the English spelling.
+#             "spoken => display" overrides the display for that one variant.
+#   en        expected English rendering: a glossary for checking MT output
+#   rewrite   yes = replace the spoken form with the display before MT;
+#             no  = bias the decoder only and keep the words as spoken.
+#             Use "no" for native Vietnamese words: rewriting "thun" to "chun"
+#             would also turn "áo thun" into "áo chun".
+#   boost     optional per-token bonus (nats); empty = -PasrBiasBoost
+#
+# Spoken variants for brands, sizes and loanwords are PROPOSALS. Confirm or
+# replace them from real recordings. After every edit run:
+#   python -X utf8 tools/models/asr-bias/compile_bias_list.py <this.tsv> <bpe.model> [out]
+# A variant that tokenizes to <unk>, a one-token variant, two displays for one
+# spoken form or a non-idempotent rewrite fails the compile.
+#
+# Names that are also ordinary words (Thành Công = success, Phong Phú = rich,
+# Phương Đông = the East, "may mười" = sew ten) are only matched after
+# "công ty" / "may" so ordinary speech is never rewritten.
+#
+# category	display	spoken	en	rewrite	boost
+size	size XS	sai ích ét | sai ếch ét | cỡ ích ét	size XS	yes
+size	size S	sai ét | sai ếch | sai ét xì | cỡ ét | cỡ ét xì	size S	yes
+size	size M	sai em | sai mờ | sai em mờ | cỡ em | cỡ em mờ	size M	yes
+size	size L	sai lờ | sai eo | sai e lờ | cỡ lờ | cỡ e lờ | cỡ eo	size L	yes
+size	áo size S	áo ét | áo ét xì	size S shirt	yes
+size	quần size S	quần ét | quần ét xì	size S trousers	yes
+size	áo size M	áo em mờ	size M shirt	yes
+size	quần size M	quần em mờ	size M trousers	yes
+size	áo size L	áo lờ | áo e lờ	size L shirt	yes
+size	quần size L	quần lờ | quần e lờ	size L trousers	yes
+size	size XL	sai ích eo | sai ếch eo | sai ích xờ lờ | sai ích xì eo	size XL	yes
+size	size XXL	sai hai ích eo | sai đúp ích eo | sai ích ích eo	size XXL	yes
+size	size 3XL	sai ba ích eo | sai ba ếch eo	size 3XL	yes
+size	size 4XL	sai bốn ích eo | sai bốn ếch eo	size 4XL	yes
+size	free size	phri sai | phờ ri sai | sai phri	free size	yes
+machine_brand	Juki	giu ki | du ki | giu ky	Juki	yes
+machine_brand	Brother	bờ ra đơ | bra đơ | bờ ra đờ	Brother	yes
+machine_brand	Jack	máy giắc | máy dắc => máy Jack	Jack	yes
+machine_brand	Pegasus	pê ga sút | pe ga sớt | pê ga sớt	Pegasus	yes
+machine_brand	Siruba	si ru ba | xi ru ba	Siruba	yes
+machine_brand	Yamato	ya ma tô | da ma tô | gia ma tô	Yamato	yes
+machine_brand	Kansai Special	can sai sờ pê sồ | kan sai sờ pe sồ	Kansai Special	yes
+machine_brand	Typical	típ pi cồ | tí pi can | típ pi cần	Typical	yes
+machine_brand	Zoje	dô giê | dô dê | zô giê	Zoje	yes
+machine_brand	Dürkopp Adler	đơ cốp át lơ | đuốc cốp át lơ	Dürkopp Adler	yes
+machine_brand	Singer	xinh gơ | sinh gơ | xin gơ	Singer	yes
+machine_brand	Gerber	gơ bơ | ghẹc bơ | giơ bơ	Gerber	yes
+machine_brand	Lectra	léc tra | lếch tra	Lectra	yes
+machine_brand	Eastman	ít men | ít sờ men	Eastman	yes
+machine_brand	Tajima	ta di ma | ta gi ma	Tajima	yes
+machine_brand	Barudan	ba ru đan	Barudan	yes
+machine_brand	Hashima	ha si ma | ha xi ma	Hashima	yes
+machine_brand	Mitsubishi	mít su bi si | mít xu bi si	Mitsubishi	yes
+accessory_brand	YKK	oai ca ca | quai ca ca | i ca ca	YKK	yes
+accessory_brand	kim Organ	kim o gan | kim óc gan | kim oóc gan	Organ needle	yes
+accessory_brand	kim Schmetz	kim sờ mét | kim smét	Schmetz needle	yes
+accessory_brand	chỉ Coats	chỉ cốt | chỉ cô	Coats thread	yes
+customer_brand	Nike	nai ki | nai kì	Nike	yes
+customer_brand	Adidas	a đi đát | a đi đas | a đi đa	Adidas	yes
+customer_brand	Uniqlo	iu ni clô | u ni clô | du ni clô	Uniqlo	yes
+customer_brand	Zara	da ra | gia ra	Zara	yes
+customer_brand	H&M	hát en em | ếch en em | hát và em	H&M	yes
+customer_brand	Puma	pu ma	Puma	yes
+customer_brand	Decathlon	đê cát lông | đề các lông | đê cát lon	Decathlon	yes
+customer_brand	Levi's	li vai | lê vi | li vai sờ	Levi's	yes
+customer_brand	Gap	hãng gáp => hãng Gap | nhãn gáp => nhãn Gap	Gap	yes
+customer_brand	Under Armour	an đơ a mơ | ăn đơ a mơ	Under Armour	yes
+customer_brand	The North Face	nót phây | đờ nót phây | nờ nót phây	The North Face	yes
+customer_brand	Columbia	cô lôm bi a | cô lum bi a	Columbia	yes
+customer_brand	Lululemon	lu lu lê mông | lu lu le mon	Lululemon	yes
+customer_brand	Tommy Hilfiger	tôm mi hin phi gơ | tom mi hin phi gơ	Tommy Hilfiger	yes
+customer_brand	Calvin Klein	can vin can | can vin clai	Calvin Klein	yes
+customer_brand	Ralph Lauren	ráp lo ren | ran lo ren	Ralph Lauren	yes
+customer_brand	Fila	phi la	Fila	yes
+customer_brand	New Balance	niu ba lăng | niu ba lần	New Balance	yes
+company	Vinatex	vi na tếch | vi na tét	Vinatex	yes
+company	May 10	công ty may mười => công ty May 10 | ga cô mười => Garco 10	Garment 10	yes
+company	Việt Tiến	công ty việt tiến => công ty Việt Tiến | may việt tiến => may Việt Tiến	Viet Tien	yes
+company	Nhà Bè	công ty nhà bè => công ty Nhà Bè | may nhà bè => may Nhà Bè	Nha Be	yes
+company	Phong Phú	công ty phong phú => công ty Phong Phú | dệt phong phú => dệt Phong Phú	Phong Phu	yes
+company	Thành Công	công ty thành công => công ty Thành Công | dệt may thành công => dệt may Thành Công	Thanh Cong	yes
+company	Hòa Thọ	công ty hòa thọ => công ty Hòa Thọ | may hòa thọ => may Hòa Thọ	Hoa Tho	yes
+company	TNG	tê en giê | tê nờ gờ	TNG	yes
+company	Phương Đông	công ty phương đông => công ty Phương Đông | may phương đông => may Phương Đông	Phuong Dong	yes
+company	An Phước	công ty an phước => công ty An Phước | may an phước => may An Phước	An Phuoc	yes
+company	Pou Yuen	pu diên | pu yên	Pou Yuen	yes
+company	Hansae	han se | hăn se	Hansae	yes
+company	Youngone	dăng oan | giăng oan	Youngone	yes
+machine	máy may một kim	máy may một kim | máy một kim	single-needle lockstitch machine	no
+machine	máy hai kim	máy hai kim | máy may hai kim	double-needle machine	no
+machine	máy vắt sổ	máy vắt sổ	overlock machine	no
+machine	máy kansai	máy can sai | máy kan sai	multi-needle chainstitch machine	yes
+machine	máy trần đè	máy trần đè	coverstitch machine	no
+machine	máy đính nút	máy đính nút | máy đính cúc	button sewing machine	no
+machine	máy thùa khuy	máy thùa khuy | máy thùa khuyết | máy làm khuy	buttonhole machine	no
+machine	máy đính bọ	máy đính bọ	bartack machine	no
+machine	máy zic zắc	máy zic zắc | máy dích dắc	zigzag machine	no
+machine	máy viền	máy cuốn viền	binding machine	no
+machine	máy lập trình	máy may lập trình	programmable pattern sewer	no
+machine	máy thêu	máy thêu vi tính	embroidery machine	no
+machine	máy cắt vòng	máy cắt vòng | máy cắt băng	band knife cutter	no
+machine	máy cắt tay	máy cắt tay | máy cắt đẩy tay | máy cắt đứng	straight knife cutter	no
+machine	máy cắt CNC	máy cắt tự động | máy cắt xê en xê	automatic cutter	no
+machine	máy trải vải	máy trải vải	fabric spreading machine	no
+machine	máy ép keo	máy ép keo | máy ép mếch	fusing machine	no
+machine	máy ép nhiệt	máy ép nhiệt | máy ép chuyển nhiệt	heat press	no
+machine	máy dò kim	máy dò kim | máy rà kim	needle detector	no
+machine	bàn ủi hơi	bàn ủi hơi | bàn là hơi	steam iron	no
+machine	bàn hút chân không	bàn hút chân không	vacuum ironing table	no
+machine	nồi hơi	nồi hơi | lò hơi	boiler	no
+part	chân vịt	chân vịt	presser foot	no
+part	răng cưa	răng cưa | bàn lừa	feed dog	no
+part	mặt nguyệt	mặt nguyệt	needle plate	no
+part	ổ chao	ổ chao | ổ móc	rotary hook	no
+part	thuyền	vỏ thuyền | cái thoi	bobbin case	no
+part	suốt chỉ	suốt chỉ	bobbin	no
+part	trụ kim	trụ kim	needle bar	no
+part	cữ	cữ may | cữ gấp	sewing guide	no
+part	dao xén	dao xén | dao cắt chỉ	trimming knife	no
+part	mô tơ	mô tơ | mô tơ xẹc vô	motor	no
+part	bàn đạp	bàn đạp	pedal	no
+part	kim may	kim may	sewing needle	no
+accessory	dây kéo	dây kéo | khóa kéo	zipper	no
+accessory	dây kéo	phẹc mơ tuya	zipper	yes
+accessory	đầu khóa	đầu khóa | con chạy | đầu kéo	zipper slider	no
+accessory	cúc áo	cúc áo | nút áo	button	no
+accessory	nút bấm	nút bấm | nút đóng | cúc bấm	snap button	no
+accessory	ô zê	ô zê | ô dê | khoen	eyelet	no
+accessory	nhãn chính	nhãn chính | nhãn dệt	main label	no
+accessory	nhãn size	nhãn sai	size label	yes
+accessory	nhãn giặt	nhãn giặt | nhãn hướng dẫn giặt	care label	no
+accessory	thẻ bài	thẻ bài	hangtag	no
+accessory	thẻ bài	hăng tác	hangtag	yes
+accessory	dây chun	dây chun | dây thun	elastic	no
+accessory	dây viền	dây viền | viền xéo	binding tape	no
+accessory	mếch	mếch | keo dựng | keo mếch	fusible interlining	no
+accessory	băng gai	băng gai | gai dính	hook and loop tape	no
+accessory	băng gai	ve cờ rô	hook and loop tape	yes
+accessory	chỉ may	chỉ may	sewing thread	no
+accessory	dây luồn	dây luồn | dây rút	drawcord	no
+accessory	túi PE	túi pê e	poly bag	yes
+accessory	thùng carton	thùng các tông | thùng cát tông	carton	yes
+accessory	gói hút ẩm	gói hút ẩm | gói chống ẩm	desiccant pack	no
+fabric	cotton	cốt tông | cô tông	cotton	yes
+fabric	polyester	pô ly ét te | pô li ét te	polyester	yes
+fabric	spandex	sờ pan đếch | span đếch	spandex	yes
+fabric	kaki	ka ki	khaki	yes
+fabric	vải jean	vải gin | vải din	denim	yes
+fabric	quần jean	quần gin | quần din	jeans	yes
+fabric	linen	li nen	linen	yes
+fabric	vải thun	vải thun | thun cá sấu | thun lạnh	knit fabric	no
+fabric	vải nỉ	vải nỉ	fleece	no
+fabric	vải lót	vải lót	lining	no
+fabric	vải dù	vải dù	nylon taffeta	no
+fabric	vải lanh	vải lanh	linen	no
+process	QC	qui xi | kiu xi | ki xi	QC	yes
+process	KCS	ca xê ét | ca xê ếch	quality inspection	yes
+process	AQL	a qui eo | ây kiu eo | a kiu eo	AQL	yes
+process	PO	pi ô | pê ô	PO	yes
+process	mã hàng	mã hàng	style number	no
+process	đơn hàng	đơn hàng	order	no
+process	rập	rập giấy | rập cứng | bộ rập	pattern	no
+process	sơ đồ	sơ đồ cắt	marker	no
+process	bán thành phẩm	bán thành phẩm	work in progress	no
+process	chuyền	chuyền may	sewing line	no
+process	chuyền trưởng	chuyền trưởng	line leader	no
+process	tổ trưởng	tổ trưởng	team leader	no
+process	mẫu đối	mẫu đối | mẫu duyệt | mẫu chuẩn	approved sample	no
+process	hàng lỗi	hàng lỗi	defective goods	no
+process	đường may	đường may	seam	no
+process	mật độ mũi	mật độ mũi | mật độ mũi chỉ	stitch density	no
+process	nhảy mũi	nhảy mũi | bỏ mũi	skipped stitch	no
+process	đứt chỉ	đứt chỉ	thread breakage	no
+process	bung chỉ	bung chỉ | sổ chỉ | bung đường may	open seam	no
+process	inline	in lai	inline inspection	yes
+process	endline	en lai | en đờ lai	end-of-line inspection	yes
+process	xuất hàng	xuất hàng	shipment	no

@@ -79,6 +79,17 @@ val audioInput = providers.gradleProperty("audioInput").orElse("SELECT").get().a
 val dropFillerWords = providers.gradleProperty("dropFillerWords").orElse("true").get().also {
     require(it == "true" || it == "false") { "dropFillerWords must be true or false (got '$it')" }
 }.toBoolean()
+// Decode-time phrase biasing of the VI RNN-T decoder (AsrBias.kt): beam search
+// with a context graph from vi-en/asr_gipformer_bias.txt. Off = greedy, as before.
+val asrBias = providers.gradleProperty("asrBias").orElse("false").get().also {
+    require(it == "true" || it == "false") { "asrBias must be true or false (got '$it')" }
+}.toBoolean()
+val asrBiasBeam = providers.gradleProperty("asrBiasBeam").orElse("4").get().toIntOrNull()
+    ?.takeIf { it in 1..16 }
+    ?: error("asrBiasBeam must be an integer in 1..16")
+val asrBiasBoost = providers.gradleProperty("asrBiasBoost").orElse("1.5").get().toDoubleOrNull()
+    ?.takeIf { it.isFinite() && it > 0.0 }
+    ?: error("asrBiasBoost must be a positive number")
 val dualAsrEnOffset = providers.gradleProperty("dualAsrEnOffset").orElse("0.0").get()
     .toDoubleOrNull()
     ?.takeIf(Double::isFinite)
@@ -271,6 +282,9 @@ android {
         buildConfigField("String", "VAD_MODE", "\"$vadMode\"")
         buildConfigField("String", "AUDIO_INPUT", "\"$audioInput\"")
         buildConfigField("boolean", "DROP_FILLER_WORDS", dropFillerWords.toString())
+        buildConfigField("boolean", "ASR_BIAS", asrBias.toString())
+        buildConfigField("int", "ASR_BIAS_BEAM", asrBiasBeam.toString())
+        buildConfigField("double", "ASR_BIAS_BOOST", asrBiasBoost.toString())
         buildConfigField("String", "VI_TTS_ENGINE", "\"$viTtsEngine\"")
         buildConfigField("String", "SUPERTONIC_VOICE", "\"$supertonicVoice\"")
         buildConfigField("int", "SUPERTONIC_STEPS", supertonicSteps.toString())
@@ -347,6 +361,9 @@ android {
 
     buildTypes {
         debug {
+            // Optional side-by-side install (e.g. -PdebugAppIdSuffix=.bench) when the
+            // device already holds a debug build signed by another machine's key.
+            providers.gradleProperty("debugAppIdSuffix").orNull?.let { applicationIdSuffix = it }
             externalNativeBuild {
                 cmake {
                     // Fast compilation for debug builds

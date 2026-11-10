@@ -229,7 +229,19 @@ internal class NpuPipeline private constructor(
                     rnntDecoder = ZipformerFamilyRnntDecoder.load(
                         directionRoot,
                         asrArtifactPrefix,
-                    )
+                        if (BuildConfig.ASR_BIAS) {
+                            RnntBiasOptions(BuildConfig.ASR_BIAS_BEAM, BuildConfig.ASR_BIAS_BOOST)
+                        } else {
+                            null
+                        },
+                    ).also { decoder ->
+                        Log.i(
+                            TAG,
+                            "RNN-T decode $asrArtifactPrefix beam=${decoder.beamWidth ?: 1} " +
+                                "biasPhrases=${decoder.biasList?.phrases?.size ?: 0} " +
+                                "rewriteRules=${decoder.biasList?.ruleCount ?: 0}",
+                        )
+                    }
                 }
                 translator = QnnMarianTranslator.load(directionRoot, stagePrefix)
                 if (supertonic) {
@@ -497,6 +509,7 @@ internal class NpuPipeline private constructor(
                 "encoderFrames=$validEncoderFrames rawLogProb=${hypothesis.rawLogProb} " +
                 "tokenCount=${hypothesis.tokenCount} " +
                 "normalizedLogProb=${hypothesis.normalizedLogProb} " +
+                "beam=${rnntDecoder?.beamWidth ?: 1} biasScore=${hypothesis.biasScore} " +
                 "transcript=\"${hypothesis.transcript}\"",
         )
         return hypothesis
@@ -545,10 +558,18 @@ internal class NpuPipeline private constructor(
         }
     }
 
+    /**
+     * Applies the ASR bias list's spoken -> display rewrite ("sai ích eo" ->
+     * "size XL") before Marian. The decoder already rewrote its transcript,
+     * but long turns rebuild unit text from the spoken token pieces, so the MT
+     * input is rewritten here too; the compiled list guarantees idempotency.
+     */
+    private fun mtInput(text: String): String = rnntDecoder?.rewrite(text) ?: text
+
     /** One Marian pass per sentence; see [splitSentences] for why. */
     fun translate(text: String): String {
         var tokens = 0
-        return translateBySentence(text) { sentence ->
+        return translateBySentence(mtInput(text)) { sentence ->
             translator.translate(sentence).also { tokens += translator.lastOutputTokens }
         }.also { lastMtOutputTokens = tokens }
     }
@@ -561,7 +582,7 @@ internal class NpuPipeline private constructor(
     fun translateChecked(text: String): MtOutput {
         var tokens = 0
         var truncated = false
-        val translation = translateBySentence(text) { sentence ->
+        val translation = translateBySentence(mtInput(text)) { sentence ->
             translator.translate(sentence).also {
                 tokens += translator.lastOutputTokens
                 truncated = truncated || translator.lastOutputHitLimit
@@ -573,7 +594,7 @@ internal class NpuPipeline private constructor(
 
     /** Largest Marian input among [text]'s sentences, as [translate] will feed them. */
     fun mtSourceTokens(text: String): Int =
-        splitSentences(text).maxOfOrNull(translator::sourceTokenCount) ?: 0
+        splitSentences(mtInput(text)).maxOfOrNull(translator::sourceTokenCount) ?: 0
 
     /** Tokens the Marian decoder emitted for the last [translate], summed over sentences. */
     @Volatile
