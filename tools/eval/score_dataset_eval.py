@@ -30,6 +30,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import sys
 import tarfile
@@ -125,13 +126,16 @@ def comet_scores(data: list[dict[str, str]], gpus: int) -> list[float]:
 
 def load_whisper():
     from faster_whisper import WhisperModel
+    # WHISPER_MODEL may name a local directory: the Hugging Face cache needs
+    # symlinks, which a non-admin Windows account cannot create.
+    name = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
     try:
-        model = WhisperModel("large-v3-turbo", device="cuda", compute_type="int8_float16")
+        model = WhisperModel(name, device="cuda", compute_type="int8_float16")
         # CTranslate2 resolves cuBLAS/cuDNN lazily: prove CUDA with one decode.
         list(model.transcribe(np.zeros(16000, dtype=np.float32), language="en")[0])
         return model, "cuda"
     except Exception:
-        return WhisperModel("large-v3-turbo", device="cpu", compute_type="int8"), "cpu"
+        return WhisperModel(name, device="cpu", compute_type="int8"), "cpu"
 
 
 def transcribe(model, audio_16k: np.ndarray, lang: str) -> str:
@@ -162,7 +166,11 @@ def main() -> int:
     items = {i.id: i for i in load_items(args.dataset)}
     header: dict = {}
     rows: dict[str, dict] = {}
+    # Skip blank lines: a pull through `adb shell` on Windows wrote "\r\r\n",
+    # which universal-newline decoding reads as two line breaks.
     for line in (args.run / "turns.jsonl").read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
         record = json.loads(line)
         if record.get("type") == "header":
             header = record

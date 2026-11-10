@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,9 +38,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dataset import load_items  # noqa: E402
 
-PACKAGE = "com.onevoice.link"
-RECEIVER = f"{PACKAGE}/.core.BenchControlReceiver"
+# ONEVOICE_PACKAGE selects a side-by-side debug install (-PdebugAppIdSuffix);
+# class names keep the base package, so components are spelled out in full.
+PACKAGE = os.environ.get("ONEVOICE_PACKAGE", "com.onevoice.link")
+RECEIVER = f"{PACKAGE}/com.onevoice.link.core.BenchControlReceiver"
+ACTIVITY = f"{PACKAGE}/com.onevoice.link.MainActivity"
 ACTION = "com.onevoice.link.BENCH"
+ADB = os.environ.get("ADB", "adb")
 LOG_TAGS = ("OneVoiceRouting OneVoiceNpu OneVoiceNpuPipeline OneVoiceBench OneVoiceBenchCtl "
             "OneVoiceHalfDuplex OneVoiceQNN OneVoiceCore OneVoiceSession "
             "OneVoiceVieNeu OneVoiceSeaG2p").split()
@@ -51,7 +56,7 @@ class Adb:
 
     def run(self, *args: str, timeout: float = 120, check: bool = True,
             binary: bool = False) -> str | bytes:
-        proc = subprocess.run(["adb", "-s", self.serial, *args], capture_output=True,
+        proc = subprocess.run([ADB, "-s", self.serial, *args], capture_output=True,
                               timeout=timeout, stdin=subprocess.DEVNULL)
         if check and proc.returncode != 0:
             raise RuntimeError(f"adb {' '.join(args)}: {proc.stderr.decode(errors='replace')}")
@@ -234,7 +239,10 @@ def main() -> int:
         # setting let the screen time out mid-run on this phone.
         adb.shell("svc power stayon true")
         adb.shell("input keyevent KEYCODE_WAKEUP")
-        adb.shell(f"am start -n {PACKAGE}/.MainActivity")
+        # Launcher intent, as a tap on the icon: it brings the existing task to
+        # the front. `am start -n` created a second MainActivity, whose fresh
+        # NpuEngine had no pipeline, and every feed was refused.
+        adb.shell(f"monkey -p {PACKAGE} -c android.intent.category.LAUNCHER 1", check=False)
         time.sleep(2)
 
     # Fresh tagged log: close the writer first, then delete closed files.
@@ -245,7 +253,7 @@ def main() -> int:
     adb.run("logcat", "-c", check=False)
     logcat_file = open(out / "raw" / "logcat.txt", "w", encoding="utf-8")
     logcat = subprocess.Popen(
-        ["adb", "-s", args.serial, "logcat", "-v", "threadtime", "-s",
+        [ADB, "-s", args.serial, "logcat", "-v", "threadtime", "-s",
          *[f"{t}:*" for t in LOG_TAGS]],
         stdout=logcat_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
 
@@ -294,8 +302,10 @@ def main() -> int:
     screenshot(adb, out / "raw" / "offline_after.png")
     thermal_after = adb.shell("dumpsys thermalservice | grep -m1 'Thermal Status'", check=False)
 
-    turns = adb.run_as("cat files/bench/turns/*.jsonl")
-    (out / "turns.jsonl").write_text(turns, encoding="utf-8")
+    # exec-out: `adb shell` on Windows turned every "\n" into "\r\r\n".
+    turns = adb.run("exec-out", f"run-as {PACKAGE} sh -c 'cat files/bench/turns/*.jsonl'",
+                    binary=True)
+    (out / "turns.jsonl").write_bytes(turns)
     # exec-out, not shell: binary-safe, no pty line-ending translation.
     tts_tar = adb.run("exec-out", f"run-as {PACKAGE} sh -c 'cd files/bench/tts && tar cf - *.f32'",
                       binary=True, timeout=300)

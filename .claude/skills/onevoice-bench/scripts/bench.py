@@ -22,7 +22,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, asdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -153,7 +153,7 @@ class Harness:
     # ------------------------------------------------------------- execution
     def stage_fixtures(self) -> list[tuple[str, Path]]:
         chosen: list[tuple[str, Path]] = []
-        for path in sorted(FIXTURES.glob("*.f32")):
+        for path in sorted(Path(self.args.fixtures).glob("*.f32")):
             # A Vietnamese fixture drives the vi-en branch and vice versa: the
             # filename names the language spoken, the direction names where it
             # is translated to.
@@ -171,9 +171,16 @@ class Harness:
             self.device.shell(
                 f"run-as {PACKAGE} cp /data/local/tmp/{path.name} "
                 f"files/bench/{path.name}")
-            chosen.append((path.name, Path(remote)))
+            # PurePosixPath: a device path; Path would turn it into
+            # \data\user\0\... on a Windows host and every feed is ignored.
+            chosen.append((path.name, PurePosixPath(remote)))
         if not chosen:
             raise DeviceError(f"no fixtures matched direction={self.args.direction}")
+        if self.args.shuffle_fixtures:
+            # The router's turn prior expects the opposite language next, so
+            # name order (all en_ then all vi_) would make the prior wrong on
+            # almost every turn. A seeded shuffle keeps it neutral and repeatable.
+            random.Random(self.args.seed).shuffle(chosen)
         return chosen
 
     def wait_until_idle(self, pid: int, timeout: float = 40.0) -> None:
@@ -414,12 +421,39 @@ class Harness:
                 name, remote = fixtures[i % len(fixtures)]
                 self.run_one(pid, remote, cohort, -1, name)
 
+            # Every measured row is appended to rows.partial.csv at once, so a
+            # crash keeps what was measured; --resume reloads it and skips
+            # the iterations that already have a row.
+            partial = Path(self.args.out) / "rows.partial.csv"
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            done: set[int] = set()
+            if self.args.resume and partial.exists():
+                with partial.open(newline="", encoding="utf-8") as handle:
+                    for old in csv.DictReader(handle):
+                        if old["cohort"] == cohort.name:
+                            self.rows.append(old)
+                            done.add(int(old["iteration"]))
+                print(f"  resume: {len(done)} rows already measured")
+            elif partial.exists():
+                partial.unlink()
             print(f"  measuring x{self.args.iterations}")
+            started = time.monotonic()
             for iteration in range(self.args.iterations):
+                if iteration in done:
+                    continue
                 name, remote = fixtures[iteration % len(fixtures)]
                 row = self.run_one(pid, remote, cohort, iteration, name)
                 if row:
                     self.rows.append(row)
+                    new_file = not partial.exists()
+                    with partial.open("a", newline="", encoding="utf-8") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
+                        if new_file:
+                            writer.writeheader()
+                        writer.writerow({k: row.get(k, "") for k in CSV_COLUMNS})
+                if iteration % 25 == 24:
+                    print(f"  progress {iteration + 1}/{self.args.iterations} "
+                          f"({time.monotonic() - started:.0f}s this session)", flush=True)
                 if iteration % 5 == 0:
                     memory = self.sample_memory(pid)
                     if "rss_kb" in memory:
@@ -538,6 +572,13 @@ def main() -> int:
                         help="run a soak for N minutes instead of cohorts "
                              "(requires a settled battery)")
     parser.add_argument("--out", default="bench-results")
+    parser.add_argument("--fixtures", default=str(FIXTURES),
+                        help="folder of {vi,en}_*.f32 fixtures (16 kHz float32); "
+                             "the prefix names the language spoken")
+    parser.add_argument("--resume", action="store_true",
+                        help="keep <out>/rows.partial.csv and skip iterations it already has")
+    parser.add_argument("--shuffle-fixtures", action="store_true",
+                        help="run fixtures in a --seed shuffled order instead of by name")
     args = parser.parse_args()
 
     try:

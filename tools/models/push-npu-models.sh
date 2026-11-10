@@ -42,16 +42,69 @@
 # stages merely because this script deploys them beside the contexts.
 #
 # Usage: tools/models/push-npu-models.sh [auto|vi-en|en-vi|all] [adb-serial]
+#
+# SOURCES. By default every file is read from the model team's source folders
+# (onevoice-npu-bins/, models-hf/, models-vieneu/). A machine that only received
+# the archives from package-main-models.sh can stage from them instead: extract
+# each one into its own folder below dist/model-packs/
+#   tar --zstd -xf onevoice-main-models-vi-en.tar.zst -C dist/model-packs/vi-en
+#   tar --zstd -xf onevoice-main-models-en-vi.tar.zst -C dist/model-packs/en-vi
+# and run with MODEL_SOURCE=packs (the default when onevoice-npu-bins/ is absent
+# and dist/model-packs/ exists; PACK_DIR overrides the folder). The packs omit
+# the SpeechFlow LID trio and the Supertonic voice, so pack mode skips them:
+# such a deployment serves the default DUAL_ASR + VieNeu/Kokoro build, not
+# -ProutingMode=LID or -PviTtsEngine=SUPERTONIC.
 # ============================================================================
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BINS="$REPO/onevoice-npu-bins"
-PKG="com.onevoice.link"
+PKG="${PKG:-com.onevoice.link}"
 TMP="/data/local/tmp/onevoice_stage.part"
 WHICH="${1:-auto}"
 SERIAL="${2:-}"
-ADB="${ADB:-adb}"
+PACK_DIR="${PACK_DIR:-$REPO/dist/model-packs}"
+
+# Git Bash / MSYS rewrites any argument that looks like a POSIX path before it
+# reaches a native Windows program, so `adb shell rm /data/local/tmp/x` became
+# `rm C:/Program Files/Git/data/local/tmp/x`. Turn that off for adb.exe and
+# hand it host paths in Windows form ourselves (host_path below).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    WINDOWS_HOST=1
+    ;;
+  *) WINDOWS_HOST=0 ;;
+esac
+
+host_path() {
+  if [ "$WINDOWS_HOST" -eq 1 ]; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
+if [ -z "${ADB:-}" ]; then
+  ADB=adb
+  if ! command -v adb >/dev/null 2>&1; then
+    for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" \
+        "${LOCALAPPDATA:-}/Android/Sdk" "$HOME/Android/Sdk"; do
+      [ -n "$sdk" ] || continue
+      for candidate in "$sdk/platform-tools/adb" "$sdk/platform-tools/adb.exe"; do
+        if [ -x "$candidate" ]; then ADB="$candidate"; break 2; fi
+      done
+    done
+  fi
+fi
+
+if [ -z "${MODEL_SOURCE:-}" ]; then
+  if [ ! -d "$BINS" ] && [ -d "$PACK_DIR" ]; then
+    MODEL_SOURCE=packs
+  else
+    MODEL_SOURCE=bins
+  fi
+fi
+case "$MODEL_SOURCE" in
+  bins|packs) ;;
+  *) echo "!! MODEL_SOURCE must be 'bins' or 'packs', got '$MODEL_SOURCE'" >&2; exit 2 ;;
+esac
 
 for command_name in tar sha256sum find stat awk grep; do
   command -v "$command_name" >/dev/null 2>&1 || {
@@ -59,6 +112,10 @@ for command_name in tar sha256sum find stat awk grep; do
     exit 1
   }
 done
+if [ "$WINDOWS_HOST" -eq 1 ] && ! command -v cygpath >/dev/null 2>&1; then
+  echo "!! required host command is missing: cygpath" >&2
+  exit 1
+fi
 
 adb_cmd() {
   if [ -n "$SERIAL" ]; then
@@ -162,15 +219,53 @@ case "$WHICH" in
   *) echo "usage: $0 [auto|vi-en|en-vi|all] [adb-serial]" >&2; exit 2 ;;
 esac
 
+# Host file for one plan row. A pack keeps the device layout, so its file for
+# `vi-en/x` is <PACK_DIR>/vi-en/models/npu/vi-en/x.
+source_file() {
+  local dest="$1" src="$2"
+  if [ "$MODEL_SOURCE" = packs ]; then
+    printf '%s/%s/models/npu/%s' "$PACK_DIR" "${dest%%/*}" "$dest"
+  else
+    printf '%s/%s' "$BINS" "$src"
+  fi
+}
+
+if [ "$MODEL_SOURCE" = packs ]; then
+  # package-main-models.sh deliberately leaves out the LID A/B trio and the
+  # optional Supertonic voice; drop exactly those rows. Anything else missing
+  # from a pack is still a hard MISSING SOURCE below.
+  PLAN="$(printf '%s\n' "$PLAN" | grep -v -E '^(shared/|en-vi/tts_supertonic/)' || true)"
+  echo "model source: packs in $PACK_DIR (LID and Supertonic not staged)"
+  pack_dirs=()
+  [ "$STAGE_VI" -eq 0 ] || pack_dirs+=(vi-en)
+  [ "$STAGE_EN" -eq 0 ] || pack_dirs+=(en-vi)
+  for pack in "${pack_dirs[@]}"; do
+    if [ ! -s "$PACK_DIR/$pack/SHA256SUMS" ]; then
+      echo "!! $PACK_DIR/$pack/SHA256SUMS not found; extract" \
+        "onevoice-main-models-$pack.tar.zst into $PACK_DIR/$pack first." >&2
+      exit 1
+    fi
+    # The packager's own manifest: catches a truncated or damaged extraction
+    # on the host before anything reaches the phone.
+    printf '  checking pack %s against its SHA256SUMS ...\n' "$pack"
+    if ! (cd "$PACK_DIR/$pack" && sha256sum -c --quiet SHA256SUMS); then
+      echo "!! pack $pack does not match its SHA256SUMS; re-extract it." >&2
+      exit 1
+    fi
+  done
+else
+  echo "model source: $BINS"
+fi
+
 # Refuse a partial deployment before touching the phone. The converter writes
 # the three shared files as one reviewed contract; a model without its exact
 # labels/frontend metadata is not safe to use for LID A/B.
 missing_sources=0
 while IFS=$'\t' read -r dest src; do
   [ -n "${dest:-}" ] || continue
-  local_file="$BINS/$src"
+  local_file="$(source_file "$dest" "$src")"
   if [ ! -s "$local_file" ]; then
-    echo "  MISSING SOURCE  $src" >&2
+    echo "  MISSING SOURCE  $local_file" >&2
     missing_sources=$((missing_sources + 1))
   fi
 done <<< "$PLAN"
@@ -182,24 +277,39 @@ if [ "$missing_sources" -ne 0 ]; then
   exit 1
 fi
 
-ESPEAK_SRC="$REPO/models-hf/espeak-ng-data"
-for required in phontab phondata phonindex en_dict vi_dict; do
-  if [ ! -s "$ESPEAK_SRC/$required" ]; then
-    echo "!! incomplete eSpeak data: $ESPEAK_SRC/$required" >&2
+# Source folders carry one shared eSpeak tree; each pack carries its own copy.
+espeak_src() {
+  if [ "$MODEL_SOURCE" = packs ]; then
+    printf '%s/%s/models/npu/%s/espeak-ng-data' "$PACK_DIR" "$1" "$1"
+  else
+    printf '%s/models-hf/espeak-ng-data' "$REPO"
+  fi
+}
+
+espeak_directions=()
+[ "$STAGE_VI" -eq 0 ] || espeak_directions+=(vi-en)
+[ "$STAGE_EN" -eq 0 ] || espeak_directions+=(en-vi)
+for direction in "${espeak_directions[@]}"; do
+  ESPEAK_SRC="$(espeak_src "$direction")"
+  for required in phontab phondata phonindex en_dict vi_dict; do
+    if [ ! -s "$ESPEAK_SRC/$required" ]; then
+      echo "!! incomplete eSpeak data: $ESPEAK_SRC/$required" >&2
+      exit 1
+    fi
+  done
+  if find "$ESPEAK_SRC" -type f -empty -print -quit | grep -q .; then
+    echo "!! eSpeak data contains an empty file" >&2
+    exit 1
+  fi
+  if find "$ESPEAK_SRC" -type l -print -quit | grep -q .; then
+    echo "!! refusing to archive symlinks from $ESPEAK_SRC" >&2
     exit 1
   fi
 done
-if find "$ESPEAK_SRC" -type f -empty -print -quit | grep -q .; then
-  echo "!! eSpeak data contains an empty file" >&2
-  exit 1
-fi
-if find "$ESPEAK_SRC" -type l -print -quit | grep -q .; then
-  echo "!! refusing to archive symlinks from $ESPEAK_SRC" >&2
-  exit 1
-fi
 
 # ---- Preflight: one device, the right chip, a debuggable install -----------
-if [ "$(adb_cmd devices | grep -c '\sdevice$')" -ne 1 ]; then
+# Windows adb.exe ends lines with CRLF; strip it or `device$` never matches.
+if [ "$(adb_cmd devices | tr -d '\r' | grep -c '\sdevice$')" -ne 1 ]; then
   echo "!! need exactly one device in 'device' state:" >&2
   adb_cmd devices >&2
   exit 1
@@ -240,7 +350,7 @@ pushed=0
 skipped=0
 while IFS=$'\t' read -r dest src; do
   [ -n "${dest:-}" ] || continue
-  local_file="$BINS/$src"
+  local_file="$(source_file "$dest" "$src")"
   local_size=$(stat -c%s "$local_file")
   local_sha=$(sha256sum "$local_file" | awk '{print $1}')
 
@@ -261,7 +371,7 @@ while IFS=$'\t' read -r dest src; do
 
   printf '  → %-36s %s MB sha256=%s\n' \
     "$dest" "$((local_size / 1048576))" "${local_sha:0:12}"
-  adb_cmd push "$local_file" "$TMP" >/dev/null </dev/null
+  adb_cmd push "$(host_path "$local_file")" "$TMP" >/dev/null </dev/null
   remote_part="$ROOT/$dest.part"
   remote_parent="${remote_part%/*}"
   adb_cmd shell run-as "$PKG" mkdir -p "$remote_parent" </dev/null
@@ -353,8 +463,10 @@ stage_espeak() {
     adb_cmd shell -T run-as "$PKG" sha256sum -c - >/dev/null
 }
 
-[ "$STAGE_VI" -eq 0 ] || stage_espeak vi-en
-[ "$STAGE_EN" -eq 0 ] || stage_espeak en-vi
+for direction in "${espeak_directions[@]}"; do
+  ESPEAK_SRC="$(espeak_src "$direction")"
+  stage_espeak "$direction"
+done
 
 echo
 echo "pushed=$pushed skipped=$skipped"

@@ -6,14 +6,18 @@ are stated exactly once.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
 
-PACKAGE = "com.onevoice.link"
-RECEIVER = f"{PACKAGE}/.core.BenchControlReceiver"
+# ONEVOICE_PACKAGE selects a side-by-side debug install (-PdebugAppIdSuffix),
+# e.g. com.onevoice.link.bench. The receiver class and broadcast action keep
+# the base names, so the component is spelled out in full.
+PACKAGE = os.environ.get("ONEVOICE_PACKAGE", "com.onevoice.link")
+RECEIVER = f"{PACKAGE}/com.onevoice.link.core.BenchControlReceiver"
 ACTION = "com.onevoice.link.BENCH"
 FILES_DIR = f"/data/user/0/{PACKAGE}/files"
 BENCH_DIR = f"{FILES_DIR}/bench"
@@ -49,14 +53,31 @@ class Device:
                     "while the hardware keeps charging, which produces "
                     "fabricated energy numbers"
                 )
-        proc = subprocess.run(
-            [self.adb, "-s", self.serial, *args],
-            capture_output=True, text=True, timeout=timeout,
-            stdin=subprocess.DEVNULL,
-        )
-        if proc.returncode != 0:
-            raise DeviceError(f"adb {joined} failed: {proc.stderr.strip()}")
-        return proc.stdout
+        # A USB link that drops for a moment ("device not found" / "offline")
+        # used to end an 800-clip run after 40 minutes. Wait for the device
+        # and retry the same command; any other failure is still fatal.
+        for attempt in range(4):
+            proc = subprocess.run(
+                [self.adb, "-s", self.serial, *args],
+                capture_output=True, text=True, timeout=timeout,
+                stdin=subprocess.DEVNULL, encoding="utf-8", errors="replace",
+            )
+            if proc.returncode == 0:
+                return proc.stdout
+            transient = re.search(r"not found|offline|no devices|device still",
+                                  proc.stderr or "")
+            if not transient or attempt == 3:
+                break
+            print(f"    ! adb lost {self.serial} ({proc.stderr.strip()}); "
+                  "waiting for it to come back", flush=True)
+            try:
+                subprocess.run([self.adb, "-s", self.serial, "wait-for-device"],
+                               timeout=180, stdin=subprocess.DEVNULL,
+                               capture_output=True)
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(2.0)
+        raise DeviceError(f"adb {joined} failed: {proc.stderr.strip()}")
 
     def shell(self, command: str, timeout: float = 60.0) -> str:
         return self._run(["shell", command], timeout=timeout)
