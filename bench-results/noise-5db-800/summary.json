@@ -1,0 +1,259 @@
+{
+  "device": "R5CW72TP4EP",
+  "routing": {
+    "mode": "auto",
+    "routed_rows": 800,
+    "misroutes": 66,
+    "misrouted_fixtures": [
+      "en_EV-0182__loom.f32",
+      "en_EV-0228__cutting_steam.f32",
+      "en_EV-0250__cutting_steam.f32",
+      "en_EV-0250__loom.f32",
+      "en_EV-0250__workshop.f32",
+      "en_EV-0333__cutting_steam.f32",
+      "en_EV-0333__loom.f32",
+      "en_EV-0333__sewing.f32",
+      "en_EV-0333__workshop.f32",
+      "en_EV-0523__loom.f32",
+      "en_EV-0523__sewing.f32",
+      "en_EV-0523__workshop.f32",
+      "en_EV-1212__sewing.f32",
+      "en_EV-1212__workshop.f32",
+      "en_EV-1508__loom.f32",
+      "en_EV-1829__loom.f32",
+      "en_EV-1829__sewing.f32",
+      "en_EV-1829__workshop.f32",
+      "en_EV-1863__loom.f32",
+      "en_EV-2364__cutting_steam.f32",
+      "en_EV-2401__loom.f32",
+      "en_EV-2401__sewing.f32",
+      "en_EV-2748__cutting_steam.f32",
+      "en_EV-2748__loom.f32",
+      "en_EV-2748__sewing.f32",
+      "en_EV-2748__workshop.f32",
+      "en_EV-3791__loom.f32",
+      "en_EV-4177__cutting_steam.f32",
+      "en_EV-4177__loom.f32",
+      "en_EV-4177__workshop.f32",
+      "en_EV-4250__loom.f32",
+      "en_EV-4294__workshop.f32",
+      "en_EV-4321__cutting_steam.f32",
+      "en_EV-5269__loom.f32",
+      "en_EV-5301__cutting_steam.f32",
+      "en_EV-5600__loom.f32",
+      "en_EV-5600__sewing.f32",
+      "en_EV-5935__loom.f32",
+      "en_EV-5935__sewing.f32",
+      "en_EV-6054__loom.f32",
+      "en_EV-6218__loom.f32",
+      "en_EV-6239__cutting_steam.f32",
+      "en_EV-6239__loom.f32",
+      "en_EV-6239__workshop.f32",
+      "en_EV-6502__sewing.f32",
+      "en_EV-6602__sewing.f32",
+      "en_EV-6618__cutting_steam.f32",
+      "en_EV-6618__workshop.f32",
+      "en_EV-6960__cutting_steam.f32",
+      "en_EV-6960__loom.f32",
+      "en_EV-6960__sewing.f32",
+      "en_EV-6960__workshop.f32",
+      "en_EV-7227__sewing.f32",
+      "en_EV-7690__loom.f32",
+      "en_EV-7690__workshop.f32",
+      "en_EV-8596__cutting_steam.f32",
+      "en_EV-8596__workshop.f32",
+      "en_EV-8694__workshop.f32",
+      "en_EV-9018__workshop.f32",
+      "en_EV-9341__cutting_steam.f32",
+      "en_EV-9341__loom.f32",
+      "en_EV-9341__sewing.f32",
+      "en_EV-9341__workshop.f32",
+      "en_EV-9953__cutting_steam.f32",
+      "vi_VE-5468__sewing.f32",
+      "vi_VE-8860__sewing.f32"
+    ],
+    "reasons": {
+      "margin": 751,
+      "prior": 49
+    }
+  },
+  "soc": "SM8550",
+  "iterations": 800,
+  "warmup": 10,
+  "power_mode": "burst",
+  "energy": {
+    "valid": false,
+    "reason": "Phase A does not collect energy; see SKILL.md"
+  },
+  "latency": {
+    "asr_ms": {
+      "n": 800,
+      "median": 231.0,
+      "p90": 313.0,
+      "p95": 337.0,
+      "min": 162.0,
+      "max": 377.0
+    },
+    "mt_ms": {
+      "n": 800,
+      "median": 145.5,
+      "p90": 332.0,
+      "p95": 377.0,
+      "min": 44.0,
+      "max": 568.0
+    },
+    "tts_ms": {
+      "n": 800,
+      "median": 2602.5,
+      "p90": 4109.0,
+      "p95": 4834.0,
+      "min": 761.0,
+      "max": 7005.0
+    },
+    "ttfa_ms": {
+      "n": 800,
+      "median": 3013.5,
+      "p90": 4742.0,
+      "p95": 5374.0,
+      "min": 971.0,
+      "max": 7863.0
+    },
+    "e2e_ms": {
+      "n": 800,
+      "median": 6457.0,
+      "p90": 10703.0,
+      "p95": 12568.0,
+      "min": 1721.0,
+      "max": 18061.0
+    },
+    "queue_wait_ms": {
+      "n": 800,
+      "median": 0.0,
+      "p90": 0.0,
+      "p95": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    }
+  },
+  "memory": {
+    "pss_kb": 1442228,
+    "private_dirty_kb": 325336,
+    "peak_rss_kb": 1264092,
+    "rss_kb": 984744,
+    "mem_total_kb": 7345656,
+    "mem_available_kb": 1217016,
+    "mem_headroom_pct": 16
+  },
+  "dmabuf_kb_before": null,
+  "dmabuf_kb_after": null,
+  "dmabuf_delta_kb": null,
+  "qnn_samples": 0,
+  "paging_before": {
+    "minflt": 1080423,
+    "majflt": 446875,
+    "peak_rss_kb": 1264092,
+    "rss_kb": 276616,
+    "swap_kb": 1155444
+  },
+  "paging_after": {
+    "minflt": 2831633,
+    "majflt": 669108,
+    "peak_rss_kb": 1264092,
+    "rss_kb": 984744,
+    "swap_kb": 488240
+  },
+  "majflt_delta": 222233,
+  "soak_windows": [],
+  "gates": [
+    {
+      "gate": "G1",
+      "title": "p95 time-to-first-audio",
+      "source": "\u00a75.1 item 2",
+      "passed": false,
+      "observed": "5374 ms (median 3014, n=800)",
+      "threshold": "\u2264 1500 ms",
+      "note": "TTFA == total compute: Kokoro is whole-utterance, so no audio exists until every stage has finished.",
+      "verdict": "FAIL"
+    },
+    {
+      "gate": "G2",
+      "title": "p95 end-to-end (advisory)",
+      "source": "not in \u00a75.1",
+      "passed": null,
+      "observed": "12568 ms (median 6457)",
+      "threshold": "3000 ms (advisory only)",
+      "note": "No 3.0 s SLA appears in \u00a75.1. Reported for context, not scored.",
+      "verdict": "N/A"
+    },
+    {
+      "gate": "G3",
+      "title": "every HTP stage ran on the accelerator",
+      "source": "\u00a75.1 item 1",
+      "passed": null,
+      "observed": "no profile samples",
+      "threshold": "accel_us > 0 on every HTP stage",
+      "note": "Run the profiled cohort; the baseline cohort deliberately leaves profiling off so it does not pay the collection cost.",
+      "verdict": "N/A"
+    },
+    {
+      "gate": "G4",
+      "title": "process memory ceiling",
+      "source": "\u00a74.3",
+      "passed": false,
+      "observed": "PSS 1408 MB steady, 1408 MB peak",
+      "threshold": "\u2264 1024 MB steady, \u2264 1229 MB transient",
+      "note": "DSP-side allocations are absent from PSS; see the dmabuf delta.",
+      "verdict": "FAIL"
+    },
+    {
+      "gate": "G5",
+      "title": "system memory headroom",
+      "source": "\u00a75.1 item 3",
+      "passed": false,
+      "observed": "16%",
+      "threshold": "\u2265 20%",
+      "note": "",
+      "verdict": "FAIL"
+    },
+    {
+      "gate": "G6",
+      "title": "60-minute soak p95 drift",
+      "source": "\u00a75.1 item 4",
+      "passed": null,
+      "observed": "soak not run",
+      "threshold": "\u2264 10%",
+      "note": "Run with --soak 60. Requires a settled battery; see SKILL.md.",
+      "verdict": "N/A"
+    },
+    {
+      "gate": "G7",
+      "title": "ASR and TTS real-time factor",
+      "source": "\u00a75.1 item 2",
+      "passed": true,
+      "observed": "ASR p95 0.082, TTS p95 0.938",
+      "threshold": "both < 1.0",
+      "note": "RTF is per second of REAL SPEECH, not per 10 s ASR window. The window definition would make ASR pass trivially by describing the graph shape instead of the wait a speaker experiences.",
+      "verdict": "PASS"
+    },
+    {
+      "gate": "G8",
+      "title": "no low-memory kill, RSS not monotonically rising",
+      "source": "\u00a74.3",
+      "passed": true,
+      "observed": "LOW_MEMORY kill=False, RSS monotonic=no over 160 samples",
+      "threshold": "no kill, no monotonic growth",
+      "note": "",
+      "verdict": "PASS"
+    },
+    {
+      "gate": "E1",
+      "title": "active/idle power and 8-hour rundown",
+      "source": "\u00a75.1 item 5 / \u00a75.2",
+      "passed": null,
+      "observed": "deferred \u2014 Phase B",
+      "threshold": "5.60 W active, 0.43 W armed-idle, 8 h shift",
+      "note": "The device charges over USB throughout Phase A. While plugged, the PMIC feeds the system rail from VBUS, so battery current carries no load signal \u2014 not noise, absence of signal.",
+      "verdict": "N/A"
+    }
+  ]
+}

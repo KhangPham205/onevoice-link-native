@@ -1,0 +1,9 @@
+cohort,iteration,fixture,direction,route_source,speaker_language,speech_duration_s,forced_boundary,execution_path,asr_ms,mt_ms,tts_ms,queue_wait_ms,ttfa_ms,e2e_ms,hangover_ms,echo_guard_ms,e2e_minus_hangover_ms,mt_output_tokens,tts_output_chars,tts_output_audio_s,asr_rtf,tts_rtf,thermal_status,power_mode,underruns,frames_requested,frames_written,energy_valid,charge_counter_delta_uah,avg_power_w,energy_j,energy_per_utterance_j,energy_per_audio_s_j
+baseline,0,en_EV-0182__loom.f32,vi-en,prior,vi,9.160,false,HYBRID_NPU,269,48,523,0,840,1665,1000,300,365,2,2,0.825,0.0294,0.6339,0,burst,15,1599792,1599792,false,,,,,
+baseline,1,en_EV-0240__cutting_steam.f32,en-vi,margin,en,5.952,false,HYBRID_NPU,225,219,2614,0,3058,7872,1000,300,6572,22,90,4.814,0.0378,0.5430,0,burst,16,1715328,1715328,false,,,,,
+baseline,2,en_EV-0228__workshop.f32,en-vi,margin,en,6.336,false,HYBRID_NPU,271,213,2840,0,3324,7700,1000,300,6400,21,84,4.376,0.0428,0.6490,0,burst,17,1820352,1820352,false,,,,,
+baseline,3,vi_VE-0037__cutting_steam.f32,vi-en,margin,vi,3.640,false,HYBRID_NPU,193,84,1966,0,2243,4893,1000,300,3593,6,26,2.650,0.0530,0.7419,0,burst,18,1883952,1883952,false,,,,,
+baseline,4,vi_VE-1814__loom.f32,vi-en,margin,vi,2.620,false,HYBRID_NPU,188,96,1992,0,2276,5076,1000,300,3776,8,29,2.800,0.0718,0.7114,0,burst,18,1951152,1951152,false,,,,,
+baseline,5,vi_VE-1926__sewing.f32,vi-en,margin,vi,3.700,false,HYBRID_NPU,206,98,1988,0,2292,5217,1000,300,3917,8,29,2.925,0.0557,0.6797,0,burst,19,2021352,2021352,false,,,,,
+baseline,6,en_EV-0157__sewing.f32,en-vi,margin,en,9.216,false,HYBRID_NPU,334,207,2583,0,3124,7254,1000,300,5954,20,84,4.130,0.0362,0.6254,0,burst,20,2120472,2120472,false,,,,,
+baseline,7,vi_VE-3026__sewing.f32,vi-en,margin,vi,2.601,false,HYBRID_NPU,184,92,1853,0,2129,5054,1000,300,3754,8,26,2.925,0.0708,0.6335,0,burst,21,2190672,2190672,false,,,,,
