@@ -239,6 +239,12 @@ internal class AutoHybridPipeline private constructor(
         val decision = turnRouter.decide(
             vi.hypothesis.normalizedLogProb,
             en.hypothesis.normalizedLogProb,
+            CoverageEvidence(
+                viTokens = vi.hypothesis.tokenCount,
+                enTokens = en.hypothesis.tokenCount,
+                // The bounded window both branches decoded, as the routing row's audioMs.
+                audioSeconds = samples.size.toDouble() / NpuEngine.SAMPLE_RATE,
+            ),
         )
         val diagnostics = RoutingDiagnostics(
             mode = RoutingMode.DUAL_ASR,

@@ -147,4 +147,93 @@ class DualAsrRouterTest {
         val failure = runCatching { config.copy(priorWeight = -0.1) }.exceptionOrNull()
         assertEquals(IllegalArgumentException::class.java, failure?.javaClass)
     }
+
+    // Coverage rules, with the values in gradle.properties. Cases named after a
+    // clip are measured rows from bench-results/noise-5db-800 (factory noise,
+    // 5 dB); the short "dạ" reply is constructed, as that set has none.
+    private val covered = config.copy(
+        marginThreshold = 0.15,
+        enScoreOffset = -0.08,
+        coverageLowRate = 1.2,
+        coverageHighRate = 2.0,
+        coverageMinTokenGap = 4,
+        coverageTieRatio = 1.8,
+        minWinnerRate = 0.8,
+    )
+
+    @Test
+    fun confidentFillerDoesNotBeatAFullEnglishTranscript() {
+        // en_EV-0250__cutting_steam: VI heard "ờ" (2 tokens, -0.09) while
+        // Parakeet transcribed the sentence (34 tokens, -0.31) in 5.5 s.
+        val evidence = CoverageEvidence(viTokens = 2, enTokens = 34, audioSeconds = 5.5)
+
+        assertEquals(TranslationDirection.VI_TO_EN, DualAsrTurnRouter(config.copy(
+            marginThreshold = 0.15, enScoreOffset = -0.08,
+        )).decide(-0.09, -0.31, evidence).direction)
+        val result = DualAsrTurnRouter(covered).decide(-0.09, -0.31, evidence)
+
+        assertEquals(TranslationDirection.EN_TO_VI, result.direction)
+        assertEquals(RoutingDecisionReason.COVERAGE, result.reason)
+    }
+
+    @Test
+    fun coverageLeadBreaksANearTieBeforeThePrior() {
+        // en_EV-9341__cutting_steam: scores within the margin, prior said VI,
+        // but EN decoded 18 tokens against VI's 8 in 3.6 s.
+        val router = DualAsrTurnRouter(covered)
+        router.commit(TranslationDirection.EN_TO_VI, forcedBoundary = false)
+
+        val result = router.decide(-0.59, -0.50, CoverageEvidence(8, 18, 3.6))
+
+        assertEquals(TranslationDirection.EN_TO_VI, result.direction)
+        assertEquals(RoutingDecisionReason.COVERAGE_TIE, result.reason)
+    }
+
+    @Test
+    fun winnerThatCoversAlmostNothingFailsClosed() {
+        // en_EV-2748: Parakeet emitted nothing; VI's "ừ" (2 tokens in 6 s)
+        // used to win by margin and play "Yeah.".
+        val result = DualAsrTurnRouter(covered).decide(
+            -0.87, Double.NEGATIVE_INFINITY, CoverageEvidence(2, 0, 6.0),
+        )
+
+        assertNull(result.direction)
+        assertEquals(RoutingDecisionReason.LOW_COVERAGE, result.reason)
+    }
+
+    @Test
+    fun shortVietnameseReplyIsNotOverruledByCoverage() {
+        // A one-word "dạ" in 0.8 s: both hypotheses are short, so the token
+        // gap keeps every coverage rule out and the score decides.
+        val result = DualAsrTurnRouter(covered).decide(-0.10, -0.90, CoverageEvidence(1, 2, 0.8))
+
+        assertEquals(TranslationDirection.VI_TO_EN, result.direction)
+        assertEquals(RoutingDecisionReason.MARGIN, result.reason)
+    }
+
+    @Test
+    fun ordinaryVietnameseStillRoutesByMargin() {
+        // vi_VE-0928__cutting_steam: EN produced more tokens (19 vs 12), but VI
+        // covered the audio (2.9/s), so the low-rate rule does not fire.
+        val result = DualAsrTurnRouter(covered).decide(-0.18, -0.98, CoverageEvidence(12, 19, 4.2))
+
+        assertEquals(TranslationDirection.VI_TO_EN, result.direction)
+        assertEquals(RoutingDecisionReason.MARGIN, result.reason)
+    }
+
+    @Test
+    fun coverageRulesAreOffWithoutEvidenceOrByDefault() {
+        val evidence = CoverageEvidence(2, 34, 5.5)
+
+        assertEquals(RoutingDecisionReason.MARGIN, DualAsrTurnRouter(covered).decide(-0.09, -0.31).reason)
+        assertEquals(RoutingDecisionReason.MARGIN, DualAsrTurnRouter(config).decide(-0.09, -0.40, evidence).reason)
+    }
+
+    @Test
+    fun coverageHighRateMustExceedLowRate() {
+        val failure = runCatching {
+            covered.copy(coverageLowRate = 2.0, coverageHighRate = 1.5)
+        }.exceptionOrNull()
+        assertEquals(IllegalArgumentException::class.java, failure?.javaClass)
+    }
 }

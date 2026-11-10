@@ -49,6 +49,19 @@ val dualAsrPriorWeight = providers.gradleProperty("dualAsrPriorWeight")
     .toDoubleOrNull()
     ?.takeIf { it.isFinite() && it >= 0.0 }
     ?: error("dualAsrPriorWeight must be a finite number >= 0")
+// Coverage rules (DualAsrTurnRouter): emitted tokens per second of audio. 0 disables a rule.
+fun nonNegativeDouble(name: String): Double = providers.gradleProperty(name).orElse("0.0").get()
+    .toDoubleOrNull()
+    ?.takeIf { it.isFinite() && it >= 0.0 }
+    ?: error("$name must be a finite number >= 0")
+val dualAsrCoverageLowRate = nonNegativeDouble("dualAsrCoverageLowRate")
+val dualAsrCoverageHighRate = nonNegativeDouble("dualAsrCoverageHighRate")
+val dualAsrCoverageTieRatio = nonNegativeDouble("dualAsrCoverageTieRatio")
+val dualAsrMinWinnerRate = nonNegativeDouble("dualAsrMinWinnerRate")
+val dualAsrCoverageTokenGap = providers.gradleProperty("dualAsrCoverageTokenGap").orElse("0").get()
+    .toIntOrNull()
+    ?.takeIf { it >= 0 }
+    ?: error("dualAsrCoverageTokenGap must be an integer >= 0")
 val vadMode = providers.gradleProperty("vadMode").orElse("SILERO").get().also {
     require(it in setOf("SILERO", "ENERGY")) { "vadMode must be SILERO or ENERGY (got '$it')" }
 }
@@ -249,6 +262,11 @@ android {
             dualAsrPriorWeight.toString(),
         )
         buildConfigField("double", "DUAL_ASR_EN_OFFSET", dualAsrEnOffset.toString())
+        buildConfigField("double", "DUAL_ASR_COVERAGE_LOW_RATE", dualAsrCoverageLowRate.toString())
+        buildConfigField("double", "DUAL_ASR_COVERAGE_HIGH_RATE", dualAsrCoverageHighRate.toString())
+        buildConfigField("int", "DUAL_ASR_COVERAGE_TOKEN_GAP", dualAsrCoverageTokenGap.toString())
+        buildConfigField("double", "DUAL_ASR_COVERAGE_TIE_RATIO", dualAsrCoverageTieRatio.toString())
+        buildConfigField("double", "DUAL_ASR_MIN_WINNER_RATE", dualAsrMinWinnerRate.toString())
         buildConfigField("int", "KOKORO_THREADS", kokoroThreads.toString())
         buildConfigField("String", "VAD_MODE", "\"$vadMode\"")
         buildConfigField("String", "AUDIO_INPUT", "\"$audioInput\"")
