@@ -45,6 +45,15 @@
     <string name="mic_input_phone">Phone mic</string>
     <string name="mic_input_usb">USB-C mic</string>
     <string name="mic_input_phone_hint">The phone\'s own microphone records; nothing has to be connected. A connected Bluetooth headset plays the translation (Vietnamese left, English right); otherwise the loudspeaker does.</string>
+    <string name="term_library_title">Term library</string>
+    <string name="term_library_terms">%1$d terms</string>
+    <string name="term_library_off">Off</string>
+    <string name="term_library_off_hint">Plain recognition, no workplace terms.</string>
+    <string name="term_library_hint">Vietnamese recognition favours this workplace\'s terms (sizes, brands, machines) and writes them in their standard form. Applies from the next turn; stop translating to change it.</string>
+    <string name="term_library_none_staged">No term library is staged on this phone. Compile one with tools/models/asr-bias/compile_bias_list.py and push it with tools/models/push-npu-models.sh.</string>
+    <string name="term_library_selected">Term library: %1$s. Applies from the next turn.</string>
+    <string name="term_library_off_selected">Term library off: plain recognition from the next turn.</string>
+    <string name="term_library_failed">Term library not changed: %1$s</string>
     <string name="mic_input_usb_hint">The plugged-in USB-C microphone (for example a wireless lavalier receiver) records; translating stops with a message if none is attached. A connected Bluetooth headset plays the translation (Vietnamese left, English right); otherwise the loudspeaker does.</string>
     <string name="audio_route_fixed_phone">Phone microphone</string>
     <string name="audio_route_fixed_usb">USB-C microphone</string>

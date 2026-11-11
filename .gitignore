@@ -57,6 +57,8 @@ google-services.json
 /models-vieneu/
 # Generated, distributable archives made by tools/models/package-main-models.sh.
 /dist/model-packs/
+# Compiled VI ASR term libraries (tools/models/asr-bias/compile_bias_list.py).
+/dist/asr-bias/
 # Python conversion tooling
 /tools/models/__pycache__/
 /tools/eval/__pycache__/

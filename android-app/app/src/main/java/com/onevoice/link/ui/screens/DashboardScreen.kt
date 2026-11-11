@@ -39,6 +39,7 @@ import com.onevoice.link.ui.components.EngineControls
 import com.onevoice.link.ui.components.MicPermissionRow
 import com.onevoice.link.ui.components.ModelCascadeCard
 import com.onevoice.link.ui.components.StatusCard
+import com.onevoice.link.ui.components.TermLibrarySelector
 import com.onevoice.link.ui.components.TranslationCard
 import com.onevoice.link.ui.theme.OneVoiceMotion
 import com.onevoice.link.ui.theme.Spacing
@@ -81,6 +82,9 @@ fun DashboardScreen(
                 activeRouteLabel = controller.activeRouteLabel,
                 audioInputMode = npuEngine?.audioInputMode ?: AudioInputMode.DASHBOARD,
                 micInput = controller.micInput,
+                termLibrariesEnabled = controller.termLibrariesEnabled,
+                termLibraries = controller.termLibraries,
+                termLibraryId = controller.termLibraryId,
             ),
             onInitialize = controller::initialize,
             onToggleTranslation = controller::toggleTranslation,
@@ -89,6 +93,7 @@ fun DashboardScreen(
             onOpenMenu = onOpenMenu,
             onAudioRouteSelected = controller::selectAudioRoute,
             onMicInputSelected = controller::selectMicInput,
+            onTermLibrarySelected = controller::selectTermLibrary,
             modifier = Modifier.padding(innerPadding),
         )
     }
@@ -106,6 +111,7 @@ fun DashboardContent(
     onOpenMenu: () -> Unit = {},
     onAudioRouteSelected: (AudioRoutePreference) -> Unit = {},
     onMicInputSelected: (MicInputPreference) -> Unit = {},
+    onTermLibrarySelected: (String?) -> Unit = {},
 ) {
     Column(
         modifier
@@ -139,6 +145,14 @@ fun DashboardContent(
                     inputMode = state.audioInputMode,
                     micInput = state.micInput,
                     onMicSelected = onMicInputSelected,
+                )
+            }
+            if (state.termLibrariesEnabled) {
+                TermLibrarySelector(
+                    libraries = state.termLibraries,
+                    selectedId = state.termLibraryId,
+                    enabled = state.canChangeTermLibrary,
+                    onSelected = onTermLibrarySelected,
                 )
             }
             if (state.showTranslationCard) {

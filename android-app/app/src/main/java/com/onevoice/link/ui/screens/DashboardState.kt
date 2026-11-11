@@ -52,6 +52,10 @@ data class UiMessage(
 fun UiMessage.resolve(): String =
     if (formatArg != null) stringResource(resId, formatArg) else stringResource(resId)
 
+/** One choice in the Dashboard's term-library selector; [id] null means off. */
+@Immutable
+data class TermLibraryOption(val id: String, val name: String, val terms: Int)
+
 /** Everything the stateless dashboard renders. */
 @Immutable
 data class DashboardUiState(
@@ -80,6 +84,12 @@ data class DashboardUiState(
     val audioInputMode: AudioInputMode = AudioInputMode.DASHBOARD,
     /** The Dashboard microphone of a SELECT build. */
     val micInput: MicInputPreference = MicInputPreference.PHONE,
+    /** -PasrBias builds offer workplace term libraries for the VI ASR. */
+    val termLibrariesEnabled: Boolean = false,
+    /** Libraries staged on this phone, sorted by name. */
+    val termLibraries: List<TermLibraryOption> = emptyList(),
+    /** The selected library's id; null = off (plain greedy recognition). */
+    val termLibraryId: String? = null,
 ) {
     val running: Boolean get() = stage == EngineStage.RUNNING
 
@@ -93,6 +103,12 @@ data class DashboardUiState(
     val showMicWarning: Boolean get() =
         supportsLiveTranslation && stage != EngineStage.NOT_INITIALIZED &&
             !micGranted && !running
+
+    /**
+     * A library change applies from the next turn. Not while translating, so
+     * a turn never switches library between its recognition and translation.
+     */
+    val canChangeTermLibrary: Boolean get() = !busy && !running
 
     /** A route change applies at the next turn, but not while a start/stop is busy. */
     val canChangeAudioRoute: Boolean get() =
@@ -149,6 +165,11 @@ class EngineController(
         (backend as? NpuEngine)?.micInputPreference ?: MicInputPreference.PHONE,
     )
         private set
+    var termLibraries by mutableStateOf<List<TermLibraryOption>>(emptyList())
+        private set
+    var termLibraryId by mutableStateOf<String?>(null)
+        private set
+    val termLibrariesEnabled: Boolean get() = (backend as? NpuEngine)?.asrBiasAvailable == true
 
     /**
      * Every live turn since the session began, oldest first. It survives
@@ -170,6 +191,7 @@ class EngineController(
     init {
         attachBackendListeners()
         stages = plannedStages()
+        refreshTermLibraries()
     }
 
     fun initialize() = launchBusy(UiMessage(R.string.msg_initializing_hybrid_auto)) {
@@ -177,6 +199,8 @@ class EngineController(
             runCatching { backend.initialize() }
         }
         result.onSuccess { initialized ->
+            // Load rescans the staged libraries and may fall back to off.
+            refreshTermLibraries()
             stage = if (initialized) EngineStage.INITIALIZED
             else EngineStage.NOT_INITIALIZED
             message = if (initialized) {
@@ -193,6 +217,34 @@ class EngineController(
         }.onFailure { failure ->
             stage = EngineStage.NOT_INITIALIZED
             message = nativeFailure(failure)
+        }
+    }
+
+    /** Staged term libraries and the persisted choice, as the engine resolved them. */
+    private fun refreshTermLibraries() {
+        val engine = backend as? NpuEngine ?: return
+        if (!engine.asrBiasAvailable) return
+        termLibraries = engine.refreshAsrBiasLibraries().map { TermLibraryOption(it.id, it.name, it.terms) }
+        termLibraryId = engine.asrBiasLibrary?.id
+    }
+
+    /** Persisted; applied to the loaded decoder from the next turn. Null = off. */
+    fun selectTermLibrary(id: String?) {
+        if (busy || shutdownRequested || stage == EngineStage.RUNNING) return
+        val engine = backend as? NpuEngine ?: return
+        if (id == termLibraryId) return
+        if (engine.selectAsrBiasLibrary(id)) {
+            termLibraryId = id
+            message = UiMessage(
+                R.string.term_library_selected,
+                termLibraries.firstOrNull { it.id == id }?.name,
+            ).takeIf { id != null } ?: UiMessage(R.string.term_library_off_selected)
+        } else {
+            message = UiMessage(
+                R.string.term_library_failed,
+                engine.lastError ?: "",
+                MessageKind.Error,
+            )
         }
     }
 

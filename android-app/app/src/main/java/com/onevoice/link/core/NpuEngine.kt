@@ -188,6 +188,80 @@ class NpuEngine(
     @Volatile
     private var pipeline: AutoHybridPipeline? = null
     private val running = AtomicBoolean(false)
+
+    // --------------------------------------------------------- term libraries
+    private val biasPreferences = AsrBiasPreferences(appContext)
+
+    /** -PasrBias: whether the Dashboard offers term libraries at all. */
+    val asrBiasAvailable: Boolean get() = BuildConfig.ASR_BIAS
+
+    /** Term libraries staged beside the VI ASR, found by [refreshAsrBiasLibraries]. */
+    @Volatile
+    internal var asrBiasLibraries: List<AsrBiasLibrary> = emptyList()
+        private set
+
+    /** The selected library (applied to the decoder once loaded); null = off. */
+    @Volatile
+    internal var asrBiasLibrary: AsrBiasLibrary? = null
+        private set
+
+    /**
+     * Rescans the staged libraries and resolves the persisted choice against
+     * them. Cheap (headers only), so it runs at start and again at load, after
+     * a deploy may have added a domain.
+     */
+    internal fun refreshAsrBiasLibraries(): List<AsrBiasLibrary> {
+        if (!BuildConfig.ASR_BIAS) return emptyList()
+        val dir = AutoHybridPipeline.viAsrBiasDirectory(modelRoot, manifest)
+        val found = dir?.let { runCatching { AsrBiasLibraries.discover(it) }.getOrDefault(emptyList()) }.orEmpty()
+        asrBiasLibraries = found
+        asrBiasLibrary = AsrBiasLibraries.resolve(found, biasPreferences.get())
+        return found
+    }
+
+    /**
+     * Dashboard choice: a library id, or null for none (greedy decoding). It is
+     * persisted and, once the pipeline is loaded, applied from the next turn.
+     * Refused while a session is capturing, so no turn switches library
+     * between its ASR and its MT rewrite, and when the library does not match
+     * the model.
+     */
+    fun selectAsrBiasLibrary(id: String?): Boolean {
+        if (!BuildConfig.ASR_BIAS) return false
+        val library = id?.let { wanted -> asrBiasLibraries.firstOrNull { it.id == wanted } ?: return false }
+        val active = pipeline
+        if (active != null) {
+            // A live or replayed session may have a turn between its ASR and its
+            // MT rewrite. Bench feeds keep `running` set while idle, so the
+            // capture threads, not that flag, say whether a session is open.
+            if (captureThread?.isAlive == true || replayThread?.isAlive == true) {
+                lastError = "Stop translating before changing the term library."
+                return false
+            }
+            val applied = runCatching { active.selectAsrBias(library) }
+            if (applied.isFailure) {
+                val failure = applied.exceptionOrNull()
+                Log.e(TAG, "Term library ${library?.id} failed to load", failure)
+                lastError = "Term library ${library?.name} could not be loaded: ${failure?.message}"
+                return false
+            }
+        }
+        biasPreferences.set(library?.id)
+        asrBiasLibrary = library
+        return true
+    }
+
+    /** Applies the persisted library after load; a bad file leaves ASR greedy. */
+    private fun applyAsrBiasLibrary(loaded: AutoHybridPipeline) {
+        if (!BuildConfig.ASR_BIAS) return
+        refreshAsrBiasLibraries()
+        val library = asrBiasLibrary
+        runCatching { loaded.selectAsrBias(library) }.onFailure { failure ->
+            Log.e(TAG, "Term library ${library?.id} failed to load; ASR stays unbiased", failure)
+            asrBiasLibrary = null
+            runCatching { loaded.selectAsrBias(null) }
+        }
+    }
     private val releasePending = AtomicBoolean(false)
     private val destroyed = AtomicBoolean(false)
     private val playbackLock = ReentrantLock()
@@ -435,7 +509,7 @@ class NpuEngine(
         }
         logResidentMemory("qnn_contexts_loaded", residentContexts)
         return runCatching {
-            pipeline = AutoHybridPipeline.load(modelRoot, manifest, routingConfig)
+            pipeline = AutoHybridPipeline.load(modelRoot, manifest, routingConfig).also(::applyAsrBiasLibrary)
             lastError = null
             logResidentMemory("hybrid_host_glue_loaded", residentContexts)
             Log.i(
@@ -784,6 +858,18 @@ class NpuEngine(
         if (running.get()) return null
         val active = pipeline ?: return null
         return runCatching { active.synthesize(text, direction) }.getOrNull()
+    }
+
+    /**
+     * Translate [text] with the loaded Marian, for checking the term glossary
+     * without audio. Null when the pipeline is not loaded or a capture/replay
+     * may be using Marian. [plain] skips the glossary.
+     */
+    internal fun benchTranslate(text: String, direction: TranslationDirection, plain: Boolean): String? {
+        if (telemetry?.enabled != true) return null
+        if (captureThread?.isAlive == true || replayThread?.isAlive == true) return null
+        val active = pipeline ?: return null
+        return active.translateForBench(text, direction, plain)
     }
 
     @Synchronized

@@ -49,10 +49,22 @@ internal class ZipformerFamilyRnntDecoder private constructor(
     private val tokens: List<String>,
     private val vocabSize: Int,
     /** Non-null only when decode-time biasing is built in (-PasrBias=true). */
-    private val beamSearch: RnntBeamSearch? = null,
-    /** Loaded `<prefix>_bias.txt`; null when absent or biasing is off. */
-    val biasList: AsrBiasList? = null,
+    private val biasOptions: RnntBiasOptions? = null,
 ) : Closeable {
+    /**
+     * The selected term library with the beam search built over it, or null
+     * for the plain greedy search. Swapped between turns from the Dashboard;
+     * each decode reads it once, so a swap never lands mid-utterance.
+     */
+    private class ActiveBias(val library: AsrBiasLibrary, val list: AsrBiasList, val search: RnntBeamSearch)
+
+    @Volatile
+    private var activeBias: ActiveBias? = null
+
+    private val pieceIds: Map<String, Int> by lazy {
+        tokens.withIndex().associate { (id, piece) -> piece to id }
+    }
+
     companion object {
         const val FEATURE_FRAMES = 1000
         const val FEATURE_DIM = 80
@@ -113,29 +125,8 @@ internal class ZipformerFamilyRnntDecoder private constructor(
                 validateDecoder(readyDecoder, vocabSize)
                 validateJoiner(readyJoiner, vocabSize)
                 val vocabulary = tokens.take(vocabSize)
-                // The bias list is optional: with biasing built in but no list
-                // staged, the beam still runs, which is how the empty-list
-                // regression run is made.
-                val biasFile = File(directionRoot, "${artifactPrefix}_bias.txt")
-                val biasList = if (biasOptions != null && biasFile.isFile) {
-                    AsrBiasList.parse(
-                        biasFile.readLines(),
-                        vocabulary.withIndex().associate { (id, piece) -> piece to id },
-                        biasOptions.defaultBoost,
-                    )
-                } else {
-                    null
-                }
-                val beamSearch = biasOptions?.let { options ->
-                    RnntBeamSearch(
-                        vocabSize = vocabSize,
-                        blankId = BLANK_ID,
-                        unkId = UNK_ID,
-                        sosEosId = vocabulary.indexOf("<sos/eos>"),
-                        beam = options.beam,
-                        graph = biasList?.phrases?.takeIf { it.isNotEmpty() }?.let(::ContextGraph),
-                    )
-                }
+                // Term libraries are chosen on the Dashboard after load
+                // (selectBias); a freshly loaded decoder is greedy.
                 return ZipformerFamilyRnntDecoder(
                     environment = environment,
                     decoder = readyDecoder,
@@ -145,8 +136,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
                     // metadata, not logits, and must never extend argmax.
                     tokens = vocabulary,
                     vocabSize = vocabSize,
-                    beamSearch = beamSearch,
-                    biasList = biasList,
+                    biasOptions = biasOptions,
                 )
             } catch (failure: Throwable) {
                 runCatching { joiner?.close() }
@@ -265,11 +255,41 @@ internal class ZipformerFamilyRnntDecoder private constructor(
     fun decode(encoderOutput: ByteBuffer, validFrames: Int): String =
         decodeScored(encoderOutput, validFrames).transcript
 
-    /** Beam width when decode-time biasing is built in, else null (greedy). */
-    val beamWidth: Int? get() = beamSearch?.beamWidth
+    /** Beam width while a term library is selected, else null (greedy). */
+    val beamWidth: Int? get() = activeBias?.search?.beamWidth
 
-    /** Spoken -> display rewrite of the loaded bias list; identity without one. */
-    fun rewrite(text: String): String = biasList?.rewrite(text) ?: text
+    /** The selected term library's parsed list; null when none is selected. */
+    val biasList: AsrBiasList? get() = activeBias?.list
+
+    /** The selected term library; null for the plain greedy search. */
+    val biasLibrary: AsrBiasLibrary? get() = activeBias?.library
+
+    /**
+     * Selects [library] for the next decode, or the greedy search for null.
+     * Parsing fails on a piece this model's vocabulary lacks (a list compiled
+     * against another BPE model) and leaves the current selection in place.
+     * Without -PasrBias the decoder stays greedy whatever is selected.
+     */
+    fun selectBias(library: AsrBiasLibrary?) {
+        val options = biasOptions
+        if (library == null || options == null) {
+            activeBias = null
+            return
+        }
+        val list = AsrBiasList.parse(library.file.readLines(), pieceIds, options.defaultBoost)
+        val search = RnntBeamSearch(
+            vocabSize = vocabSize,
+            blankId = BLANK_ID,
+            unkId = UNK_ID,
+            sosEosId = tokens.indexOf("<sos/eos>"),
+            beam = options.beam,
+            graph = list.phrases.takeIf { it.isNotEmpty() }?.let(::ContextGraph),
+        )
+        activeBias = ActiveBias(library, list, search)
+    }
+
+    /** Spoken -> display rewrite of the selected term library; identity without one. */
+    fun rewrite(text: String): String = activeBias?.list?.rewrite(text) ?: text
 
     /**
      * sherpa-compatible greedy search (at most one emitted symbol per frame),
@@ -284,7 +304,7 @@ internal class ZipformerFamilyRnntDecoder private constructor(
             "Invalid RNN-T encoder length $validFrames"
         }
         val source = encoderOutput.order(ByteOrder.nativeOrder()).asFloatBuffer()
-        beamSearch?.let { search -> return decodeBeam(search, source, validFrames) }
+        activeBias?.let { bias -> return decodeBeam(bias.search, source, validFrames) }
         val emitted = ArrayList<Int>(validFrames / 2)
         val emittedFrames = ArrayList<Int>(validFrames / 2)
         var rawLogProb = 0.0

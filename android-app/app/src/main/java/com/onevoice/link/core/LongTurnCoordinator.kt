@@ -34,6 +34,13 @@ internal interface LongTurnInference {
     fun synthesize(text: String, direction: TranslationDirection): FloatArray
     fun isNpuTextQuarantined(direction: TranslationDirection): Boolean
     fun quarantineNpuText(direction: TranslationDirection)
+
+    /**
+     * Source text as shown and logged: the selected term library's spoken ->
+     * display rewrite ("sai mờ" -> "size M"). Windows are stitched from the
+     * decoder's spoken token pieces, so the decoder's own rewrite is lost here.
+     */
+    fun displaySource(text: String, direction: TranslationDirection): String = text
 }
 
 /** One window after ASR, for telemetry. */
@@ -595,8 +602,9 @@ internal class LongTurnCoordinator(
     }
 
     private fun publish(turn: LongTurn, work: TurnWork) {
-        val transcript = transcriptOf(work.assembler.committedWords)
-        val pending = transcriptOf(work.assembler.pendingWords)
+        val shown = { text: String -> turn.direction?.let { inference.displaySource(text, it) } ?: text }
+        val transcript = shown(transcriptOf(work.assembler.committedWords))
+        val pending = shown(transcriptOf(work.assembler.pendingWords))
         val translation = work.translations.joinToString(" ")
         turn.transcript = listOf(transcript, pending).filter(String::isNotEmpty).joinToString(" ")
         turn.translation = translation

@@ -234,14 +234,7 @@ internal class NpuPipeline private constructor(
                         } else {
                             null
                         },
-                    ).also { decoder ->
-                        Log.i(
-                            TAG,
-                            "RNN-T decode $asrArtifactPrefix beam=${decoder.beamWidth ?: 1} " +
-                                "biasPhrases=${decoder.biasList?.phrases?.size ?: 0} " +
-                                "rewriteRules=${decoder.biasList?.ruleCount ?: 0}",
-                        )
-                    }
+                    )
                 }
                 translator = QnnMarianTranslator.load(directionRoot, stagePrefix)
                 if (supertonic) {
@@ -564,25 +557,100 @@ internal class NpuPipeline private constructor(
      * but long turns rebuild unit text from the spoken token pieces, so the MT
      * input is rewritten here too; the compiled list guarantees idempotency.
      */
-    private fun mtInput(text: String): String = rnntDecoder?.rewrite(text) ?: text
+    /** VI ASR text has no punctuation; Marian and the reader both need it (VietnamesePunctuation). */
+    private val punctuateSource = BuildConfig.VI_PUNCTUATION && stagePrefix == "vi-en"
+
+    private fun mtInput(text: String): String {
+        val rewritten = rnntDecoder?.rewrite(text) ?: text
+        return if (punctuateSource) VietnamesePunctuation.punctuate(rewritten) else rewritten
+    }
+
+    /** The term library's spoken -> display rewrite, for text shown to the person. */
+    fun rewriteSource(text: String): String = mtInput(text)
+
+    /**
+     * Selects the term library for this direction's RNN-T ASR (null = greedy,
+     * no bias). Takes effect from the next decode; throws, keeping the current
+     * selection, when the library does not match this model's vocabulary.
+     */
+    fun selectAsrBias(library: AsrBiasLibrary?): AsrBiasList? {
+        val decoder = rnntDecoder ?: return null
+        decoder.selectBias(library)
+        Log.i(
+            TAG,
+            "RNN-T decode $asrArtifactPrefix library=${decoder.biasLibrary?.id ?: "off"} " +
+                "beam=${decoder.beamWidth ?: 1} " +
+                "biasPhrases=${decoder.biasList?.phrases?.size ?: 0} " +
+                "rewriteRules=${decoder.biasList?.ruleCount ?: 0}",
+        )
+        return decoder.biasList
+    }
+
+    /**
+     * Glossary for a direction whose ASR has no term library of its own: the
+     * EN->VI branch takes the VI library's English->Vietnamese terms
+     * ("line 5" -> "chuyền 5"). Null = no glossary.
+     */
+    @Volatile
+    var targetGlossary: MtGlossary? = null
 
     /** One Marian pass per sentence; see [splitSentences] for why. */
-    fun translate(text: String): String {
-        var tokens = 0
-        return translateBySentence(mtInput(text)) { sentence ->
-            translator.translate(sentence).also { tokens += translator.lastOutputTokens }
-        }.also { lastMtOutputTokens = tokens }
-    }
+    fun translate(text: String): String = translateChecked(text).text
+
+    /** Marian alone, without the term glossary: for bench comparisons only. */
+    fun translatePlain(text: String): String = runMarian(mtInput(text)).text
 
     /**
      * [translate] plus whether any sentence's output hit the decoder length
      * cap without EOS. The long-turn path splits and retries such a unit
      * instead of playing a cut translation.
+     *
+     * With a term library selected, a sentence holding glossary terms is first
+     * translated as is. Only when that translation lacks a term's library
+     * English is it translated again with the terms crossing Marian as numeric
+     * placeholders ([MtGlossary]): placeholders fix the term but can flatten
+     * the rest ("The Nike delivery order came by Friday" -> "Number Nike
+     * delivery"), so they are spent only where Marian got a term wrong.
+     *
+     * Marian drops placeholders in some sentences ("báo 101 102" -> "call
+     * you", "fifty more 101 shirts" -> "50 more shirts"), so each
+     * [MtGlossary.Style] is tried in turn until one keeps every term. If none
+     * does, the translation that kept the most terms wins, the plain one on a
+     * tie. A repeated or mangled placeholder disqualifies that try.
      */
     fun translateChecked(text: String): MtOutput {
+        val source = mtInput(text)
+        val plain = runMarian(source)
+        val glossary = rnntDecoder?.biasList?.glossary ?: targetGlossary ?: return plain
+        val probe = glossary.protect(source)
+        if (probe.slots.isEmpty()) return plain
+        val terms = probe.slots.size
+        var best = plain
+        var bestKept = glossary.covered(plain.text, probe)
+        var tokens = plain.outputTokens
+        for (style in MtGlossary.Style.entries) {
+            if (bestKept == terms) break
+            val protected = if (style == probe.style) probe else glossary.protect(source, style)
+            val raw = runMarian(protected.text)
+            tokens += raw.outputTokens
+            val restored = glossary.restoreFound(raw.text, protected)
+            Log.i(
+                TAG,
+                "MT glossary terms=$terms style=$style source=\"${protected.text}\" " +
+                    "plain=\"${plain.text}\" marian=\"${raw.text}\" kept=${restored?.second ?: "rejected"}",
+            )
+            if (restored != null && restored.second > bestKept) {
+                best = raw.copy(text = restored.first)
+                bestKept = restored.second
+            }
+        }
+        return best.copy(outputTokens = tokens)
+    }
+
+    private fun runMarian(source: String): MtOutput {
         var tokens = 0
         var truncated = false
-        val translation = translateBySentence(mtInput(text)) { sentence ->
+        val translation = translateBySentence(source) { sentence ->
             translator.translate(sentence).also {
                 tokens += translator.lastOutputTokens
                 truncated = truncated || translator.lastOutputHitLimit

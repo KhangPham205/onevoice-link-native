@@ -115,8 +115,13 @@ internal class ContextGraph(phrases: List<Phrase>) {
  */
 internal class AsrBiasList private constructor(
     val phrases: List<ContextGraph.Phrase>,
-    private val rules: Map<String, List<Pair<List<String>, String>>>,
+    /** First word -> (spoken words, display); a null display is a guard that keeps the words. */
+    private val rules: Map<String, List<Pair<List<String>, String?>>>,
     val ruleCount: Int,
+    /** Terms translated with their library English instead of by Marian (`g` lines). */
+    val glossary: MtGlossary,
+    /** EN->VI: an English speaker's term and its Vietnamese display (`e` lines). */
+    val reverseGlossary: MtGlossary = MtGlossary(emptyList()),
 ) {
     companion object {
         fun parse(
@@ -128,12 +133,35 @@ internal class AsrBiasList private constructor(
                 "Default bias boost must be positive, got $defaultBoost"
             }
             val phrases = ArrayList<ContextGraph.Phrase>()
-            val rules = HashMap<String, MutableList<Pair<List<String>, String>>>()
+            val rules = HashMap<String, MutableList<Pair<List<String>, String?>>>()
+            val glossary = ArrayList<MtGlossary.Entry>()
+            val reverse = ArrayList<MtGlossary.Entry>()
             var ruleCount = 0
             lines.forEachIndexed { index, raw ->
                 val line = raw.trimEnd('\r')
                 if (line.isBlank() || line.startsWith("#")) return@forEachIndexed
                 val cols = line.split('\t')
+                if (cols[0] == "k") {
+                    // k <TAB> <words>: a guard. As the longer match it keeps
+                    // "chuyền năm nay" (this year) from becoming "chuyền 5 nay".
+                    require(cols.size == 2 && cols[1].isNotBlank()) { "Bias line ${index + 1}: bad guard" }
+                    val words = cols[1].lowercase().split(' ').filter(String::isNotEmpty)
+                    rules.getOrPut(words.first()) { ArrayList() } += words to null
+                    return@forEachIndexed
+                }
+                if (cols[0] == "g" || cols[0] == "e") {
+                    // g|e <TAB> <case-sensitive 0|1> <TAB> <surface> <TAB> <translation>
+                    require(cols.size == 4 && (cols[1] == "0" || cols[1] == "1") &&
+                        cols[2].isNotBlank() && cols[3].isNotBlank()) {
+                        "Bias line ${index + 1}: bad glossary entry"
+                    }
+                    (if (cols[0] == "g") glossary else reverse) += MtGlossary.Entry(
+                        words = cols[2].split(' ').filter(String::isNotEmpty),
+                        caseSensitive = cols[1] == "1",
+                        english = cols[3],
+                    )
+                    return@forEachIndexed
+                }
                 require(cols.size == 5) { "Bias line ${index + 1}: expected 5 columns, got ${cols.size}" }
                 val (boostText, rewriteText, spoken, display, pieceText) = cols
                 val boost = if (boostText == "-") defaultBoost else boostText.toDoubleOrNull()
@@ -155,7 +183,7 @@ internal class AsrBiasList private constructor(
                 }
             }
             rules.values.forEach { list -> list.sortByDescending { it.first.size } }
-            return AsrBiasList(phrases, rules, ruleCount)
+            return AsrBiasList(phrases, rules, ruleCount, MtGlossary(glossary), MtGlossary(reverse))
         }
     }
 
@@ -176,8 +204,9 @@ internal class AsrBiasList private constructor(
                 i + spoken.size <= words.size && spoken.indices.all { lower[i + it] == spoken[it] }
             }
             if (match != null) {
-                out += match.second
-                i += match.first.size
+                val n = match.first.size
+                out += match.second ?: words.subList(i, i + n).joinToString(" ")
+                i += n
             } else {
                 out += words[i]
                 i++

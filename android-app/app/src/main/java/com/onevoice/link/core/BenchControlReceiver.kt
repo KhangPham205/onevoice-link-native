@@ -281,6 +281,27 @@ class BenchControlReceiver : BroadcastReceiver() {
                 Log.i(TAG, "stop requested")
             }
 
+            "mt" -> {
+                // Text-only translation, to test the term glossary without
+                // synthesizing audio. mode=plain skips the glossary.
+                val text = intent.getStringExtra(EXTRA_TEXT)
+                val engine = NpuEngine.current()
+                val direction = when (intent.getStringExtra(EXTRA_DIRECTION) ?: "vi-en") {
+                    "en-vi" -> TranslationDirection.EN_TO_VI
+                    else -> TranslationDirection.VI_TO_EN
+                }
+                val plain = intent.getStringExtra(EXTRA_MODE) == "plain"
+                if (text == null || engine == null) {
+                    Log.w(TAG, "mt ignored: text=$text engine=${engine != null}")
+                    return
+                }
+                Thread({
+                    val out = runCatching { engine.benchTranslate(text, direction, plain) }
+                        .getOrElse { Log.w(TAG, "mt failed", it); return@Thread }
+                    Log.i(TAG, "mt direction=${direction.name} plain=$plain in=\"$text\" out=\"$out\"")
+                }, "onevoice-bench-mt").start()
+            }
+
             "newlog" -> {
                 NpuEngine.current()?.rotateBenchLog()
                 Log.i(TAG, "newlog rotated tagged-fixture log")

@@ -9,14 +9,37 @@
 #             "spoken => display" overrides the display for that one variant.
 #   en        expected English rendering: a glossary for checking MT output
 #   rewrite   yes = replace the spoken form with the display before MT;
+#             guard = keep these phrases as spoken even where a shorter rule
+#             would rewrite them (no bias, no glossary);
 #             no  = bias the decoder only and keep the words as spoken.
 #             Use "no" for native Vietnamese words: rewriting "thun" to "chun"
 #             would also turn "áo thun" into "áo chun".
 #   boost     optional per-token bonus (nats); empty = -PasrBiasBoost
+#   Policy: a term in this list is never left to Marian. Every row is `keep` in
+#   both directions; `translate` exists only as an escape hatch.
+#   mt        keep      = translate this term with `en` (glossary): before Marian
+#                         the term becomes a numeric placeholder, afterwards `en`
+#                         replaces it ("chân vịt" -> "presser foot", not "duck").
+#             translate = let Marian translate it.
+#   vi_mt     the same for English -> Vietnamese: keep = when an English speaker
+#             says an `en` form ("line 5", "presser foot"), the Vietnamese
+#             translation uses `display` ("chuyền 5", "chân vịt"). Extra English
+#             forms go after the first with " | " ("line 5 | line five"); the
+#             first is the one VI->EN writes.
+#             name = keep where the English is capitalised, for a brand that is
+#             also an everyday word: "Brother" stays Brother, "my brother" is
+#             not the term and Marian still says "anh trai".
+#             Parakeet often writes brands in lower case, so a name row adds
+#             context forms with their own Vietnamese:
+#             "brother machine => máy Brother" (these match any case).
+#             translate = let Marian translate it.
+#             The glossary matches the display form for rewrite=yes rows (case-
+#             sensitive when it has a capital, so "thành công" never matches
+#             "Thành Công") and every spoken form for rewrite=no rows.
 #
 # Spoken variants for brands, sizes and loanwords are PROPOSALS. Confirm or
 # replace them from real recordings. After every edit run:
-#   python -X utf8 tools/models/asr-bias/compile_bias_list.py <this.tsv> <bpe.model> [out]
+#   python -X utf8 tools/models/asr-bias/compile_bias_list.py <asr_gipformer_bpe.model> dist/asr-bias/vi-en
 # A variant that tokenizes to <unk>, a one-token variant, two displays for one
 # spoken form or a non-idempotent rewrite fails the compile.
 #
@@ -24,161 +47,207 @@
 # Phương Đông = the East, "may mười" = sew ten) are only matched after
 # "công ty" / "may" so ordinary speech is never rewritten.
 #
-# category	display	spoken	en	rewrite	boost
-size	size XS	sai ích ét | sai ếch ét | cỡ ích ét	size XS	yes
-size	size S	sai ét | sai ếch | sai ét xì | cỡ ét | cỡ ét xì	size S	yes
-size	size M	sai em | sai mờ | sai em mờ | cỡ em | cỡ em mờ	size M	yes
-size	size L	sai lờ | sai eo | sai e lờ | cỡ lờ | cỡ e lờ | cỡ eo	size L	yes
-size	áo size S	áo ét | áo ét xì	size S shirt	yes
-size	quần size S	quần ét | quần ét xì	size S trousers	yes
-size	áo size M	áo em mờ	size M shirt	yes
-size	quần size M	quần em mờ	size M trousers	yes
-size	áo size L	áo lờ | áo e lờ	size L shirt	yes
-size	quần size L	quần lờ | quần e lờ	size L trousers	yes
-size	size XL	sai ích eo | sai ếch eo | sai ích xờ lờ | sai ích xì eo	size XL	yes
-size	size XXL	sai hai ích eo | sai đúp ích eo | sai ích ích eo	size XXL	yes
-size	size 3XL	sai ba ích eo | sai ba ếch eo	size 3XL	yes
-size	size 4XL	sai bốn ích eo | sai bốn ếch eo	size 4XL	yes
-size	free size	phri sai | phờ ri sai | sai phri	free size	yes
-machine_brand	Juki	giu ki | du ki | giu ky	Juki	yes
-machine_brand	Brother	bờ ra đơ | bra đơ | bờ ra đờ	Brother	yes
-machine_brand	Jack	máy giắc | máy dắc => máy Jack	Jack	yes
-machine_brand	Pegasus	pê ga sút | pe ga sớt | pê ga sớt	Pegasus	yes
-machine_brand	Siruba	si ru ba | xi ru ba	Siruba	yes
-machine_brand	Yamato	ya ma tô | da ma tô | gia ma tô	Yamato	yes
-machine_brand	Kansai Special	can sai sờ pê sồ | kan sai sờ pe sồ	Kansai Special	yes
-machine_brand	Typical	típ pi cồ | tí pi can | típ pi cần	Typical	yes
-machine_brand	Zoje	dô giê | dô dê | zô giê	Zoje	yes
-machine_brand	Dürkopp Adler	đơ cốp át lơ | đuốc cốp át lơ	Dürkopp Adler	yes
-machine_brand	Singer	xinh gơ | sinh gơ | xin gơ	Singer	yes
-machine_brand	Gerber	gơ bơ | ghẹc bơ | giơ bơ	Gerber	yes
-machine_brand	Lectra	léc tra | lếch tra	Lectra	yes
-machine_brand	Eastman	ít men | ít sờ men	Eastman	yes
-machine_brand	Tajima	ta di ma | ta gi ma	Tajima	yes
-machine_brand	Barudan	ba ru đan	Barudan	yes
-machine_brand	Hashima	ha si ma | ha xi ma	Hashima	yes
-machine_brand	Mitsubishi	mít su bi si | mít xu bi si	Mitsubishi	yes
-accessory_brand	YKK	oai ca ca | quai ca ca | i ca ca	YKK	yes
-accessory_brand	kim Organ	kim o gan | kim óc gan | kim oóc gan	Organ needle	yes
-accessory_brand	kim Schmetz	kim sờ mét | kim smét	Schmetz needle	yes
-accessory_brand	chỉ Coats	chỉ cốt | chỉ cô	Coats thread	yes
-customer_brand	Nike	nai ki | nai kì	Nike	yes
-customer_brand	Adidas	a đi đát | a đi đas | a đi đa	Adidas	yes
-customer_brand	Uniqlo	iu ni clô | u ni clô | du ni clô	Uniqlo	yes
-customer_brand	Zara	da ra | gia ra	Zara	yes
-customer_brand	H&M	hát en em | ếch en em | hát và em	H&M	yes
-customer_brand	Puma	pu ma	Puma	yes
-customer_brand	Decathlon	đê cát lông | đề các lông | đê cát lon	Decathlon	yes
-customer_brand	Levi's	li vai | lê vi | li vai sờ	Levi's	yes
-customer_brand	Gap	hãng gáp => hãng Gap | nhãn gáp => nhãn Gap	Gap	yes
-customer_brand	Under Armour	an đơ a mơ | ăn đơ a mơ	Under Armour	yes
-customer_brand	The North Face	nót phây | đờ nót phây | nờ nót phây	The North Face	yes
-customer_brand	Columbia	cô lôm bi a | cô lum bi a	Columbia	yes
-customer_brand	Lululemon	lu lu lê mông | lu lu le mon	Lululemon	yes
-customer_brand	Tommy Hilfiger	tôm mi hin phi gơ | tom mi hin phi gơ	Tommy Hilfiger	yes
-customer_brand	Calvin Klein	can vin can | can vin clai	Calvin Klein	yes
-customer_brand	Ralph Lauren	ráp lo ren | ran lo ren	Ralph Lauren	yes
-customer_brand	Fila	phi la	Fila	yes
-customer_brand	New Balance	niu ba lăng | niu ba lần	New Balance	yes
-company	Vinatex	vi na tếch | vi na tét	Vinatex	yes
-company	May 10	công ty may mười => công ty May 10 | ga cô mười => Garco 10	Garment 10	yes
-company	Việt Tiến	công ty việt tiến => công ty Việt Tiến | may việt tiến => may Việt Tiến	Viet Tien	yes
-company	Nhà Bè	công ty nhà bè => công ty Nhà Bè | may nhà bè => may Nhà Bè	Nha Be	yes
-company	Phong Phú	công ty phong phú => công ty Phong Phú | dệt phong phú => dệt Phong Phú	Phong Phu	yes
-company	Thành Công	công ty thành công => công ty Thành Công | dệt may thành công => dệt may Thành Công	Thanh Cong	yes
-company	Hòa Thọ	công ty hòa thọ => công ty Hòa Thọ | may hòa thọ => may Hòa Thọ	Hoa Tho	yes
-company	TNG	tê en giê | tê nờ gờ	TNG	yes
-company	Phương Đông	công ty phương đông => công ty Phương Đông | may phương đông => may Phương Đông	Phuong Dong	yes
-company	An Phước	công ty an phước => công ty An Phước | may an phước => may An Phước	An Phuoc	yes
-company	Pou Yuen	pu diên | pu yên	Pou Yuen	yes
-company	Hansae	han se | hăn se	Hansae	yes
-company	Youngone	dăng oan | giăng oan	Youngone	yes
-machine	máy may một kim	máy may một kim | máy một kim	single-needle lockstitch machine	no
-machine	máy hai kim	máy hai kim | máy may hai kim	double-needle machine	no
-machine	máy vắt sổ	máy vắt sổ	overlock machine	no
-machine	máy kansai	máy can sai | máy kan sai	multi-needle chainstitch machine	yes
-machine	máy trần đè	máy trần đè	coverstitch machine	no
-machine	máy đính nút	máy đính nút | máy đính cúc	button sewing machine	no
-machine	máy thùa khuy	máy thùa khuy | máy thùa khuyết | máy làm khuy	buttonhole machine	no
-machine	máy đính bọ	máy đính bọ	bartack machine	no
-machine	máy zic zắc	máy zic zắc | máy dích dắc	zigzag machine	no
-machine	máy viền	máy cuốn viền	binding machine	no
-machine	máy lập trình	máy may lập trình	programmable pattern sewer	no
-machine	máy thêu	máy thêu vi tính	embroidery machine	no
-machine	máy cắt vòng	máy cắt vòng | máy cắt băng	band knife cutter	no
-machine	máy cắt tay	máy cắt tay | máy cắt đẩy tay | máy cắt đứng	straight knife cutter	no
-machine	máy cắt CNC	máy cắt tự động | máy cắt xê en xê	automatic cutter	no
-machine	máy trải vải	máy trải vải	fabric spreading machine	no
-machine	máy ép keo	máy ép keo | máy ép mếch	fusing machine	no
-machine	máy ép nhiệt	máy ép nhiệt | máy ép chuyển nhiệt	heat press	no
-machine	máy dò kim	máy dò kim | máy rà kim	needle detector	no
-machine	bàn ủi hơi	bàn ủi hơi | bàn là hơi	steam iron	no
-machine	bàn hút chân không	bàn hút chân không	vacuum ironing table	no
-machine	nồi hơi	nồi hơi | lò hơi	boiler	no
-part	chân vịt	chân vịt	presser foot	no
-part	răng cưa	răng cưa | bàn lừa	feed dog	no
-part	mặt nguyệt	mặt nguyệt	needle plate	no
-part	ổ chao	ổ chao | ổ móc	rotary hook	no
-part	thuyền	vỏ thuyền | cái thoi	bobbin case	no
-part	suốt chỉ	suốt chỉ	bobbin	no
-part	trụ kim	trụ kim	needle bar	no
-part	cữ	cữ may | cữ gấp	sewing guide	no
-part	dao xén	dao xén | dao cắt chỉ	trimming knife	no
-part	mô tơ	mô tơ | mô tơ xẹc vô	motor	no
-part	bàn đạp	bàn đạp	pedal	no
-part	kim may	kim may	sewing needle	no
-accessory	dây kéo	dây kéo | khóa kéo	zipper	no
-accessory	dây kéo	phẹc mơ tuya	zipper	yes
-accessory	đầu khóa	đầu khóa | con chạy | đầu kéo	zipper slider	no
-accessory	cúc áo	cúc áo | nút áo	button	no
-accessory	nút bấm	nút bấm | nút đóng | cúc bấm	snap button	no
-accessory	ô zê	ô zê | ô dê | khoen	eyelet	no
-accessory	nhãn chính	nhãn chính | nhãn dệt	main label	no
-accessory	nhãn size	nhãn sai	size label	yes
-accessory	nhãn giặt	nhãn giặt | nhãn hướng dẫn giặt	care label	no
-accessory	thẻ bài	thẻ bài	hangtag	no
-accessory	thẻ bài	hăng tác	hangtag	yes
-accessory	dây chun	dây chun | dây thun	elastic	no
-accessory	dây viền	dây viền | viền xéo	binding tape	no
-accessory	mếch	mếch | keo dựng | keo mếch	fusible interlining	no
-accessory	băng gai	băng gai | gai dính	hook and loop tape	no
-accessory	băng gai	ve cờ rô	hook and loop tape	yes
-accessory	chỉ may	chỉ may	sewing thread	no
-accessory	dây luồn	dây luồn | dây rút	drawcord	no
-accessory	túi PE	túi pê e	poly bag	yes
-accessory	thùng carton	thùng các tông | thùng cát tông	carton	yes
-accessory	gói hút ẩm	gói hút ẩm | gói chống ẩm	desiccant pack	no
-fabric	cotton	cốt tông | cô tông	cotton	yes
-fabric	polyester	pô ly ét te | pô li ét te	polyester	yes
-fabric	spandex	sờ pan đếch | span đếch	spandex	yes
-fabric	kaki	ka ki	khaki	yes
-fabric	vải jean	vải gin | vải din	denim	yes
-fabric	quần jean	quần gin | quần din	jeans	yes
-fabric	linen	li nen	linen	yes
-fabric	vải thun	vải thun | thun cá sấu | thun lạnh	knit fabric	no
-fabric	vải nỉ	vải nỉ	fleece	no
-fabric	vải lót	vải lót	lining	no
-fabric	vải dù	vải dù	nylon taffeta	no
-fabric	vải lanh	vải lanh	linen	no
-process	QC	qui xi | kiu xi | ki xi	QC	yes
-process	KCS	ca xê ét | ca xê ếch	quality inspection	yes
-process	AQL	a qui eo | ây kiu eo | a kiu eo	AQL	yes
-process	PO	pi ô | pê ô	PO	yes
-process	mã hàng	mã hàng	style number	no
-process	đơn hàng	đơn hàng	order	no
-process	rập	rập giấy | rập cứng | bộ rập	pattern	no
-process	sơ đồ	sơ đồ cắt	marker	no
-process	bán thành phẩm	bán thành phẩm	work in progress	no
-process	chuyền	chuyền may	sewing line	no
-process	chuyền trưởng	chuyền trưởng	line leader	no
-process	tổ trưởng	tổ trưởng	team leader	no
-process	mẫu đối	mẫu đối | mẫu duyệt | mẫu chuẩn	approved sample	no
-process	hàng lỗi	hàng lỗi	defective goods	no
-process	đường may	đường may	seam	no
-process	mật độ mũi	mật độ mũi | mật độ mũi chỉ	stitch density	no
-process	nhảy mũi	nhảy mũi | bỏ mũi	skipped stitch	no
-process	đứt chỉ	đứt chỉ	thread breakage	no
-process	bung chỉ	bung chỉ | sổ chỉ | bung đường may	open seam	no
-process	inline	in lai	inline inspection	yes
-process	endline	en lai | en đờ lai	end-of-line inspection	yes
-process	xuất hàng	xuất hàng	shipment	no
+# category	display	spoken	en	rewrite	boost	mt	vi_mt
+size	size XS	sai ích ét | sai ếch ét | cỡ ích ét	size XS	yes		keep	keep
+size	size S	sai ét | sai ếch | sai ét xì | cỡ ét | cỡ ét xì	size S	yes		keep	keep
+size	size M	sai em | sai mờ | sai em mờ | cỡ em | cỡ em mờ	size M	yes		keep	keep
+size	size L	sai lờ | sai eo | sai e lờ | cỡ lờ | cỡ e lờ | cỡ eo	size L	yes		keep	keep
+size	áo size S	áo ét | áo ét xì	size S shirt	yes		keep	keep
+size	quần size S	quần ét | quần ét xì	size S trousers	yes		keep	keep
+size	áo size M	áo em mờ	size M shirt	yes		keep	keep
+size	quần size M	quần em mờ	size M trousers	yes		keep	keep
+size	áo size L	áo lờ | áo e lờ	size L shirt	yes		keep	keep
+size	quần size L	quần lờ | quần e lờ	size L trousers	yes		keep	keep
+size	size XL	sai ích eo | sai ếch eo | sai ích xờ lờ | sai ích xì eo	size XL	yes		keep	keep
+size	size XXL	sai hai ích eo | sai đúp ích eo | sai ích ích eo	size XXL	yes		keep	keep
+size	size 3XL	sai ba ích eo | sai ba ếch eo	size 3XL	yes		keep	keep
+size	size 4XL	sai bốn ích eo | sai bốn ếch eo	size 4XL	yes		keep	keep
+size	free size	phri sai | phờ ri sai | sai phri	free size	yes		keep	keep
+machine_brand	Juki	giu ki | du ki | giu ky	Juki	yes		keep	keep
+machine_brand	Brother	bờ ra đơ | bra đơ | bờ ra đờ	Brother | brother machine => máy Brother | brother sewing machine => máy may Brother	yes		keep	name
+machine_brand	Jack	máy giắc | máy dắc => máy Jack	Jack | jack machine => máy Jack | jack sewing machine => máy may Jack	yes		keep	name
+machine_brand	Pegasus	pê ga sút | pe ga sớt | pê ga sớt	Pegasus	yes		keep	keep
+machine_brand	Siruba	si ru ba | xi ru ba	Siruba	yes		keep	keep
+machine_brand	Yamato	ya ma tô | da ma tô | gia ma tô	Yamato	yes		keep	keep
+machine_brand	Kansai Special	can sai sờ pê sồ | kan sai sờ pe sồ	Kansai Special	yes		keep	keep
+machine_brand	Typical	típ pi cồ | tí pi can | típ pi cần	Typical | typical machine => máy Typical | typical sewing machine => máy may Typical	yes		keep	name
+machine_brand	Zoje	dô giê | dô dê | zô giê	Zoje	yes		keep	keep
+machine_brand	Dürkopp Adler	đơ cốp át lơ | đuốc cốp át lơ	Dürkopp Adler	yes		keep	keep
+machine_brand	Singer	xinh gơ | sinh gơ | xin gơ	Singer | singer machine => máy Singer | singer sewing machine => máy may Singer	yes		keep	name
+machine_brand	Gerber	gơ bơ | ghẹc bơ | giơ bơ	Gerber	yes		keep	keep
+machine_brand	Lectra	léc tra | lếch tra	Lectra	yes		keep	keep
+machine_brand	Eastman	ít men | ít sờ men	Eastman	yes		keep	keep
+machine_brand	Tajima	ta di ma | ta gi ma	Tajima	yes		keep	keep
+machine_brand	Barudan	ba ru đan	Barudan	yes		keep	keep
+machine_brand	Hashima	ha si ma | ha xi ma	Hashima	yes		keep	keep
+machine_brand	Mitsubishi	mít su bi si | mít xu bi si	Mitsubishi	yes		keep	keep
+accessory_brand	YKK	oai ca ca | quai ca ca | i ca ca	YKK	yes		keep	keep
+accessory_brand	kim Organ	kim o gan | kim óc gan | kim oóc gan	Organ needle	yes		keep	keep
+accessory_brand	kim Schmetz	kim sờ mét | kim smét	Schmetz needle	yes		keep	keep
+accessory_brand	chỉ Coats	chỉ cốt | chỉ cô	Coats thread	yes		keep	keep
+customer_brand	Nike	nai ki | nai kì | nai kỳ | nai kí	Nike	yes		keep	keep
+customer_brand	Adidas	a đi đát | a đi đas | a đi đa	Adidas	yes		keep	keep
+customer_brand	Uniqlo	iu ni clô | u ni clô | du ni clô	Uniqlo	yes		keep	keep
+customer_brand	Zara	da ra | gia ra	Zara	yes		keep	keep
+customer_brand	H&M	hát en em | ếch en em | hát và em	H&M	yes		keep	keep
+customer_brand	Puma	pu ma	Puma	yes		keep	name
+customer_brand	Decathlon	đê cát lông | đề các lông | đê cát lon	Decathlon	yes		keep	keep
+customer_brand	Levi's	li vai | lê vi | li vai sờ	Levi's	yes		keep	keep
+customer_brand	Gap	hãng gáp => hãng Gap | nhãn gáp => nhãn Gap	Gap	yes		keep	name
+customer_brand	Under Armour	an đơ a mơ | ăn đơ a mơ	Under Armour	yes		keep	keep
+customer_brand	The North Face	nót phây | đờ nót phây | nờ nót phây	The North Face	yes		keep	keep
+customer_brand	Columbia	cô lôm bi a | cô lum bi a	Columbia	yes		keep	name
+customer_brand	Lululemon	lu lu lê mông | lu lu le mon	Lululemon	yes		keep	keep
+customer_brand	Tommy Hilfiger	tôm mi hin phi gơ | tom mi hin phi gơ	Tommy Hilfiger	yes		keep	keep
+customer_brand	Calvin Klein	can vin can | can vin clai	Calvin Klein	yes		keep	keep
+customer_brand	Ralph Lauren	ráp lo ren | ran lo ren	Ralph Lauren	yes		keep	keep
+customer_brand	Fila	phi la	Fila	yes		keep	keep
+customer_brand	New Balance	niu ba lăng | niu ba lần	New Balance	yes		keep	keep
+company	Vinatex	vi na tếch | vi na tét	Vinatex	yes		keep	keep
+company	May 10	công ty may mười => công ty May 10 | ga cô mười => Garco 10	May 10	yes		keep	name
+company	Việt Tiến	công ty việt tiến => công ty Việt Tiến | may việt tiến => may Việt Tiến	Viet Tien	yes		keep	keep
+company	Nhà Bè	công ty nhà bè => công ty Nhà Bè | may nhà bè => may Nhà Bè	Nha Be	yes		keep	keep
+company	Phong Phú	công ty phong phú => công ty Phong Phú | dệt phong phú => dệt Phong Phú	Phong Phu	yes		keep	keep
+company	Thành Công	công ty thành công => công ty Thành Công | dệt may thành công => dệt may Thành Công	Thanh Cong	yes		keep	keep
+company	Hòa Thọ	công ty hòa thọ => công ty Hòa Thọ | may hòa thọ => may Hòa Thọ	Hoa Tho	yes		keep	keep
+company	TNG	tê en giê | tê nờ gờ	TNG	yes		keep	keep
+company	Phương Đông	công ty phương đông => công ty Phương Đông | may phương đông => may Phương Đông	Phuong Dong	yes		keep	keep
+company	An Phước	công ty an phước => công ty An Phước | may an phước => may An Phước	An Phuoc	yes		keep	keep
+company	Pou Yuen	pu diên | pu yên	Pou Yuen	yes		keep	keep
+company	Hansae	han se | hăn se	Hansae	yes		keep	keep
+company	Youngone	dăng oan | giăng oan	Youngone	yes		keep	keep
+machine	máy may một kim	máy may một kim | máy một kim	single-needle lockstitch machine	no		keep	keep
+machine	máy hai kim	máy hai kim | máy may hai kim	double-needle machine	no		keep	keep
+machine	máy vắt sổ	máy vắt sổ	overlock machine	no		keep	keep
+machine	máy kansai	máy can sai | máy kan sai	multi-needle chainstitch machine	yes		keep	keep
+machine	máy trần đè	máy trần đè	coverstitch machine	no		keep	keep
+machine	máy đính nút	máy đính nút | máy đính cúc	button sewing machine	no		keep	keep
+machine	máy thùa khuy	máy thùa khuy | máy thùa khuyết | máy làm khuy	buttonhole machine	no		keep	keep
+machine	máy đính bọ	máy đính bọ	bartack machine	no		keep	keep
+machine	máy zic zắc	máy zic zắc | máy dích dắc	zigzag machine	no		keep	keep
+machine	máy viền	máy cuốn viền	binding machine	no		keep	keep
+machine	máy lập trình	máy may lập trình	programmable pattern sewer	no		keep	keep
+machine	máy thêu	máy thêu vi tính	embroidery machine	no		keep	keep
+machine	máy cắt vòng	máy cắt vòng | máy cắt băng	band knife cutter	no		keep	keep
+machine	máy cắt tay	máy cắt tay | máy cắt đẩy tay | máy cắt đứng	straight knife cutter	no		keep	keep
+machine	máy cắt CNC	máy cắt tự động | máy cắt xê en xê	automatic cutter	no		keep	keep
+machine	máy trải vải	máy trải vải	fabric spreading machine	no		keep	keep
+machine	máy ép keo	máy ép keo | máy ép mếch	fusing machine	no		keep	keep
+machine	máy ép nhiệt	máy ép nhiệt | máy ép chuyển nhiệt	heat press	no		keep	keep
+machine	máy dò kim	máy dò kim | máy rà kim	needle detector	no		keep	keep
+machine	bàn ủi hơi	bàn ủi hơi | bàn là hơi	steam iron	no		keep	keep
+machine	bàn hút chân không	bàn hút chân không	vacuum ironing table	no		keep	keep
+machine	nồi hơi	nồi hơi | lò hơi	boiler	no		keep	keep
+part	chân vịt	chân vịt	presser foot	no		keep	keep
+part	răng cưa	răng cưa | bàn lừa	feed dog	no		keep	keep
+part	mặt nguyệt	mặt nguyệt	needle plate	no		keep	keep
+part	ổ chao	ổ chao | ổ móc	rotary hook	no		keep	keep
+part	thuyền	vỏ thuyền | cái thoi	bobbin case	no		keep	keep
+part	suốt chỉ	suốt chỉ	bobbin	no		keep	keep
+part	trụ kim	trụ kim	needle bar	no		keep	keep
+part	cữ	cữ may | cữ gấp	sewing guide	no		keep	keep
+part	dao xén	dao xén | dao cắt chỉ	trimming knife	no		keep	keep
+part	mô tơ	mô tơ | mô tơ xẹc vô	motor	no		keep	keep
+part	bàn đạp	bàn đạp	pedal	no		keep	keep
+part	kim may	kim may	sewing needle	no		keep	keep
+accessory	dây kéo	dây kéo | khóa kéo	zipper	no		keep	keep
+accessory	dây kéo	phẹc mơ tuya	zipper	yes		keep	keep
+accessory	đầu khóa	đầu khóa | con chạy | đầu kéo	zipper slider	no		keep	keep
+accessory	cúc áo	cúc áo | nút áo	button	no		keep	keep
+accessory	nút bấm	nút bấm | nút đóng | cúc bấm	snap button	no		keep	keep
+accessory	ô zê	ô zê | ô dê | khoen	eyelet	no		keep	keep
+accessory	nhãn chính	nhãn chính | nhãn dệt	main label	no		keep	keep
+accessory	nhãn size	nhãn sai	size label	yes		keep	keep
+accessory	nhãn giặt	nhãn giặt | nhãn hướng dẫn giặt	care label	no		keep	keep
+accessory	thẻ bài	thẻ bài	hangtag	no		keep	keep
+accessory	thẻ bài	hăng tác	hangtag	yes		keep	keep
+accessory	dây chun	dây chun | dây thun	elastic	no		keep	keep
+accessory	dây viền	dây viền | viền xéo	binding tape	no		keep	keep
+accessory	mếch	mếch | keo dựng | keo mếch	fusible interlining	no		keep	keep
+accessory	băng gai	băng gai | gai dính	hook and loop tape	no		keep	keep
+accessory	băng gai	ve cờ rô	hook and loop tape	yes		keep	keep
+accessory	chỉ may	chỉ may	sewing thread	no		keep	keep
+accessory	dây luồn	dây luồn | dây rút	drawcord	no		keep	keep
+accessory	túi PE	túi pê e	poly bag	yes		keep	keep
+accessory	thùng carton	thùng các tông | thùng cát tông	carton	yes		keep	keep
+accessory	gói hút ẩm	gói hút ẩm | gói chống ẩm	desiccant pack	no		keep	keep
+fabric	cotton	cốt tông | cô tông	cotton	yes		keep	keep
+fabric	polyester	pô ly ét te | pô li ét te	polyester	yes		keep	keep
+fabric	spandex	sờ pan đếch | span đếch	spandex	yes		keep	keep
+fabric	kaki	ka ki	khaki	yes		keep	keep
+fabric	vải jean	vải gin | vải din	denim	yes		keep	keep
+fabric	quần jean	quần gin | quần din	jeans	yes		keep	keep
+fabric	linen	li nen	linen	yes		keep	keep
+fabric	vải thun	vải thun | thun cá sấu | thun lạnh	knit fabric	no		keep	keep
+fabric	vải nỉ	vải nỉ	fleece	no		keep	keep
+fabric	vải lót	vải lót	lining	no		keep	keep
+fabric	vải dù	vải dù	nylon taffeta	no		keep	keep
+fabric	vải lanh	vải lanh	linen fabric	no		keep	keep
+process	QC	qui xi | kiu xi | ki xi	QC	yes		keep	keep
+process	KCS	ca xê ét | ca xê ếch	quality inspection	yes		keep	keep
+process	AQL	a qui eo | ây kiu eo | a kiu eo	AQL	yes		keep	keep
+process	PO	pi ô | pê ô	PO	yes		keep	keep
+process	mã hàng	mã hàng	style number	no		keep	keep
+process	đơn hàng	đơn hàng	order	no		keep	keep
+process	rập	rập giấy | rập cứng | bộ rập	pattern	no		keep	keep
+process	sơ đồ	sơ đồ cắt	marker	no		keep	keep
+process	bán thành phẩm	bán thành phẩm	work in progress	no		keep	keep
+process	chuyền	chuyền may	sewing line	no		keep	keep
+process	chuyền trưởng	chuyền trưởng	line leader	no		keep	keep
+process	tổ trưởng	tổ trưởng	team leader	no		keep	keep
+process	mẫu đối	mẫu đối | mẫu duyệt | mẫu chuẩn	approved sample	no		keep	keep
+process	hàng lỗi	hàng lỗi	defective goods	no		keep	keep
+process	đường may	đường may	seam	no		keep	keep
+process	mật độ mũi	mật độ mũi | mật độ mũi chỉ	stitch density	no		keep	keep
+process	nhảy mũi	nhảy mũi | bỏ mũi	skipped stitch	no		keep	keep
+process	đứt chỉ	đứt chỉ	thread breakage	no		keep	keep
+process	bung chỉ	bung chỉ | sổ chỉ | bung đường may	open seam	no		keep	keep
+process	inline	in lai	inline inspection	yes		keep	keep
+process	endline	en lai | en đờ lai	end-of-line inspection	yes		keep	keep
+process	xuất hàng	xuất hàng	shipment	no		keep	keep
+
+# Numbered sewing lines and teams. "chuyền năm" is line 5, but "chuyền năm nay"
+# is "the line this year": the guard rows keep those phrases as spoken. Northern
+# speech merges tr/ch, so the ASR often writes "truyền năm"; it is a variant too.
+line_team	chuyền 1	chuyền một | chuyền số một | truyền một	line 1 | line one	yes		keep	keep
+line_team	chuyền 2	chuyền hai | chuyền số hai | truyền hai	line 2 | line two	yes		keep	keep
+line_team	chuyền 3	chuyền ba | chuyền số ba | truyền ba	line 3 | line three	yes		keep	keep
+line_team	chuyền 4	chuyền bốn | chuyền số bốn | truyền bốn	line 4 | line four	yes		keep	keep
+line_team	chuyền 5	chuyền năm | chuyền số năm | truyền năm	line 5 | line five	yes		keep	keep
+line_team	chuyền 6	chuyền sáu | chuyền số sáu | truyền sáu	line 6 | line six	yes		keep	keep
+line_team	chuyền 7	chuyền bảy | chuyền số bảy | truyền bảy	line 7 | line seven	yes		keep	keep
+line_team	chuyền 8	chuyền tám | chuyền số tám | truyền tám	line 8 | line eight	yes		keep	keep
+line_team	chuyền 9	chuyền chín | chuyền số chín | truyền chín	line 9 | line nine	yes		keep	keep
+line_team	chuyền 10	chuyền mười | chuyền số mười | truyền mười	line 10 | line ten	yes		keep	keep
+line_team	chuyền 11	chuyền mười một | chuyền số mười một | truyền mười một	line 11 | line eleven	yes		keep	keep
+line_team	chuyền 12	chuyền mười hai | chuyền số mười hai | truyền mười hai	line 12 | line twelve	yes		keep	keep
+line_team	chuyền 13	chuyền mười ba | chuyền số mười ba | truyền mười ba	line 13 | line thirteen	yes		keep	keep
+line_team	chuyền 14	chuyền mười bốn | chuyền số mười bốn | truyền mười bốn	line 14 | line fourteen	yes		keep	keep
+line_team	chuyền 15	chuyền mười lăm | chuyền số mười lăm | truyền mười lăm	line 15 | line fifteen	yes		keep	keep
+line_team	chuyền 16	chuyền mười sáu | chuyền số mười sáu | truyền mười sáu	line 16 | line sixteen	yes		keep	keep
+line_team	chuyền 17	chuyền mười bảy | chuyền số mười bảy | truyền mười bảy	line 17 | line seventeen	yes		keep	keep
+line_team	chuyền 18	chuyền mười tám | chuyền số mười tám | truyền mười tám	line 18 | line eighteen	yes		keep	keep
+line_team	chuyền 19	chuyền mười chín | chuyền số mười chín | truyền mười chín	line 19 | line nineteen	yes		keep	keep
+line_team	chuyền 20	chuyền hai mươi | chuyền số hai mươi | truyền hai mươi	line 20 | line twenty	yes		keep	keep
+line_team	chuyền năm (guard)	chuyền năm nay | chuyền năm ngoái | chuyền năm sau | chuyền năm trước | chuyền năm tới | chuyền năm rồi | truyền năm nay | truyền năm ngoái | truyền năm sau | truyền năm trước | truyền năm tới | truyền năm rồi		guard		translate	translate
+line_team	tổ 1	tổ một | tổ số một	team 1 | team one	yes		keep	keep
+line_team	tổ 2	tổ hai | tổ số hai	team 2 | team two	yes		keep	keep
+line_team	tổ 3	tổ ba | tổ số ba	team 3 | team three	yes		keep	keep
+line_team	tổ 4	tổ bốn | tổ số bốn	team 4 | team four	yes		keep	keep
+line_team	tổ 5	tổ năm | tổ số năm	team 5 | team five	yes		keep	keep
+line_team	tổ 6	tổ sáu | tổ số sáu	team 6 | team six	yes		keep	keep
+line_team	tổ 7	tổ bảy | tổ số bảy	team 7 | team seven	yes		keep	keep
+line_team	tổ 8	tổ tám | tổ số tám	team 8 | team eight	yes		keep	keep
+line_team	tổ 9	tổ chín | tổ số chín	team 9 | team nine	yes		keep	keep
+line_team	tổ 10	tổ mười | tổ số mười	team 10 | team ten	yes		keep	keep
+line_team	tổ 11	tổ mười một | tổ số mười một	team 11 | team eleven	yes		keep	keep
+line_team	tổ 12	tổ mười hai | tổ số mười hai	team 12 | team twelve	yes		keep	keep
+line_team	tổ 13	tổ mười ba | tổ số mười ba	team 13 | team thirteen	yes		keep	keep
+line_team	tổ 14	tổ mười bốn | tổ số mười bốn	team 14 | team fourteen	yes		keep	keep
+line_team	tổ 15	tổ mười lăm | tổ số mười lăm	team 15 | team fifteen	yes		keep	keep
+line_team	tổ 16	tổ mười sáu | tổ số mười sáu	team 16 | team sixteen	yes		keep	keep
+line_team	tổ 17	tổ mười bảy | tổ số mười bảy	team 17 | team seventeen	yes		keep	keep
+line_team	tổ 18	tổ mười tám | tổ số mười tám	team 18 | team eighteen	yes		keep	keep
+line_team	tổ 19	tổ mười chín | tổ số mười chín	team 19 | team nineteen	yes		keep	keep
+line_team	tổ 20	tổ hai mươi | tổ số hai mươi	team 20 | team twenty	yes		keep	keep
+line_team	tổ năm (guard)	tổ năm nay | tổ năm ngoái | tổ năm sau | tổ năm trước | tổ năm tới | tổ năm rồi		guard		translate	translate

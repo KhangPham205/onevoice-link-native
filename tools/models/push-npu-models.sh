@@ -414,7 +414,7 @@ emit_tree_checksums() {
     relative="${local_file#"$source_root/"}"
     case "$relative" in
       *$'\n'*|*\\*)
-        echo "unsupported eSpeak path: $relative" >&2
+        echo "unsupported path in a staged tree: $relative" >&2
         return 1
         ;;
     esac
@@ -424,26 +424,28 @@ emit_tree_checksums() {
   done < <(find "$source_root" -type f -print0)
 }
 
-stage_espeak() {
-  local direction="$1"
-  local final="$ROOT/$direction/espeak-ng-data"
+# Publishes the local directory $1 as filesDir-relative $2, whole: a verified
+# copy replaces the old tree atomically, so a file removed locally goes too.
+stage_tree() {
+  local src="$1"
+  local rel="$2"
+  local final="$ROOT/$rel"
   local part="$final.part"
   local previous="$final.previous"
 
-  if emit_tree_checksums "$ESPEAK_SRC" "$final" |
+  if emit_tree_checksums "$src" "$final" |
       adb_cmd shell -T run-as "$PKG" sha256sum -c - \
         >/dev/null 2>&1; then
-    printf '  = %-36s verified tree sha256\n' "$direction/espeak-ng-data"
+    printf '  = %-36s verified tree sha256\n' "$rel"
     return
   fi
 
-  printf '  → %-36s streaming + full SHA-256 verification\n' \
-    "$direction/espeak-ng-data"
+  printf '  → %-36s streaming + full SHA-256 verification\n' "$rel"
   adb_cmd shell run-as "$PKG" rm -rf "$part" "$previous" </dev/null
   adb_cmd shell run-as "$PKG" mkdir -p "$part" </dev/null
-  tar -C "$ESPEAK_SRC" -cf - . |
+  tar -C "$src" -cf - . |
     adb_cmd shell -T run-as "$PKG" tar -C "$part" -xf -
-  emit_tree_checksums "$ESPEAK_SRC" "$part" |
+  emit_tree_checksums "$src" "$part" |
     adb_cmd shell -T run-as "$PKG" sha256sum -c - >/dev/null
 
   # Publish only a fully verified tree. Renames remain inside filesDir's /data
@@ -455,18 +457,30 @@ stage_espeak() {
     if adb_cmd shell run-as "$PKG" test -d "$previous" </dev/null; then
       adb_cmd shell run-as "$PKG" mv "$previous" "$final" </dev/null
     fi
-    echo "!! failed to publish $direction/espeak-ng-data" >&2
+    echo "!! failed to publish $rel" >&2
     exit 1
   fi
   adb_cmd shell run-as "$PKG" rm -rf "$previous" </dev/null
-  emit_tree_checksums "$ESPEAK_SRC" "$final" |
+  emit_tree_checksums "$src" "$final" |
     adb_cmd shell -T run-as "$PKG" sha256sum -c - >/dev/null
 }
 
 for direction in "${espeak_directions[@]}"; do
-  ESPEAK_SRC="$(espeak_src "$direction")"
-  stage_espeak "$direction"
+  stage_tree "$(espeak_src "$direction")" "$direction/espeak-ng-data"
 done
+
+# VI ASR term libraries, one compiled file per workplace ("Xưởng may", ...),
+# from `compile_bias_list.py <asr_gipformer_bpe.model> dist/asr-bias/vi-en`.
+# Optional: without them the Dashboard offers no library and VI ASR decodes
+# greedily. BIAS_SRC overrides the folder.
+BIAS_SRC="${BIAS_SRC:-$REPO/dist/asr-bias/vi-en}"
+if [ "$STAGE_VI" -ne 0 ]; then
+  if compgen -G "$BIAS_SRC/*.txt" >/dev/null; then
+    stage_tree "$BIAS_SRC" "vi-en/asr_gipformer_bias"
+  else
+    echo "  - no term libraries in $BIAS_SRC (compile with tools/models/asr-bias/compile_bias_list.py)"
+  fi
+fi
 
 echo
 echo "pushed=$pushed skipped=$skipped"

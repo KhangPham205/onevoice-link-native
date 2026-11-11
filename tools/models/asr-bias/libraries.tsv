@@ -1,0 +1,3 @@
+# id	display name (shown in the app)	source TSV (this folder)
+# id: lowercase a-z, 0-9, _ ; it names the compiled file and the saved choice.
+xuong_may	Xưởng may	garment_vi.tsv

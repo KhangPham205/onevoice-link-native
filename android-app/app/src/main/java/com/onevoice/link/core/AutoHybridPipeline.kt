@@ -81,6 +81,16 @@ internal class AutoHybridPipeline private constructor(
         internal fun asrArtifactPrefix(stage: StageSpec): String =
             File(stage.file).name.removeSuffix(".bin").removeSuffix("_encoder").removeSuffix("_ctc")
 
+        /**
+         * Where the VI ASR term libraries are staged:
+         * `vi-en/asr_gipformer_bias/` for the GIPFormer encoder.
+         */
+        fun viAsrBiasDirectory(modelRoot: File, manifest: NpuManifest): File? {
+            val asr = manifest.directions.firstOrNull { it.id == "vi-en" }
+                ?.stages?.firstOrNull { it.stage == "asr" } ?: return null
+            return AsrBiasLibraries.directory(File(modelRoot, "vi-en"), asrArtifactPrefix(asr))
+        }
+
         fun load(
             modelRoot: File,
             manifest: NpuManifest,
@@ -345,6 +355,9 @@ internal class AutoHybridPipeline private constructor(
         ExecutionPath.CPU_FALLBACK -> MtOutput(cpuFallback(direction).translate(text).trim(), 0, false)
     }
 
+    override fun displaySource(text: String, direction: TranslationDirection): String =
+        branch(direction).rewriteSource(text)
+
     override fun sourceTokens(text: String, direction: TranslationDirection): Int =
         branch(direction).mtSourceTokens(text)
 
@@ -436,7 +449,8 @@ internal class AutoHybridPipeline private constructor(
                 val mtStarted = System.nanoTime()
                 val translation = branch(direction).translate(transcript).trim()
                 return HybridTextResult(
-                    transcript = transcript,
+                    // Shown as Marian read it: terms rewritten, VI punctuated.
+                    transcript = branch(direction).rewriteSource(transcript),
                     translation = translation,
                     executionPath = ExecutionPath.HYBRID_NPU,
                     asrMs = primaryAsrMs,
@@ -497,9 +511,22 @@ internal class AutoHybridPipeline private constructor(
     internal fun translateForSmoke(text: String, direction: TranslationDirection): String =
         branch(direction).translate(text)
 
+    /** Text-only MT for the bench `mt` command; [plain] skips the term glossary. */
+    internal fun translateForBench(text: String, direction: TranslationDirection, plain: Boolean): String =
+        if (plain) branch(direction).translatePlain(text) else branch(direction).translate(text)
+
     private fun branch(direction: TranslationDirection): NpuPipeline = when (direction) {
         TranslationDirection.VI_TO_EN -> viToEn
         TranslationDirection.EN_TO_VI -> enToVi
+    }
+
+    /** Term library for the Vietnamese ASR branch; null = greedy, no bias. */
+    fun selectAsrBias(library: AsrBiasLibrary?) {
+        val list = viToEn.selectAsrBias(library)
+        // One library serves both directions: its English->Vietnamese terms
+        // translate what an English speaker says ("line 5" -> "chuyền 5").
+        enToVi.targetGlossary = list?.reverseGlossary?.takeIf { it.size > 0 }
+        Log.i(TAG, "EN->VI glossary terms=${enToVi.targetGlossary?.size ?: 0}")
     }
 
     override fun close() {

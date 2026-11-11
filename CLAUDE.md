@@ -98,6 +98,13 @@ Gradle properties that change runtime behavior:
                                        # Auto/Phone/Bluetooth selector). All but DASHBOARD play to a
                                        # connected A2DP headset, else the loudspeaker
 -PdropFillerWords=true                 # skip units of only "ừ"/"à"/"uh" and cut leading ones (FillerWords)
+-PasrBias=true -PasrBiasBeam=4 -PasrBiasBoost=1.5
+                                       # Dashboard "Term library" for VI ASR (e.g. Xưởng may, the default):
+                                       # libraries from tools/models/asr-bias/ (libraries.tsv + one TSV each),
+                                       # compiled to dist/asr-bias/vi-en and staged by push-npu-models.sh to
+                                       # vi-en/asr_gipformer_bias/. "Off" or false = greedy RNN-T as before
+-PviPunctuation=true                   # rule-based commas/full stops/question marks on the VI transcript
+                                       # before Marian and on screen (VietnamesePunctuation); false = raw text
 -PviTtsEngine=VIENEU                   # Vietnamese speech: VIENEU (VieNeu-TTS v3 Nano, default), KOKORO or
                                        # SUPERTONIC (Supertonic-3 int8). VIENEU needs build-sea-g2p-android.sh
                                        # (libsea_g2p_rs.so; the jniLibs merge refuses without it) and

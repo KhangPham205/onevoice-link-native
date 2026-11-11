@@ -84,6 +84,11 @@ val dropFillerWords = providers.gradleProperty("dropFillerWords").orElse("true")
 val asrBias = providers.gradleProperty("asrBias").orElse("false").get().also {
     require(it == "true" || it == "false") { "asrBias must be true or false (got '$it')" }
 }.toBoolean()
+// Rule-based punctuation of the VI transcript before MT and on screen
+// (VietnamesePunctuation.kt). Off = the raw lower-case transcript, as before.
+val viPunctuation = providers.gradleProperty("viPunctuation").orElse("false").get().also {
+    require(it == "true" || it == "false") { "viPunctuation must be true or false (got '$it')" }
+}.toBoolean()
 val asrBiasBeam = providers.gradleProperty("asrBiasBeam").orElse("4").get().toIntOrNull()
     ?.takeIf { it in 1..16 }
     ?: error("asrBiasBeam must be an integer in 1..16")
@@ -283,6 +288,7 @@ android {
         buildConfigField("String", "AUDIO_INPUT", "\"$audioInput\"")
         buildConfigField("boolean", "DROP_FILLER_WORDS", dropFillerWords.toString())
         buildConfigField("boolean", "ASR_BIAS", asrBias.toString())
+        buildConfigField("boolean", "VI_PUNCTUATION", viPunctuation.toString())
         buildConfigField("int", "ASR_BIAS_BEAM", asrBiasBeam.toString())
         buildConfigField("double", "ASR_BIAS_BOOST", asrBiasBoost.toString())
         buildConfigField("String", "VI_TTS_ENGINE", "\"$viTtsEngine\"")
