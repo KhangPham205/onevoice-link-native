@@ -89,6 +89,15 @@ val asrBias = providers.gradleProperty("asrBias").orElse("false").get().also {
 val viPunctuation = providers.gradleProperty("viPunctuation").orElse("false").get().also {
     require(it == "true" || it == "false") { "viPunctuation must be true or false (got '$it')" }
 }.toBoolean()
+// Comma at a speaker pause of at least this many ms in the VI transcript
+// (PauseCommas.kt); 0 = off.
+val viPauseCommaMs = providers.gradleProperty("viPauseCommaMs").orElse("0").get().toIntOrNull()
+    ?.takeIf { it in 0..2000 }
+    ?: error("viPauseCommaMs must be an integer in 0..2000")
+// A pause at least this long ends a sentence ("." or "?") instead; 0 = never.
+val viPauseSentenceMs = providers.gradleProperty("viPauseSentenceMs").orElse("0").get().toIntOrNull()
+    ?.takeIf { it in 0..5000 }
+    ?: error("viPauseSentenceMs must be an integer in 0..5000")
 val asrBiasBeam = providers.gradleProperty("asrBiasBeam").orElse("4").get().toIntOrNull()
     ?.takeIf { it in 1..16 }
     ?: error("asrBiasBeam must be an integer in 1..16")
@@ -289,6 +298,8 @@ android {
         buildConfigField("boolean", "DROP_FILLER_WORDS", dropFillerWords.toString())
         buildConfigField("boolean", "ASR_BIAS", asrBias.toString())
         buildConfigField("boolean", "VI_PUNCTUATION", viPunctuation.toString())
+        buildConfigField("int", "VI_PAUSE_COMMA_MS", viPauseCommaMs.toString())
+        buildConfigField("int", "VI_PAUSE_SENTENCE_MS", viPauseSentenceMs.toString())
         buildConfigField("int", "ASR_BIAS_BEAM", asrBiasBeam.toString())
         buildConfigField("double", "ASR_BIAS_BOOST", asrBiasBoost.toString())
         buildConfigField("String", "VI_TTS_ENGINE", "\"$viTtsEngine\"")

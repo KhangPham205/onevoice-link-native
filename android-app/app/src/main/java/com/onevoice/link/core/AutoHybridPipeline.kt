@@ -178,7 +178,7 @@ internal class AutoHybridPipeline private constructor(
         val text = translateSelected(
             samples = samples,
             direction = direction,
-            transcript = checkNotNull(routed.hypothesis).transcript,
+            transcript = withPauseCommas(checkNotNull(routed.hypothesis), samples, direction),
             // One frontend plus the dual task wall clock, never VI+EN summed.
             primaryAsrMs = routed.routing.frontendMs + routed.routing.dualAsrWallMs,
         )
@@ -360,6 +360,49 @@ internal class AutoHybridPipeline private constructor(
 
     override fun sourceTokens(text: String, direction: TranslationDirection): Int =
         branch(direction).mtSourceTokens(text)
+
+    override fun markPauses(
+        words: List<AsrWord>,
+        samples: FloatArray,
+        windowStart: Int,
+        direction: TranslationDirection,
+    ): List<AsrWord> {
+        if (direction != TranslationDirection.VI_TO_EN) return words
+        val (marked, detail) = PauseCommas.measure(
+            words, samples, windowStart, BuildConfig.VI_PAUSE_COMMA_MS, BuildConfig.VI_PAUSE_SENTENCE_MS,
+        )
+        if (detail.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "pause commas minMs=${BuildConfig.VI_PAUSE_COMMA_MS} " +
+                    "sentenceMs=${BuildConfig.VI_PAUSE_SENTENCE_MS} $detail",
+            )
+        }
+        return marked
+    }
+
+    /**
+     * One bounded utterance's transcript with pause commas (VI only). The
+     * tokens are the spoken pieces, while a library beam's transcript is
+     * already rewritten; both must name the same words, else the plain
+     * transcript is kept rather than risk a mismatch.
+     */
+    private fun withPauseCommas(
+        hypothesis: AsrHypothesis,
+        samples: FloatArray,
+        direction: TranslationDirection,
+    ): String {
+        if (direction != TranslationDirection.VI_TO_EN || BuildConfig.VI_PAUSE_COMMA_MS <= 0 ||
+            hypothesis.tokens.isEmpty()
+        ) {
+            return hypothesis.transcript
+        }
+        val words = wordsFromTokens(hypothesis.tokens, 0).filter { it.text != "<sos/eos>" }
+        if (viToEn.rewriteTerms(transcriptOf(words)) != viToEn.rewriteTerms(hypothesis.transcript)) {
+            return hypothesis.transcript
+        }
+        return transcriptOf(markPauses(words, samples, 0, direction))
+    }
 
     override fun hasPunctuation(direction: TranslationDirection): Boolean =
         branch(direction).asrEmitsPunctuation

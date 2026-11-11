@@ -41,6 +41,14 @@ internal interface LongTurnInference {
      * decoder's spoken token pieces, so the decoder's own rewrite is lost here.
      */
     fun displaySource(text: String, direction: TranslationDirection): String = text
+
+    /** [words] of one window with the pauses that become commas marked ([PauseCommas]). */
+    fun markPauses(
+        words: List<AsrWord>,
+        samples: FloatArray,
+        windowStart: Int,
+        direction: TranslationDirection,
+    ): List<AsrWord> = words
 }
 
 /** One window after ASR, for telemetry. */
@@ -316,7 +324,7 @@ internal class LongTurnCoordinator(
         } else {
             hypothesis = recognizeOrRecover(turn, samples, chunk) ?: return
         }
-        acceptWindow(turn, checkNotNull(turn.work), chunk, hypothesis, startedNs, submittedNs)
+        acceptWindow(turn, checkNotNull(turn.work), chunk, samples, hypothesis, startedNs, submittedNs)
     }
 
     /** Selected-branch ASR; on an NPU failure, rebuilds the turn on CPU. Null when that took over. */
@@ -336,11 +344,14 @@ internal class LongTurnCoordinator(
         turn: LongTurn,
         work: TurnWork,
         chunk: AudioChunk,
+        samples: FloatArray,
         hypothesis: AsrHypothesis,
         startedNs: Long,
         submittedNs: Long,
     ) {
-        val words = windowWords(hypothesis, chunk)
+        val words = inference.markPauses(
+            windowWords(hypothesis, chunk), samples, chunk.start, checkNotNull(turn.direction),
+        )
         val fresh = work.assembler.accept(chunk, words)
         work.processedChunks += chunk
         val units = work.builder.onCommitted(fresh, chunk.cut)
@@ -525,7 +536,7 @@ internal class LongTurnCoordinator(
             val startedNs = clockNs()
             val samples = turn.archive.window(chunk.start, chunk.end)
             val hypothesis = inference.recognize(samples, direction, ExecutionPath.CPU_FALLBACK)
-            acceptWindow(turn, work, chunk, hypothesis, startedNs, startedNs)
+            acceptWindow(turn, work, chunk, samples, hypothesis, startedNs, startedNs)
             if (turn.error != null) return
         }
     }

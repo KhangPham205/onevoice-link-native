@@ -562,8 +562,12 @@ internal class NpuPipeline private constructor(
 
     private fun mtInput(text: String): String {
         val rewritten = rnntDecoder?.rewrite(text) ?: text
-        return if (punctuateSource) VietnamesePunctuation.punctuate(rewritten) else rewritten
+        // ";" is PauseCommas' sentence mark; without the rules it is only a pause.
+        return if (punctuateSource) VietnamesePunctuation.punctuate(rewritten) else rewritten.replace(';', ',')
     }
+
+    /** The term library's spoken -> display rewrite alone, without punctuation. */
+    fun rewriteTerms(text: String): String = rnntDecoder?.rewrite(text) ?: text
 
     /** The term library's spoken -> display rewrite, for text shown to the person. */
     fun rewriteSource(text: String): String = mtInput(text)

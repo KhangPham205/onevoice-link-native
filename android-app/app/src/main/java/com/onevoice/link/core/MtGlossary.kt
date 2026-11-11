@@ -153,8 +153,11 @@ internal class MtGlossary(entries: List<Entry>) {
         val n = entry.words.size
         if (start + n > words.size) return false
         for (k in 0 until n) {
-            // Only the last word of a match may carry punctuation.
-            if (k < n - 1 && cores[start + k].length != words[start + k].length) return false
+            // Only the last word of a match may carry punctuation, except a
+            // pause comma (PauseCommas), which the placeholder then drops.
+            if (k < n - 1 && words[start + k] != cores[start + k] && words[start + k] != cores[start + k] + ",") {
+                return false
+            }
             val core = cores[start + k]
             val equal = if (entry.caseSensitive) core == entry.words[k] else core.equals(entry.words[k], ignoreCase = true)
             if (!equal) return false

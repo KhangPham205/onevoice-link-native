@@ -122,6 +122,8 @@ internal class AsrBiasList private constructor(
     val glossary: MtGlossary,
     /** EN->VI: an English speaker's term and its Vietnamese display (`e` lines). */
     val reverseGlossary: MtGlossary = MtGlossary(emptyList()),
+    /** First word -> every multi-word spoken term, rewritten or not, longest first. */
+    private val terms: Map<String, List<List<String>>> = emptyMap(),
 ) {
     companion object {
         fun parse(
@@ -134,6 +136,7 @@ internal class AsrBiasList private constructor(
             }
             val phrases = ArrayList<ContextGraph.Phrase>()
             val rules = HashMap<String, MutableList<Pair<List<String>, String?>>>()
+            val terms = HashMap<String, MutableList<List<String>>>()
             val glossary = ArrayList<MtGlossary.Entry>()
             val reverse = ArrayList<MtGlossary.Entry>()
             var ruleCount = 0
@@ -177,13 +180,15 @@ internal class AsrBiasList private constructor(
                 }
                 phrases += ContextGraph.Phrase(ids.toIntArray(), boost)
                 val words = spoken.lowercase().split(' ').filter(String::isNotEmpty)
+                if (words.size > 1) terms.getOrPut(words.first()) { ArrayList() } += words
                 if (rewriteText == "1" && words.isNotEmpty() && words.joinToString(" ") != display) {
                     rules.getOrPut(words.first()) { ArrayList() } += words to display
                     ruleCount++
                 }
             }
             rules.values.forEach { list -> list.sortByDescending { it.first.size } }
-            return AsrBiasList(phrases, rules, ruleCount, MtGlossary(glossary), MtGlossary(reverse))
+            terms.values.forEach { list -> list.sortByDescending { it.size } }
+            return AsrBiasList(phrases, rules, ruleCount, MtGlossary(glossary), MtGlossary(reverse), terms)
         }
     }
 
@@ -194,9 +199,13 @@ internal class AsrBiasList private constructor(
      * is safe.
      */
     fun rewrite(text: String): String {
-        if (rules.isEmpty()) return text
-        val words = text.split(' ').filter(String::isNotEmpty)
-        val lower = words.map(String::lowercase)
+        if (rules.isEmpty() && terms.isEmpty()) return text
+        val words = joinTerms(text.split(' ').filter(String::isNotEmpty))
+        // A pause comma (PauseCommas) may sit on any word: match on the words
+        // without it, keep the one after the term and drop one inside it
+        // ("chuyền, năm" is still "chuyền 5").
+        val cores = words.map { it.trimEnd(',', ';') }
+        val lower = cores.map(String::lowercase)
         val out = ArrayList<String>(words.size)
         var i = 0
         while (i < words.size) {
@@ -205,7 +214,9 @@ internal class AsrBiasList private constructor(
             }
             if (match != null) {
                 val n = match.first.size
-                out += match.second ?: words.subList(i, i + n).joinToString(" ")
+                val last = i + n - 1
+                out += match.second?.let { it + words[last].substring(cores[last].length) }
+                    ?: words.subList(i, i + n).joinToString(" ")
                 i += n
             } else {
                 out += words[i]
@@ -213,5 +224,28 @@ internal class AsrBiasList private constructor(
             }
         }
         return out.joinToString(" ")
+    }
+
+    /**
+     * Drops a pause comma (PauseCommas) that fell inside a listed term, kept
+     * or rewritten alike: "sơ đồ, cắt" is still the term "sơ đồ cắt".
+     */
+    private fun joinTerms(words: List<String>): List<String> {
+        if (terms.isEmpty() || words.none { it.endsWith(',') || it.endsWith(';') }) return words
+        val cores = words.map { it.trimEnd(',', ';').lowercase() }
+        val out = words.toMutableList()
+        var i = 0
+        while (i < words.size) {
+            val term = terms[cores[i]]?.firstOrNull { t ->
+                i + t.size <= words.size && t.indices.all { cores[i + it] == t[it] }
+            }
+            if (term == null) {
+                i++
+                continue
+            }
+            for (k in i until i + term.size - 1) out[k] = out[k].trimEnd(',', ';')
+            i += term.size
+        }
+        return out
     }
 }

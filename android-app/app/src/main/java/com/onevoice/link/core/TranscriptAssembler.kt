@@ -13,8 +13,18 @@ import kotlin.math.abs
  */
 internal data class AsrToken(val piece: String, val sampleOffset: Int)
 
-/** A whole word and the turn-absolute sample at which its first token was emitted. */
-internal data class AsrWord(val text: String, val startSample: Int)
+/**
+ * A whole word and the turn-absolute sample at which its first token was
+ * emitted. [pauseBefore]: a silence of at least the pause-comma length lies
+ * between the previous word and this one; [sentenceBefore]: one long enough
+ * to end a sentence ([PauseCommas]; VI only).
+ */
+internal data class AsrWord(
+    val text: String,
+    val startSample: Int,
+    val pauseBefore: Boolean = false,
+    val sentenceBefore: Boolean = false,
+)
 
 private const val WORD_MARK = '▁'
 
@@ -39,7 +49,25 @@ internal fun wordsFromTokens(tokens: List<AsrToken>, windowStart: Int): List<Asr
     return words
 }
 
-internal fun transcriptOf(words: List<AsrWord>): String = words.joinToString(" ") { it.text }
+/**
+ * The words as text, with a comma where [AsrWord.pauseBefore] marks a pause
+ * and a semicolon where [AsrWord.sentenceBefore] marks a sentence-length one.
+ * The semicolon is a boundary mark, not output: [VietnamesePunctuation] turns
+ * it into "." or "?" (NpuPipeline turns it into "," when that is off). Not
+ * right after the first word nor before the last: a pause there is a
+ * hesitation ("em... em sẽ"), not the end of a clause.
+ */
+internal fun transcriptOf(words: List<AsrWord>): String = buildString {
+    words.forEachIndexed { i, word ->
+        if (i > 0) {
+            if (word.pauseBefore && i >= 2 && i < words.lastIndex && last() !in ",.?!;:") {
+                append(if (word.sentenceBefore) ';' else ',')
+            }
+            append(' ')
+        }
+        append(word.text)
+    }
+}
 
 /**
  * Stitches per-window ASR words into one turn transcript.

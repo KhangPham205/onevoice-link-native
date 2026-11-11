@@ -105,6 +105,9 @@ Gradle properties that change runtime behavior:
                                        # vi-en/asr_gipformer_bias/. "Off" or false = greedy RNN-T as before
 -PviPunctuation=true                   # rule-based commas/full stops/question marks on the VI transcript
                                        # before Marian and on screen (VietnamesePunctuation); false = raw text
+-PviPauseCommaMs=250 -PviPauseSentenceMs=600
+                                       # VI speaker pauses (PauseCommas): >= 250 ms a comma, >= 600 ms a
+                                       # sentence end ("." or "?" by the question rules); 0 = off
 -PviTtsEngine=VIENEU                   # Vietnamese speech: VIENEU (VieNeu-TTS v3 Nano, default), KOKORO or
                                        # SUPERTONIC (Supertonic-3 int8). VIENEU needs build-sea-g2p-android.sh
                                        # (libsea_g2p_rs.so; the jniLibs merge refuses without it) and
