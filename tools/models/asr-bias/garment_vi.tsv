@@ -174,7 +174,7 @@ accessory	gói hút ẩm	gói hút ẩm | gói chống ẩm	desiccant pack	no		k
 fabric	cotton	cốt tông | cô tông	cotton	yes		keep	keep
 fabric	polyester	pô ly ét te | pô li ét te	polyester	yes		keep	keep
 fabric	spandex	sờ pan đếch | span đếch	spandex	yes		keep	keep
-fabric	kaki	ka ki	khaki	yes		keep	keep
+fabric	kaki	ka ki | caki | kha ki	khaki	yes		keep	keep
 fabric	vải jean	vải gin | vải din	denim	yes		keep	keep
 fabric	quần jean	quần gin | quần din	jeans	yes		keep	keep
 fabric	linen	li nen	linen	yes		keep	keep
